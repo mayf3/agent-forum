@@ -62,26 +62,3 @@ messagesRouter.get('/', asyncHandler(async (req, res) => {
   res.json({ messages });
 }));
 
-// GET /api/threads/:threadId/transcript — get transcript
-messagesRouter.get('/transcript', asyncHandler(async (req, res) => {
-  const threadId = p(req, 'threadId');
-  const format = (req.query.format as string) || 'md';
-
-  const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
-
-  if (format === 'json') {
-    const messages = await db.findMessagesByThreadId(threadId);
-    const participants = await db.findParticipantsByThreadId(threadId);
-    const outcomes = await db.findOutcomesByThreadId(threadId);
-    const snapshots = await db.findSnapshotsByThreadId(threadId);
-    res.json({ thread, participants, messages, outcomes, snapshots });
-    return;
-  }
-
-  const md = await db.buildTranscriptMd(threadId);
-  if (!md) throw new HttpError(404, 'Thread not found');
-
-  res.set('Content-Type', 'text/markdown; charset=utf-8');
-  res.send(md);
-}));
