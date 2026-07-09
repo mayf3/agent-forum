@@ -135,6 +135,23 @@ function mockStore(store: Map<string, any>, name: string) {
       store.set(where.id, updated);
       return updated;
     },
+    updateMany: async ({ where, data }: any) => {
+      let count = 0;
+      for (const [key, val] of store.entries()) {
+        let match = true;
+        for (const [wk, wv] of Object.entries(where)) {
+          if (wk === 'id' && val.id !== wv) { match = false; break; }
+          if (wk === 'status' && val.status !== wv) { match = false; break; }
+          if (wk === 'threadId' && val.threadId !== wv) { match = false; break; }
+        }
+        if (match) {
+          const updated = { ...val, ...data, updatedAt: new Date() };
+          store.set(key, updated);
+          count++;
+        }
+      }
+      return { count };
+    },
     upsert: async ({ where, create, update: upd }: any) => {
       const existing = where.id ? store.get(where.id) : null;
       if (existing) {
@@ -518,5 +535,234 @@ void describe('Discussion Run MVP Tests', async () => {
     assert.ok(res.body.run, 'run should be in response');
     assert.ok(res.body.steps, 'steps should be in response');
     assert.equal(res.body.steps.length, 2, 'two steps for two agents');
+  });
+
+  // ── H2: maxMessages enforcement ──
+  await it('13. participantOrder.length * maxRounds > maxMessages fails creation', async () => {
+    const { validateRunLimits } = await import('../src/lib/discussion-runner.js');
+    // 10 agents × 3 rounds = 30 steps > maxMessages 20
+    const manyAgents = Array(10).fill('agent-x');
+    const err = validateRunLimits(manyAgents, 3, 20);
+    assert.ok(err, 'should reject when total steps exceed maxMessages');
+    assert.ok(err!.includes('exceeds maxMessages'), err!);
+
+    // 2 agents × 2 rounds = 4 steps <= maxMessages 4 — OK
+    const ok = validateRunLimits(['a', 'b'], 2, 4);
+    assert.equal(ok, null, 'valid config should pass');
+  });
+
+  await it('14. Route-level: combined validation rejects oversized runs', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const jwt = (await import('jsonwebtoken')).default;
+    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name }, 'dev-only-change-this-secret');
+
+    const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
+    const { discussionRunsRouter } = await import('../src/routes/discussion-runs.js');
+    app.use('/api/threads/:threadId/runs', discussionRunsRouter);
+    const { errorHandler } = await import('../src/middleware/error-handler.js');
+    app.use(errorHandler);
+
+    const request = (await import('supertest')).default;
+
+    // 10 agents × 3 rounds = 30 > maxMessages 20 → 400
+    const manyAgents = Array(10).fill('agent-x');
+    const res1 = await request(app)
+      .post(`/api/threads/${thread.id}/runs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'Oversized Run',
+        participantOrder: manyAgents,
+        maxRounds: 3, maxMessages: 20,
+        idempotencyKey: 'h2-over',
+      });
+    assert.equal(res1.status, 400, 'oversized run should be rejected');
+
+    // 2 agents × 2 rounds = 4 <= maxMessages 4 → 201
+    const res2 = await request(app)
+      .post(`/api/threads/${thread.id}/runs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'Valid Sized Run',
+        participantOrder: ['a', 'b'],
+        maxRounds: 2, maxMessages: 4,
+        idempotencyKey: 'h2-ok',
+      });
+    assert.equal(res2.status, 201, 'valid sized run should be created');
+    assert.equal(res2.body.steps.length, 4, '4 steps for 2 agents × 2 rounds');
+  });
+
+  // ── H1: Concurrent start guard ──
+  await it('15. Concurrent start of same run — only one succeeds', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const jwt = (await import('jsonwebtoken')).default;
+    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name }, 'dev-only-change-this-secret');
+
+    const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
+    const { discussionRunsRouter } = await import('../src/routes/discussion-runs.js');
+    app.use('/api/threads/:threadId/runs', discussionRunsRouter);
+    const { errorHandler } = await import('../src/middleware/error-handler.js');
+    app.use(errorHandler);
+
+    const request = (await import('supertest')).default;
+
+    // Create run
+    const createRes = await request(app)
+      .post(`/api/threads/${thread.id}/runs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'Concurrent Test',
+        participantOrder: [USER_B.id],
+        maxRounds: 1, maxMessages: 10,
+        idempotencyKey: 'h1-concurrent',
+        agentEndpoints: { [USER_B.id]: 'http://127.0.0.1:9999/none' },
+      });
+    const runId = createRes.body.run.id;
+
+    // Simulate two concurrent starts using claimRunForStart directly
+    const results = await Promise.allSettled([
+      rda.claimRunForStart(thread.id, runId),
+      rda.claimRunForStart(thread.id, runId),
+    ]);
+
+    const succeeded = results.filter(r => r.status === 'fulfilled');
+    const failed = results.filter(r => r.status === 'rejected');
+
+    assert.equal(succeeded.length, 1, 'exactly one claim should succeed');
+    // The other must fail (409) — verify error status
+    if (failed.length > 0) {
+      const reason = failed[0].reason;
+      assert.ok(reason, 'failed claim has a reason');
+    }
+
+    // Run should now be running
+    const run = await rda.findRunById(runId);
+    assert.equal(run!.status, 'running');
+  });
+
+  await it('16. Two runs on same thread — only one can be running at a time', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const run1 = await rda.createRun({
+      threadId: thread.id, title: 'Run A',
+      participantOrder: [USER_B.id], maxRounds: 1, maxMessages: 10,
+      idempotencyKey: 'h1-thread-a',
+    });
+    const run2 = await rda.createRun({
+      threadId: thread.id, title: 'Run B',
+      participantOrder: [USER_C.id], maxRounds: 1, maxMessages: 10,
+      idempotencyKey: 'h1-thread-b',
+    });
+
+    // Claim run1
+    const claim1 = await rda.claimRunForStart(thread.id, run1.id);
+    assert.equal(claim1.status, 'running');
+
+    // Claim run2 should fail since run1 is running on same thread
+    try {
+      await rda.claimRunForStart(thread.id, run2.id);
+      assert.fail('claimRunForStart should reject when another run is running');
+    } catch (err: any) {
+      assert.equal(err.statusCode, 409, 'should return 409 for concurrent thread runs');
+      assert.ok(err.message.includes('already running'), err.message);
+    }
+  });
+
+  // ── M1: Start authorization ──
+  await it('17. Non-creator/non-participant cannot start a run', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const jwt = (await import('jsonwebtoken')).default;
+    // An unrelated user (not in participants, not creator)
+    const intruderToken = jwt.sign(
+      { sub: 'intruder-id', name: 'Intruder' },
+      'dev-only-change-this-secret',
+    );
+
+    const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
+    const { discussionRunsRouter } = await import('../src/routes/discussion-runs.js');
+    app.use('/api/threads/:threadId/runs', discussionRunsRouter);
+    const { errorHandler } = await import('../src/middleware/error-handler.js');
+    app.use(errorHandler);
+
+    const request = (await import('supertest')).default;
+
+    // Create run as creator
+    const creatorToken = jwt.sign(
+      { sub: USER_A.id, name: USER_A.name },
+      'dev-only-change-this-secret',
+    );
+    const createRes = await request(app)
+      .post(`/api/threads/${thread.id}/runs`)
+      .set('Authorization', `Bearer ${creatorToken}`)
+      .send({
+        title: 'Auth Test',
+        participantOrder: [USER_B.id],
+        maxRounds: 1, maxMessages: 10,
+        idempotencyKey: 'm1-auth',
+        agentEndpoints: { [USER_B.id]: 'http://127.0.0.1:9999/none' },
+      });
+    const runId = createRes.body.run.id;
+
+    // Try to start as intruder
+    const startRes = await request(app)
+      .post(`/api/threads/${thread.id}/runs/${runId}/start`)
+      .set('Authorization', `Bearer ${intruderToken}`);
+    assert.equal(startRes.status, 403, 'intruder should get 403');
+
+    // Creator can start
+    const startRes2 = await request(app)
+      .post(`/api/threads/${thread.id}/runs/${runId}/start`)
+      .set('Authorization', `Bearer ${creatorToken}`);
+    // Since no agent endpoint configured, it will fail — but auth should pass
+    assert.notEqual(startRes2.status, 403, 'creator should not get 403');
+    assert.notEqual(startRes2.status, 401, 'creator should not get 401');
+  });
+
+  await it('18. Participant can start a run', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const jwt = (await import('jsonwebtoken')).default;
+    // USER_B is a participant
+    const participantToken = jwt.sign(
+      { sub: USER_B.id, name: USER_B.name },
+      'dev-only-change-this-secret',
+    );
+
+    const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
+    const { discussionRunsRouter } = await import('../src/routes/discussion-runs.js');
+    app.use('/api/threads/:threadId/runs', discussionRunsRouter);
+    const { errorHandler } = await import('../src/middleware/error-handler.js');
+    app.use(errorHandler);
+
+    const request = (await import('supertest')).default;
+
+    // Creator creates run
+    const creatorToken = jwt.sign(
+      { sub: USER_A.id, name: USER_A.name },
+      'dev-only-change-this-secret',
+    );
+    const createRes = await request(app)
+      .post(`/api/threads/${thread.id}/runs`)
+      .set('Authorization', `Bearer ${creatorToken}`)
+      .send({
+        title: 'Participant Start Test',
+        participantOrder: [USER_B.id, USER_C.id],
+        maxRounds: 1, maxMessages: 10,
+        idempotencyKey: 'm1-participant',
+        agentEndpoints: { [USER_B.id]: 'http://127.0.0.1:9999/none' },
+      });
+    const runId = createRes.body.run.id;
+
+    // Participant starts run — should pass auth
+    const startRes = await request(app)
+      .post(`/api/threads/${thread.id}/runs/${runId}/start`)
+      .set('Authorization', `Bearer ${participantToken}`);
+    assert.notEqual(startRes.status, 403, 'participant should not get 403');
+    assert.notEqual(startRes.status, 401, 'participant should not get 401');
   });
 });

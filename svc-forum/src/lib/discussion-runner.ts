@@ -35,19 +35,21 @@ export function validateRunLimits(
   if (maxMessages < 1 || maxMessages > MAX_MESSAGES_LIMIT) {
     return `maxMessages must be between 1 and ${MAX_MESSAGES_LIMIT}`;
   }
+  // H2: participantOrder.length * maxRounds must not exceed maxMessages
+  const totalSteps = participantOrder.length * maxRounds;
+  if (totalSteps > maxMessages) {
+    return `participantOrder.length (${participantOrder.length}) × maxRounds (${maxRounds}) = ${totalSteps} exceeds maxMessages (${maxMessages})`;
+  }
   return null;
 }
 
 /**
  * Execute a full discussion run synchronously.
+ * The run must already be claimed (status = running) before calling this.
  * Iterates steps in seq order, calls agent endpoints, writes messages.
  */
 export async function executeRun(runId: string): Promise<void> {
-  // Mark run as running
-  await runsDb.updateRun(runId, {
-    status: 'running',
-    startedAt: new Date(),
-  });
+  // Run status is already 'running' — set by claimRunForStart
 
   const steps = await runsDb.findStepsByRunId(runId);
   if (steps.length === 0) {
@@ -103,36 +105,29 @@ export async function executeRun(runId: string): Promise<void> {
       await runsDb.updateStep(step.id, { invokedAt: new Date() });
       const agentResponse = await callAgentReply(endpointUrl, agentRequest);
 
-      // 4. Write forum message directly via data-access
-      // The runner is an internal module that has permission to write messages
-      // on behalf of agents. External callers use JWT auth (agent-auth.ts).
-      const message = await da.createMessage({
+      // 4. Atomically write message + mark step succeeded (M2)
+      // Uses a single Prisma transaction to prevent orphan messages
+      await runsDb.recordStepAndMessage(
+        runId,
+        step.id,
+        step.seq,
         threadId,
-        authorId: step.agentId,
-        authorName: step.agentName,
-        authorType: 'agent',
-        kind: agentResponse.kind || 'comment',
-        content: agentResponse.content,
-        mentions: agentResponse.mentions || [],
-      });
-
-      // 5. Mark step succeeded
-      await runsDb.updateStep(step.id, {
-        status: 'succeeded',
-        resultMessageId: message.id,
-        respondedAt: new Date(),
-        finishedAt: new Date(),
-      });
+        step.agentId,
+        step.agentName,
+        agentResponse.kind || 'comment',
+        agentResponse.content,
+        agentResponse.mentions || [],
+      );
     } catch (err: any) {
       allSucceeded = false;
       firstError = err.message || 'Unknown error';
 
-      await runsDb.updateStep(step.id, {
-        status: 'failed',
-        failureReason: err.message || 'Step failed',
-        errorDetail: err.stack || undefined,
-        finishedAt: new Date(),
-      });
+      await runsDb.markStepFailed(
+        runId,
+        step.id,
+        err.message || 'Step failed',
+        err.stack || undefined,
+      );
 
       // Stop on first failure
       break;

@@ -108,3 +108,139 @@ export async function withTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T
   const prisma = getPrisma();
   return prisma.$transaction(fn);
 }
+
+/**
+ * Atomically claim a run for starting.
+ * Uses updateMany with a status filter to ensure only one concurrent
+ * caller succeeds. Returns the claimed run or throws an error.
+ */
+export async function claimRunForStart(threadId: string, runId: string): Promise<any> {
+  const prisma = getPrisma();
+
+  return prisma.$transaction(async (tx) => {
+    // 1. Read target run
+    const run = await tx.discussionRun.findUnique({ where: { id: runId } });
+    if (!run) {
+      throw Object.assign(new Error('Run not found'), { statusCode: 404 });
+    }
+    if (run.threadId !== threadId) {
+      throw Object.assign(new Error('Run does not belong to this thread'), { statusCode: 400 });
+    }
+
+    // 2. Check run status
+    const terminalStatuses = ['succeeded', 'failed', 'cancelled'];
+    if (terminalStatuses.includes(run.status)) {
+      throw Object.assign(new Error(`Run already finished with status: ${run.status}`), { statusCode: 400 });
+    }
+    if (run.status === 'running') {
+      throw Object.assign(new Error('Run is already running'), { statusCode: 400 });
+    }
+
+    // 3. Check no other running run on same thread
+    const activeRun = await tx.discussionRun.findFirst({
+      where: { threadId, status: 'running', id: { not: runId } },
+    });
+    if (activeRun) {
+      throw Object.assign(
+        new Error(`Another run (${activeRun.id}) is already running for this thread`),
+        { statusCode: 409 },
+      );
+    }
+
+    // 4. Atomically claim — only updates if status is still 'queued'
+    const result = await tx.discussionRun.updateMany({
+      where: { id: runId, status: 'queued' },
+      data: { status: 'running', startedAt: new Date() },
+    });
+
+    if (result.count === 0) {
+      throw Object.assign(
+        new Error('Run was already claimed by another request'),
+        { statusCode: 409 },
+      );
+    }
+
+    return tx.discussionRun.findUnique({ where: { id: runId } });
+  });
+}
+
+/**
+ * Atomically record a step message and mark step succeeded.
+ * Combines message creation + step update + thread counter update
+ * in a single transaction to prevent orphan messages.
+ */
+export async function recordStepAndMessage(
+  runId: string,
+  stepId: string,
+  stepSeq: number,
+  threadId: string,
+  authorId: string,
+  authorName: string,
+  kind: string,
+  content: string,
+  mentions: string[],
+): Promise<{ message: any; step: any }> {
+  const prisma = getPrisma();
+
+  return prisma.$transaction(async (tx) => {
+    // 1. Get next seq for message
+    const lastMsg = await tx.forumThreadMessage.findFirst({
+      where: { threadId },
+      orderBy: { seq: 'desc' },
+      select: { seq: true },
+    });
+    const msgSeq = (lastMsg?.seq || 0) + 1;
+
+    // 2. Create message
+    const message = await tx.forumThreadMessage.create({
+      data: {
+        threadId,
+        seq: msgSeq,
+        authorId,
+        authorName,
+        authorType: 'agent',
+        kind,
+        content,
+        mentions,
+      },
+    });
+
+    // 3. Update thread messageCount and lastMessageAt
+    const msgCount = await tx.forumThreadMessage.count({
+      where: { threadId, deletedAt: null },
+    });
+    await tx.forumThread.update({
+      where: { id: threadId },
+      data: { messageCount: msgCount, lastMessageAt: new Date() },
+    });
+
+    // 4. Update step
+    const step = await tx.discussionRunStep.update({
+      where: { id: stepId },
+      data: {
+        status: 'succeeded',
+        resultMessageId: message.id,
+        respondedAt: new Date(),
+        finishedAt: new Date(),
+      },
+    });
+
+    return { message, step };
+  });
+}
+
+/**
+ * Atomically mark a step as failed (without a message).
+ */
+export async function markStepFailed(runId: string, stepId: string, failureReason: string, errorDetail?: string) {
+  const prisma = getPrisma();
+  return prisma.discussionRunStep.update({
+    where: { id: stepId },
+    data: {
+      status: 'failed',
+      failureReason,
+      errorDetail: errorDetail || null,
+      finishedAt: new Date(),
+    },
+  });
+}

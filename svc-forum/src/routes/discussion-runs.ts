@@ -109,25 +109,28 @@ discussionRunsRouter.post('/:runId/start', asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const runId = p(req, 'runId');
 
-  const run = await runsDb.findRunById(runId);
-  if (!run) throw new HttpError(404, 'Run not found');
-  if (run.threadId !== threadId) throw new HttpError(400, 'Run does not belong to this thread');
+  // M1: Verify caller is thread creator or participant
+  const thread = await db.findThreadById(threadId);
+  if (!thread) throw new HttpError(404, 'Thread not found');
 
-  // Validate run status
-  if (run.status === 'succeeded' || run.status === 'failed') {
-    throw new HttpError(400, `Run already finished with status: ${run.status}`);
-  }
-  if (run.status === 'cancelled') {
-    throw new HttpError(400, 'Run is cancelled and cannot be started');
-  }
-  if (run.status === 'running') {
-    throw new HttpError(400, 'Run is already running');
+  const callerId = req.user!.id;
+  const isCreator = thread.createdById === callerId;
+  const participants = await db.findParticipantsByThreadId(threadId);
+  const isParticipant = participants.some(p => p.agentId === callerId);
+  if (!isCreator && !isParticipant) {
+    throw new HttpError(403, 'Only thread creator or participants can start a run');
   }
 
-  // Check no other active run for this thread
-  const activeRun = await runsDb.findActiveRunByThreadId(threadId);
-  if (activeRun && activeRun.id !== runId) {
-    throw new HttpError(409, `Another run (${activeRun.id}) is already running for this thread`);
+  // H1: Atomically claim run for start — prevents concurrent execution
+  let claimedRun: any;
+  try {
+    claimedRun = await runsDb.claimRunForStart(threadId, runId);
+  } catch (err: any) {
+    // Re-throw HttpError-compatible errors from claimRunForStart
+    if (err.statusCode) {
+      throw new HttpError(err.statusCode, err.message);
+    }
+    throw err;
   }
 
   // Execute run (synchronous MVP)
