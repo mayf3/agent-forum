@@ -10,5 +10,9 @@ export const env = z
     AUTH_JWT_ISSUER: z.string().default('auth-service'),
     AUTH_JWT_AUDIENCE: z.string().default('agent-platform'),
     CORS_ORIGINS: z.string().default('http://localhost:3460,http://localhost:3000'),
+
+    // Discussion Runner
+    ENABLE_DEV_AGENT_JWT_MINT: z.string().default('true').transform(v => v === 'true'),
+    AGENT_REPLY_TIMEOUT_MS: z.coerce.number().default(30000),
   })
   .parse(process.env);

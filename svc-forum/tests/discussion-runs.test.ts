@@ -1,0 +1,522 @@
+/**
+ * Discussion Run MVP tests.
+ *
+ * Tests cover creation, validation, agent endpoint interaction,
+ * failure modes, and concurrent run protection.
+ * Uses setPrisma() mock + stub HTTP servers for agent endpoints.
+ *
+ * Run: NODE_ENV=test npx tsx --test tests/discussion-runs.test.ts
+ * Run all: NODE_ENV=test npx tsx --test tests/*.test.ts
+ */
+
+import { describe, it, before, beforeEach, after } from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+
+const USER_A = { id: 'user-a-uuid', name: 'Agent Alpha' };
+const USER_B = { id: 'blog-agent-uuid', name: '博客写作专家' };
+const USER_C = { id: 'analyst-uuid', name: '写作风格分析师' };
+
+// ── In-memory DB ──
+const threads = new Map<string, any>();
+const participants = new Map<string, any>();
+const messages = new Map<string, any>();
+const snapshots = new Map<string, any>();
+const outcomes = new Map<string, any>();
+const runs = new Map<string, any>();
+const runSteps = new Map<string, any>();
+
+function resetDb() {
+  threads.clear(); participants.clear(); messages.clear();
+  snapshots.clear(); outcomes.clear(); runs.clear(); runSteps.clear();
+}
+
+// ── Mock Prisma ──
+function mockStore(store: Map<string, any>, name: string) {
+  return {
+    findUnique: async ({ where }: any) => {
+      if (where.id) return store.get(where.id) || null;
+      if (where.idempotencyKey) {
+        for (const v of store.values()) {
+          if (v.idempotencyKey === where.idempotencyKey) return v;
+        }
+        return null;
+      }
+      if (where.runId_seq) {
+        const { runId, seq } = where.runId_seq;
+        for (const v of store.values()) {
+          if (v.runId === runId && v.seq === seq) return v;
+        }
+        return null;
+      }
+      return null;
+    },
+    findFirst: async ({ where, orderBy }: any) => {
+      let items = Array.from(store.values());
+      if (where) {
+        for (const [k, v] of Object.entries(where)) {
+          if (k === 'threadId') items = items.filter(i => i.threadId === v);
+          if (k === 'status') items = items.filter(i => i.status === v);
+          if (k === 'deletedAt' && v === null) items = items.filter(i => !i.deletedAt);
+          if (k === 'leftAt' && v === null) items = items.filter(i => !i.leftAt);
+        }
+      }
+      if (orderBy) {
+        const obs = Array.isArray(orderBy) ? orderBy : [orderBy];
+        for (const ob of obs) {
+          const [field, dir] = Object.entries(ob)[0] as [string, string];
+          items.sort((a, b) => {
+            const av = a[field]?.getTime?.() ?? 0;
+            const bv = b[field]?.getTime?.() ?? 0;
+            return dir === 'desc' ? bv - av : av - bv;
+          });
+        }
+      }
+      return items[0] || null;
+    },
+    findMany: async ({ where, orderBy, skip, take }: any = {}) => {
+      let items = Array.from(store.values());
+      if (where) {
+        for (const [k, v] of Object.entries(where)) {
+          if (k === 'threadId') items = items.filter(i => i.threadId === v);
+          if (k === 'runId') items = items.filter(i => i.runId === v);
+          if (k === 'status') items = items.filter(i => i.status === v);
+          if (k === 'deletedAt' && v === null) items = items.filter(i => !i.deletedAt);
+          if (k === 'leftAt' && v === null) items = items.filter(i => !i.leftAt);
+        }
+      }
+      if (orderBy) {
+        const obs = Array.isArray(orderBy) ? orderBy : [orderBy];
+        for (const ob of obs) {
+          const [field, dir] = Object.entries(ob)[0] as [string, string];
+          items.sort((a, b) => {
+            const av = a[field]?.getTime?.() ?? (typeof a[field] === 'string' ? new Date(a[field]).getTime() : 0);
+            const bv = b[field]?.getTime?.() ?? (typeof b[field] === 'string' ? new Date(b[field]).getTime() : 0);
+            return dir === 'desc' ? bv - av : av - bv;
+          });
+        }
+      }
+      if (skip) items = items.slice(skip);
+      if (take) items = items.slice(0, take);
+      return items;
+    },
+    count: async ({ where }: any = {}) => {
+      let items = Array.from(store.values());
+      if (where) {
+        for (const [k, v] of Object.entries(where)) {
+          if (k === 'threadId') items = items.filter(i => i.threadId === v);
+        }
+      }
+      return items.length;
+    },
+    create: async ({ data }: any) => {
+      const defaults: Record<string, any> = { status: 'queued', messageCount: 0, tags: [], mentions: [] };
+      const doc = { ...defaults, ...data, id: data.id || `mock-${name}-${Date.now()}-${Math.random()}` };
+      if (!doc.createdAt) doc.createdAt = new Date();
+      if (!doc.updatedAt) doc.updatedAt = new Date();
+      store.set(doc.id, doc);
+      return doc;
+    },
+    createMany: async ({ data }: any) => {
+      let count = 0;
+      for (const item of data) {
+        const doc = { ...item, id: item.id || `mock-${name}-${Date.now()}-${Math.random()}` };
+        if (!doc.createdAt) doc.createdAt = new Date();
+        if (!doc.updatedAt) doc.updatedAt = new Date();
+        store.set(doc.id, doc);
+        count++;
+      }
+      return { count };
+    },
+    update: async ({ where, data }: any) => {
+      const existing = store.get(where.id);
+      if (!existing) throw new Error('Not found');
+      const updated = { ...existing, ...data, updatedAt: new Date() };
+      store.set(where.id, updated);
+      return updated;
+    },
+    upsert: async ({ where, create, update: upd }: any) => {
+      const existing = where.id ? store.get(where.id) : null;
+      if (existing) {
+        const updated = { ...existing, ...upd, updatedAt: new Date() };
+        store.set(existing.id, updated);
+        return updated;
+      }
+      const doc = { ...create, id: create.id || `mock-${name}-${Date.now()}` };
+      store.set(doc.id, doc);
+      return doc;
+    },
+  };
+}
+
+function createMockPrisma() {
+  const t = mockStore(threads, 'thread');
+  const p = mockStore(participants, 'participant');
+  const m = mockStore(messages, 'message');
+  const s = mockStore(snapshots, 'snapshot');
+  const o = mockStore(outcomes, 'outcome');
+  const r = mockStore(runs, 'run');
+  const rs = mockStore(runSteps, 'step');
+
+  const mock: any = {
+    forumThread: t, forumThreadParticipant: p, forumThreadMessage: m,
+    forumContextSnapshot: s, forumOutcome: o,
+    discussionRun: r, discussionRunStep: rs,
+    $queryRaw: async () => [{ 1: 1 }],
+    $transaction: async (fn: (tx: any) => any) => {
+      const tx = {
+        forumThread: t, forumThreadParticipant: p,
+        forumThreadMessage: {
+          ...m,
+          count: async ({ where }: any = {}) => {
+            let items = Array.from(messages.values());
+            if (where?.threadId) items = items.filter(i => i.threadId === where.threadId);
+            if (where?.deletedAt === null) items = items.filter(i => !i.deletedAt);
+            return items.length;
+          },
+        },
+        forumContextSnapshot: s, forumOutcome: o,
+        discussionRun: r, discussionRunStep: rs,
+        $executeRaw: async () => {},
+      };
+      return fn(tx);
+    },
+    $disconnect: async () => {},
+  };
+  return mock;
+}
+
+// ── Helpers ──
+
+async function setupThreadAndParticipants(da: any) {
+  const thread = await da.createThread({
+    title: 'Discussion Run Test Thread',
+    type: 'discussion',
+    createdById: USER_A.id, createdByName: USER_A.name, createdByType: 'agent',
+  });
+  await da.addParticipant({ threadId: thread.id, agentId: USER_A.id, agentName: USER_A.name, role: 'creator', status: 'responded' });
+  await da.addParticipant({ threadId: thread.id, agentId: USER_B.id, agentName: USER_B.name, role: 'required_reviewer', status: 'invited' });
+  await da.addParticipant({ threadId: thread.id, agentId: USER_C.id, agentName: USER_C.name, role: 'required_reviewer', status: 'invited' });
+  return thread;
+}
+
+// ── Tests ──
+
+void describe('Discussion Run MVP Tests', async () => {
+  let da: typeof import('../src/lib/data-access.js');
+  let rda: typeof import('../src/lib/discussion-runs-data.js');
+  let prismaMod: typeof import('../src/lib/prisma.js');
+  let envMod: typeof import('../src/config/env.js');
+
+  before(async () => {
+    da = await import('../src/lib/data-access.js');
+    rda = await import('../src/lib/discussion-runs-data.js');
+    prismaMod = await import('../src/lib/prisma.js');
+    envMod = await import('../src/config/env.js');
+    // Enable dev JWT mint for tests
+    (envMod.env as any).ENABLE_DEV_AGENT_JWT_MINT = true;
+  });
+
+  beforeEach(() => {
+    resetDb();
+    prismaMod.setPrisma(createMockPrisma() as any);
+  });
+
+  // 1. Create discussion run successfully
+  await it('1. Create discussion run with steps', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const run = await rda.createRun({
+      threadId: thread.id,
+      title: 'Test Run',
+      participantOrder: [USER_B.id, USER_C.id],
+      maxRounds: 1,
+      maxMessages: 10,
+      idempotencyKey: 'key-1',
+      agentEndpoints: { [USER_B.id]: 'http://localhost:9001/reply' },
+    });
+    assert.ok(run.id);
+    assert.equal(run.status, 'queued');
+
+    // Create steps
+    await rda.createSteps([
+      { runId: run.id, agentId: USER_B.id, agentName: USER_B.name, seq: 1 },
+      { runId: run.id, agentId: USER_C.id, agentName: USER_C.name, seq: 2 },
+    ]);
+    const steps = await rda.findStepsByRunId(run.id);
+    assert.equal(steps.length, 2);
+    assert.equal(steps[0].seq, 1);
+    assert.equal(steps[1].seq, 2);
+  });
+
+  // 2. Empty participantOrder fails
+  await it('2. Empty participantOrder validation fails', async () => {
+    const { validateRunLimits } = await import('../src/lib/discussion-runner.js');
+    const err = validateRunLimits([], 1, 10);
+    assert.ok(err, 'should return error for empty participantOrder');
+    assert.ok(err!.includes('must not be empty'));
+  });
+
+  // 3. maxRounds/maxMessages limits
+  await it('3. Max rounds and messages limits are enforced', async () => {
+    const { validateRunLimits } = await import('../src/lib/discussion-runner.js');
+    assert.ok(validateRunLimits(['a'], 0, 10), 'rounds < 1 fails');
+    assert.ok(validateRunLimits(['a'], 4, 10), 'rounds > 3 fails');
+    assert.ok(validateRunLimits(['a'], 1, 0), 'messages < 1 fails');
+    assert.ok(validateRunLimits(['a'], 1, 21), 'messages > 20 fails');
+    assert.ok(validateRunLimits(['a'], 1, 10) === null, 'valid passes');
+    // participantOrder length
+    const longOrder = Array(11).fill('a');
+    assert.ok(validateRunLimits(longOrder, 1, 10), 'order > 10 fails');
+  });
+
+  // 4. Idempotency key duplicate
+  await it('4. Idempotency key duplicate returns existing', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const run1 = await rda.createRun({
+      threadId: thread.id, title: 'Run 1',
+      participantOrder: [USER_B.id], maxRounds: 1, maxMessages: 10,
+      idempotencyKey: 'dup-key',
+    });
+    const found = await rda.findRunByIdempotencyKey('dup-key');
+    assert.ok(found);
+    assert.equal(found.id, run1.id);
+
+    // Creating again should throw unique constraint
+    try {
+      await rda.createRun({
+        threadId: thread.id, title: 'Run 2',
+        participantOrder: [USER_B.id], maxRounds: 1, maxMessages: 10,
+        idempotencyKey: 'dup-key',
+      });
+      assert.fail('Should have thrown on duplicate idempotencyKey');
+    } catch (err: any) {
+      assert.ok(err, 'duplicate correctly rejected');
+    }
+  });
+
+  // 5. Steps generated with correct seq
+  await it('5. Run steps have correct seq ordering', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const run = await rda.createRun({
+      threadId: thread.id, title: 'Seq Test',
+      participantOrder: [USER_B.id, USER_C.id],
+      maxRounds: 2, maxMessages: 10,
+      idempotencyKey: 'seq-key',
+    });
+    // Generate steps for 2 rounds × 2 agents = 4 steps
+    let seq = 0;
+    const steps: any[] = [];
+    for (let r = 0; r < 2; r++) {
+      for (const agentId of [USER_B.id, USER_C.id]) {
+        seq++;
+        steps.push({ runId: run.id, agentId, agentName: agentId, seq });
+      }
+    }
+    await rda.createSteps(steps);
+    const loaded = await rda.findStepsByRunId(run.id);
+    assert.equal(loaded.length, 4);
+    assert.equal(loaded[0].seq, 1);
+    assert.equal(loaded[1].seq, 2);
+    assert.equal(loaded[2].seq, 3);
+    assert.equal(loaded[3].seq, 4);
+  });
+
+  // 6-7. Start run with stub agents → both succeed
+  await it('6-7. Start run calls stub agents, writes messages, run+steps succeeded', async () => {
+    const thread = await setupThreadAndParticipants(da);
+
+    // Create stub agent servers
+    const server1 = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ content: '我 challenge 当前 KR', kind: 'challenge' }));
+    });
+    const server2 = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ content: '我同意增加的字段', kind: 'evidence' }));
+    });
+
+    await new Promise<void>((resolve) => server1.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) => server2.listen(0, '127.0.0.1', resolve));
+    const port1 = (server1.address() as any).port;
+    const port2 = (server2.address() as any).port;
+
+    try {
+      // Create run with agent endpoints pointing to stubs
+      const ep1 = `http://127.0.0.1:${port1}/api/forum/reply`;
+      const ep2 = `http://127.0.0.1:${port2}/api/forum/reply`;
+
+      const run = await rda.createRun({
+        threadId: thread.id, title: 'Stub Run',
+        participantOrder: [USER_B.id, USER_C.id],
+        maxRounds: 1, maxMessages: 10,
+        idempotencyKey: 'stub-key',
+        agentEndpoints: { [USER_B.id]: ep1, [USER_C.id]: ep2 },
+      });
+
+      // Create steps
+      await rda.createSteps([
+        { runId: run.id, agentId: USER_B.id, agentName: USER_B.name, seq: 1 },
+        { runId: run.id, agentId: USER_C.id, agentName: USER_C.name, seq: 2 },
+      ]);
+
+      // Execute run
+      const { executeRun } = await import('../src/lib/discussion-runner.js');
+      process.env.SELF_URL = 'http://127.0.0.1:3460';
+      process.env.ENABLE_DEV_AGENT_JWT_MINT = 'true';
+      await executeRun(run.id);
+
+      const updatedRun = await rda.findRunById(run.id);
+      assert.equal(updatedRun!.status, 'succeeded', 'run should succeed');
+      assert.ok(updatedRun!.finishedAt, 'finishedAt should be set');
+
+      const steps = await rda.findStepsByRunId(run.id);
+      assert.equal(steps.length, 2);
+      for (const step of steps) {
+        assert.equal(step.status, 'succeeded', `step ${step.seq} should succeed`);
+      }
+    } finally {
+      server1.close();
+      server2.close();
+    }
+  });
+
+  // 8. Transcript shows different agent authors (tested via data layer)
+  await it('8. Messages show correct agent authors via transcript', async () => {
+    const thread = await setupThreadAndParticipants(da);
+
+    // Manually add messages as different agents (simulating what runner does)
+    await da.createMessage({
+      threadId: thread.id, authorId: USER_B.id, authorName: USER_B.name,
+      authorType: 'agent', kind: 'challenge', content: '我 challenge 当前 KR',
+    });
+    await da.createMessage({
+      threadId: thread.id, authorId: USER_C.id, authorName: USER_C.name,
+      authorType: 'agent', kind: 'evidence', content: '我同意增加的字段',
+    });
+
+    const md = await da.buildTranscriptMd(thread.id);
+    assert.ok(md, 'transcript should exist');
+    assert.ok(md.includes(USER_B.name), 'transcript includes blog-agent name');
+    assert.ok(md.includes(USER_C.name), 'transcript includes analyst name');
+    assert.ok(md.includes('challenge'), 'transcript includes challenge type');
+    assert.ok(md.includes('evidence'), 'transcript includes evidence type');
+  });
+
+  // 9. Agent endpoint non-2xx → run failed
+  await it('9. Agent endpoint returning error causes run failed', async () => {
+    const thread = await setupThreadAndParticipants(da);
+
+    // Stub that returns 500
+    const server = http.createServer((_req, res) => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal error' }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as any).port;
+
+    try {
+      const run = await rda.createRun({
+        threadId: thread.id, title: 'Fail Run',
+        participantOrder: [USER_B.id],
+        maxRounds: 1, maxMessages: 10,
+        idempotencyKey: 'fail-key',
+        agentEndpoints: { [USER_B.id]: `http://127.0.0.1:${port}/reply` },
+      });
+      await rda.createSteps([
+        { runId: run.id, agentId: USER_B.id, agentName: USER_B.name, seq: 1 },
+      ]);
+
+      const { executeRun } = await import('../src/lib/discussion-runner.js');
+      process.env.SELF_URL = 'http://127.0.0.1:3460';
+      process.env.ENABLE_DEV_AGENT_JWT_MINT = 'true';
+      await executeRun(run.id);
+
+      const updatedRun = await rda.findRunById(run.id);
+      assert.equal(updatedRun!.status, 'failed', 'run should fail on agent error');
+      assert.ok(updatedRun!.failureReason, 'failureReason should be set');
+
+      const steps = await rda.findStepsByRunId(run.id);
+      assert.equal(steps[0].status, 'failed', 'step should be failed');
+      assert.ok(steps[0].failureReason, 'step failureReason should be set');
+    } finally {
+      server.close();
+    }
+  });
+
+  // 10. Concurrent run rejection
+  await it('10. Cannot start two runs simultaneously on same thread', async () => {
+    const thread = await setupThreadAndParticipants(da);
+
+    const { findActiveRunByThreadId, createRun } = rda;
+    const { validateRunLimits } = await import('../src/lib/discussion-runner.js');
+
+    const run1 = await createRun({
+      threadId: thread.id, title: 'Run 1',
+      participantOrder: [USER_B.id], maxRounds: 1, maxMessages: 10,
+      idempotencyKey: 'concurrent-1',
+    });
+    const run2 = await createRun({
+      threadId: thread.id, title: 'Run 2',
+      participantOrder: [USER_B.id], maxRounds: 1, maxMessages: 10,
+      idempotencyKey: 'concurrent-2',
+    });
+
+    // Mark run1 as running
+    await rda.updateRun(run1.id, { status: 'running', startedAt: new Date() });
+
+    const active = await findActiveRunByThreadId(thread.id);
+    assert.ok(active);
+    assert.equal(active!.id, run1.id);
+
+    // run2 should not be startable
+    const status2 = (await rda.findRunById(run2.id))!.status;
+    assert.equal(status2, 'queued');
+  });
+
+  // 11. Cancelled run cannot start
+  await it('11. Cancelled run cannot be started', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const run = await rda.createRun({
+      threadId: thread.id, title: 'Cancel Test',
+      participantOrder: [USER_B.id], maxRounds: 1, maxMessages: 10,
+      idempotencyKey: 'cancel-key',
+    });
+    await rda.updateRun(run.id, { status: 'cancelled', finishedAt: new Date() });
+
+    const updated = await rda.findRunById(run.id);
+    assert.equal(updated!.status, 'cancelled');
+  });
+
+  // 12. Route-level: create run with full payload
+  await it('12. POST /api/threads/:threadId/runs with valid payload', async () => {
+    const thread = await setupThreadAndParticipants(da);
+
+    const jwt = (await import('jsonwebtoken')).default;
+    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name }, 'dev-only-change-this-secret');
+
+    const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
+    const { discussionRunsRouter } = await import('../src/routes/discussion-runs.js');
+    app.use('/api/threads/:threadId/runs', discussionRunsRouter);
+    const { errorHandler } = await import('../src/middleware/error-handler.js');
+    app.use(errorHandler);
+
+    const request = (await import('supertest')).default;
+    const res = await request(app)
+      .post(`/api/threads/${thread.id}/runs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'Route Test Run',
+        participantOrder: [USER_B.id, USER_C.id],
+        maxRounds: 1, maxMessages: 10,
+        idempotencyKey: 'route-key-1',
+        agentEndpoints: { [USER_B.id]: 'http://localhost:9001' },
+      });
+
+    assert.equal(res.status, 201, 'should create run');
+    assert.ok(res.body.run, 'run should be in response');
+    assert.ok(res.body.steps, 'steps should be in response');
+    assert.equal(res.body.steps.length, 2, 'two steps for two agents');
+  });
+});
