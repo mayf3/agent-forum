@@ -513,6 +513,74 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
     assert.equal(byAgent.items[0].id, t1.id);
   });
 
+  // ── 13-14. Route-level transcript endpoint verification ──
+  // These tests prove the spec path GET /api/threads/:threadId/transcript works
+  await it('13. GET /api/threads/:threadId/transcript?format=md returns markdown', async () => {
+    const thread = await da.createThread({
+      title: 'Route Transcript', type: 'discussion',
+      createdById: USER_A.id, createdByName: USER_A.name, createdByType: 'agent',
+    });
+    await da.createMessage({
+      threadId: thread.id, authorId: USER_A.id, authorName: USER_A.name,
+      authorType: 'agent', kind: 'comment', content: 'Route-level test message',
+    });
+
+    // Sign a test JWT matching the default dev secret from env.ts
+    const jwt = (await import('jsonwebtoken')).default;
+    const token = jwt.sign(
+      { sub: USER_A.id, name: USER_A.name },
+      'dev-only-change-this-secret'
+    );
+
+    const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
+    // Mount threads router directly (it uses authRequired internally)
+    const { threadsRouter } = await import('../src/routes/threads.js');
+    app.use('/api/threads', threadsRouter);
+    const { errorHandler } = await import('../src/middleware/error-handler.js');
+    app.use(errorHandler);
+
+    const request = (await import('supertest')).default;
+    const res = await request(app)
+      .get(`/api/threads/${thread.id}/transcript?format=md`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(res.status, 200, 'transcript md endpoint should return 200');
+    assert.ok(res.text.includes('Route Transcript'), 'md body contains thread title');
+    assert.ok(res.text.includes('Route-level test message'), 'md body contains message');
+    assert.ok(res.headers['content-type']?.includes('text/markdown'), 'response is markdown');
+  });
+
+  await it('14. GET /api/threads/:threadId/transcript?format=json returns JSON', async () => {
+    const thread = await da.createThread({
+      title: 'Route Transcript JSON', type: 'discussion',
+      createdById: USER_A.id, createdByName: USER_A.name, createdByType: 'agent',
+    });
+
+    const jwt = (await import('jsonwebtoken')).default;
+    const token = jwt.sign(
+      { sub: USER_A.id, name: USER_A.name },
+      'dev-only-change-this-secret'
+    );
+
+    const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
+    const { threadsRouter } = await import('../src/routes/threads.js');
+    app.use('/api/threads', threadsRouter);
+    const { errorHandler } = await import('../src/middleware/error-handler.js');
+    app.use(errorHandler);
+
+    const request = (await import('supertest')).default;
+    const res = await request(app)
+      .get(`/api/threads/${thread.id}/transcript?format=json`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(res.status, 200, 'transcript json endpoint should return 200');
+    assert.equal(res.body.thread?.title, 'Route Transcript JSON');
+    assert.ok(Array.isArray(res.body.messages), 'messages is an array');
+    assert.ok(Array.isArray(res.body.participants), 'participants is an array');
+  });
+
   // ── 12. Search ──
   await it('12. Search finds thread title and message content', async () => {
     const thread = await da.createThread({
