@@ -32,6 +32,7 @@ model ForumThread {
   messages     ForumThreadMessage[]
   snapshots    ForumContextSnapshot[]
   outcomes     ForumOutcome[]
+  runs         DiscussionRun[]
 
   @@index([status])
   @@index([type])
@@ -122,4 +123,66 @@ model ForumOutcome {
 
   @@index([threadId])
   @@map("forum_outcomes")
+}
+
+model DiscussionRun {
+  id               String   @id @default(uuid()) @db.Uuid
+  threadId         String   @db.Uuid
+  thread           ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  title            String
+  description      String?  @db.Text
+
+  participantOrder String[]
+  maxRounds        Int      @default(1)
+  maxMessages      Int      @default(20)
+
+  status           String   @default("queued")
+  failureReason    String?  @db.Text
+  errorDetail      String?  @db.Text
+
+  idempotencyKey   String   @unique
+  source           String?
+
+  agentEndpoints   Json?
+
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  steps            DiscussionRunStep[]
+
+  @@index([threadId])
+  @@index([status])
+  @@map("discussion_runs")
+}
+
+model DiscussionRunStep {
+  id               String   @id @default(uuid()) @db.Uuid
+  runId            String   @db.Uuid
+  run              DiscussionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  agentId          String
+  agentName        String
+  instruction      String?  @db.Text
+  seq              Int
+
+  status           String   @default("queued")
+  failureReason    String?  @db.Text
+  errorDetail      String?  @db.Text
+
+  resultMessageId  String?  @db.Uuid
+
+  invokedAt        DateTime?
+  respondedAt      DateTime?
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([runId, seq])
+  @@index([runId])
+  @@index([agentId])
+  @@map("discussion_run_steps")
 }
