@@ -127,7 +127,7 @@ export async function claimRunForStart(threadId: string, runId: string): Promise
       throw Object.assign(new Error('Run does not belong to this thread'), { statusCode: 400 });
     }
 
-    // 2. Check run status
+    // 2. Check run status (non-terminal, not already running)
     const terminalStatuses = ['succeeded', 'failed', 'cancelled'];
     if (terminalStatuses.includes(run.status)) {
       throw Object.assign(new Error(`Run already finished with status: ${run.status}`), { statusCode: 400 });
@@ -136,28 +136,32 @@ export async function claimRunForStart(threadId: string, runId: string): Promise
       throw Object.assign(new Error('Run is already running'), { statusCode: 400 });
     }
 
-    // 3. Check no other running run on same thread
-    const activeRun = await tx.discussionRun.findFirst({
-      where: { threadId, status: 'running', id: { not: runId } },
-    });
-    if (activeRun) {
-      throw Object.assign(
-        new Error(`Another run (${activeRun.id}) is already running for this thread`),
-        { statusCode: 409 },
-      );
-    }
+    // 3. Atomically claim via updateMany + partial unique index
+    // The partial unique index "discussion_runs_one_running_per_thread"
+    // ensures at most one 'running' row per threadId at the DB level,
+    // replacing the unsafe read-then-check pattern.
+    try {
+      const result = await tx.discussionRun.updateMany({
+        where: { id: runId, status: 'queued' },
+        data: { status: 'running', startedAt: new Date() },
+      });
 
-    // 4. Atomically claim — only updates if status is still 'queued'
-    const result = await tx.discussionRun.updateMany({
-      where: { id: runId, status: 'queued' },
-      data: { status: 'running', startedAt: new Date() },
-    });
-
-    if (result.count === 0) {
-      throw Object.assign(
-        new Error('Run was already claimed by another request'),
-        { statusCode: 409 },
-      );
+      if (result.count === 0) {
+        throw Object.assign(
+          new Error('Run was already claimed by another request'),
+          { statusCode: 409 },
+        );
+      }
+    } catch (err: any) {
+      // P2002 = unique constraint violation from the partial unique index.
+      // This fires when another run on the same thread already has status='running'.
+      if (err?.code === 'P2002') {
+        throw Object.assign(
+          new Error('Another run is already running for this thread'),
+          { statusCode: 409 },
+        );
+      }
+      throw err; // unknown error — rethrow
     }
 
     return tx.discussionRun.findUnique({ where: { id: runId } });

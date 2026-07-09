@@ -137,6 +137,8 @@ function mockStore(store: Map<string, any>, name: string) {
     },
     updateMany: async ({ where, data }: any) => {
       let count = 0;
+      const updatedEntries: Array<{ key: string; val: any }> = [];
+
       for (const [key, val] of store.entries()) {
         let match = true;
         for (const [wk, wv] of Object.entries(where)) {
@@ -146,9 +148,31 @@ function mockStore(store: Map<string, any>, name: string) {
         }
         if (match) {
           const updated = { ...val, ...data, updatedAt: new Date() };
-          store.set(key, updated);
+          updatedEntries.push({ key, val: updated });
           count++;
         }
+      }
+
+      // Simulate partial unique index: if setting status='running', check
+      // no other run on same thread already has status='running'
+      if (data.status === 'running') {
+        const threadId = where.threadId || (updatedEntries[0]?.val.threadId);
+        if (threadId) {
+          for (const [key, val] of store.entries()) {
+            if (val.threadId === threadId && val.status === 'running') {
+              // Would violate unique index — throw P2002
+              const err: any = new Error('Unique constraint failed');
+              err.code = 'P2002';
+              err.meta = { target: ['discussion_runs_one_running_per_thread'] };
+              throw err;
+            }
+          }
+        }
+      }
+
+      // Apply updates
+      for (const { key, val } of updatedEntries) {
+        store.set(key, val);
       }
       return { count };
     },
@@ -720,6 +744,46 @@ void describe('Discussion Run MVP Tests', async () => {
     // Since no agent endpoint configured, it will fail — but auth should pass
     assert.notEqual(startRes2.status, 403, 'creator should not get 403');
     assert.notEqual(startRes2.status, 401, 'creator should not get 401');
+  });
+
+  await it('19. Concurrent cross-run start — two different runs on same thread, only one succeeds', async () => {
+    const thread = await setupThreadAndParticipants(da);
+
+    const run1 = await rda.createRun({
+      threadId: thread.id, title: 'Cross Run A',
+      participantOrder: [USER_B.id], maxRounds: 1, maxMessages: 10,
+      idempotencyKey: 'h1-cross-a',
+    });
+    const run2 = await rda.createRun({
+      threadId: thread.id, title: 'Cross Run B',
+      participantOrder: [USER_C.id], maxRounds: 1, maxMessages: 10,
+      idempotencyKey: 'h1-cross-b',
+    });
+
+    // Concurrent claim of two DIFFERENT runs on the SAME thread
+    const results = await Promise.allSettled([
+      rda.claimRunForStart(thread.id, run1.id),
+      rda.claimRunForStart(thread.id, run2.id),
+    ]);
+
+    const succeeded = results.filter(r => r.status === 'fulfilled');
+    const failed = results.filter(r => r.status === 'rejected');
+
+    assert.equal(succeeded.length, 1, 'exactly one cross-run claim should succeed');
+    assert.equal(failed.length, 1, 'the other cross-run claim should fail');
+
+    // The failed one should be 409
+    const reason = (failed[0] as PromiseRejectedResult).reason;
+    assert.equal(reason.statusCode || 409, 409, 'failed cross-run claim should be 409');
+    assert.ok(reason.message?.includes('already running'), reason.message);
+
+    // Final state: exactly one run is running
+    const finalRuns = await Promise.all([
+      rda.findRunById(run1.id),
+      rda.findRunById(run2.id),
+    ]);
+    const runningCount = finalRuns.filter(r => r?.status === 'running').length;
+    assert.equal(runningCount, 1, 'at most one run can be running per thread');
   });
 
   await it('18. Participant can start a run', async () => {
