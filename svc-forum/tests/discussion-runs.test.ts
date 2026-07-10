@@ -258,8 +258,11 @@ void describe('Discussion Run MVP Tests', async () => {
     (envMod.env as any).ENABLE_DEV_AGENT_JWT_MINT = true;
     // Use dev-jwt auth mode for existing tests that don't have auth-service stub
     (envMod.env as any).AGENT_AUTH_MODE = 'dev-jwt';
-    // Allow all endpoints in tests (SSRF protection is tested separately)
-    (envMod.env as any).ALLOWED_AGENT_ENDPOINT_PATTERNS = '*';
+    // Default allowlist for tests: localhost only (any port/path).
+    // This is NOT a global wildcard — it constrains tests to localhost.
+    // Metadata IPs, file://, and other blocked patterns are still rejected
+    // via the pre-allowlist blocklist checks (see endpoint-allowlist.ts).
+    (envMod.env as any).ALLOWED_AGENT_ENDPOINT_PATTERNS = 'http://127.0.0.1:*/*,http://localhost:*/*';
   });
 
   beforeEach(() => {
@@ -385,10 +388,21 @@ void describe('Discussion Run MVP Tests', async () => {
     const port1 = (server1.address() as any).port;
     const port2 = (server2.address() as any).port;
 
+    // Set precise allowlist based on actual stub server ports (audit: no global wildcard)
+    const savedAllowlist = (envMod.env as any).ALLOWED_AGENT_ENDPOINT_PATTERNS;
+    (envMod.env as any).ALLOWED_AGENT_ENDPOINT_PATTERNS = `http://127.0.0.1:${port1}/*,http://127.0.0.1:${port2}/*`;
+
     try {
       // Create run with agent endpoints pointing to stubs
       const ep1 = `http://127.0.0.1:${port1}/api/forum/reply`;
       const ep2 = `http://127.0.0.1:${port2}/api/forum/reply`;
+
+      // Verify endpoints pass the explicit (non-wildcard) allowlist
+      const { validateEndpoint } = await import('../src/lib/endpoint-allowlist.js');
+      const v1 = validateEndpoint(ep1);
+      assert.equal(v1.valid, true, `endpoint ${ep1} should be allowlisted`);
+      const v2 = validateEndpoint(ep2);
+      assert.equal(v2.valid, true, `endpoint ${ep2} should be allowlisted`);
 
       const run = await rda.createRun({
         threadId: thread.id, title: 'Stub Run',
@@ -420,6 +434,7 @@ void describe('Discussion Run MVP Tests', async () => {
         assert.equal(step.status, 'succeeded', `step ${step.seq} should succeed`);
       }
     } finally {
+      (envMod.env as any).ALLOWED_AGENT_ENDPOINT_PATTERNS = savedAllowlist;
       server1.close();
       server2.close();
     }
@@ -459,6 +474,10 @@ void describe('Discussion Run MVP Tests', async () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as any).port;
 
+    // Set precise allowlist based on actual stub server port (audit: no global wildcard)
+    const savedAllowlist = (envMod.env as any).ALLOWED_AGENT_ENDPOINT_PATTERNS;
+    (envMod.env as any).ALLOWED_AGENT_ENDPOINT_PATTERNS = `http://127.0.0.1:${port}/*`;
+
     try {
       const run = await rda.createRun({
         threadId: thread.id, title: 'Fail Run',
@@ -484,6 +503,7 @@ void describe('Discussion Run MVP Tests', async () => {
       assert.equal(steps[0].status, 'failed', 'step should be failed');
       assert.ok(steps[0].failureReason, 'step failureReason should be set');
     } finally {
+      (envMod.env as any).ALLOWED_AGENT_ENDPOINT_PATTERNS = savedAllowlist;
       server.close();
     }
   });
@@ -556,7 +576,7 @@ void describe('Discussion Run MVP Tests', async () => {
         participantOrder: [USER_B.id, USER_C.id],
         maxRounds: 1, maxMessages: 10,
         idempotencyKey: 'route-key-1',
-        agentEndpoints: { [USER_B.id]: 'http://localhost:9001' },
+        agentEndpoints: { [USER_B.id]: 'http://localhost:9001/' },
       });
 
     assert.equal(res.status, 201, 'should create run');
