@@ -145,6 +145,15 @@ model DiscussionRun {
   source           String?
 
   agentEndpoints   Json?
+  agentAuthTokens  Json?
+
+  runnerMode       String?  @default("async")
+  queuedAt         DateTime?
+  claimedAt        DateTime?
+  leaseExpiresAt   DateTime?
+  attemptCount     Int      @default(0)
+  maxAttempts      Int      @default(3)
+  authMode         String?
 
   startedAt        DateTime?
   finishedAt       DateTime?
