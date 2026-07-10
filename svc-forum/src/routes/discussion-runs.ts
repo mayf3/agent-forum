@@ -4,11 +4,20 @@ import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
 import * as db from '../lib/data-access.js';
 import * as runsDb from '../lib/discussion-runs-data.js';
-import { validateRunLimits, executeRun } from '../lib/discussion-runner.js';
+import { validateRunLimits, enqueueRun } from '../lib/discussion-runner.js';
+import { validateAllEndpoints } from '../lib/endpoint-allowlist.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
   const v = req.params[key];
   return Array.isArray(v) ? v[0] : v;
+}
+
+/** Strip sensitive fields from a run object before returning to client */
+function scrubRun(run: any): any {
+  if (!run) return run;
+  const scrubbed = { ...run };
+  delete scrubbed.agentAuthTokens;
+  return scrubbed;
 }
 
 export const discussionRunsRouter = Router({ mergeParams: true });
@@ -23,7 +32,7 @@ discussionRunsRouter.post('/', asyncHandler(async (req, res) => {
 
   const {
     title, description, participantOrder, maxRounds, maxMessages,
-    idempotencyKey, agentEndpoints,
+    idempotencyKey, agentEndpoints, agentAuthTokens,
   } = req.body;
 
   if (!title || !title.trim()) throw new HttpError(400, 'title is required');
@@ -36,10 +45,15 @@ discussionRunsRouter.post('/', asyncHandler(async (req, res) => {
   const validationError = validateRunLimits(order, mRounds, mMessages);
   if (validationError) throw new HttpError(400, validationError);
 
+  // Validate agent endpoints against allowlist
+  if (agentEndpoints) {
+    validateAllEndpoints(agentEndpoints);
+  }
+
   // Idempotency check
   const existing = await runsDb.findRunByIdempotencyKey(idempotencyKey);
   if (existing) {
-    res.status(200).json({ run: existing });
+    res.status(200).json({ run: scrubRun(existing) });
     return;
   }
 
@@ -49,7 +63,6 @@ discussionRunsRouter.post('/', asyncHandler(async (req, res) => {
   for (const p of participants) {
     agentNameMap.set(p.agentId, p.agentName);
   }
-  // Also add creator
   agentNameMap.set(thread.createdById, thread.createdByName);
 
   const run = await runsDb.createRun({
@@ -63,6 +76,11 @@ discussionRunsRouter.post('/', asyncHandler(async (req, res) => {
     source: req.body.source || null,
     agentEndpoints: agentEndpoints || null,
   });
+
+  // Store agent auth tokens separately (scrubbed from API responses)
+  if (agentAuthTokens) {
+    await runsDb.updateRun(run.id, { agentAuthTokens });
+  }
 
   // Generate steps: participantOrder × maxRounds
   let seq = 0;
@@ -82,18 +100,18 @@ discussionRunsRouter.post('/', asyncHandler(async (req, res) => {
   }
   await runsDb.createSteps(steps);
 
-  // Reload with steps
+  // Reload with steps, but scrub agentAuthTokens from response
   const fullRun = await runsDb.findRunById(run.id);
   const createdSteps = await runsDb.findStepsByRunId(run.id);
 
-  res.status(201).json({ run: fullRun, steps: createdSteps });
+  res.status(201).json({ run: scrubRun(fullRun), steps: createdSteps });
 }));
 
 // GET /api/threads/:threadId/runs — list runs
 discussionRunsRouter.get('/', asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const runs = await runsDb.findRunsByThreadId(threadId);
-  res.json({ runs });
+  res.json({ runs: runs.map(scrubRun) });
 }));
 
 // GET /api/threads/:threadId/runs/:runId — get run
@@ -101,7 +119,7 @@ discussionRunsRouter.get('/:runId', asyncHandler(async (req, res) => {
   const runId = p(req, 'runId');
   const run = await runsDb.findRunById(runId);
   if (!run) throw new HttpError(404, 'Run not found');
-  res.json({ run });
+  res.json({ run: scrubRun(run) });
 }));
 
 // POST /api/threads/:threadId/runs/:runId/start — start a run
@@ -133,14 +151,16 @@ discussionRunsRouter.post('/:runId/start', asyncHandler(async (req, res) => {
     throw err;
   }
 
-  // Execute run (synchronous MVP)
-  // In production, this should be async (job queue)
-  await executeRun(runId);
+  // Enqueue run for async execution
+  // POST /start returns immediately; worker processes steps in background.
+  enqueueRun(runId);
 
   const updatedRun = await runsDb.findRunById(runId);
-  const steps = await runsDb.findStepsByRunId(runId);
 
-  res.json({ run: updatedRun, steps });
+  res.status(202).json({
+    run: scrubRun(updatedRun),
+    message: 'Run accepted for async execution',
+  });
 }));
 
 // PATCH /api/threads/:threadId/runs/:runId — update run (cancel)
@@ -161,7 +181,7 @@ discussionRunsRouter.patch('/:runId', asyncHandler(async (req, res) => {
       status: 'cancelled',
       finishedAt: new Date(),
     });
-    res.json({ run: updated });
+    res.json({ run: scrubRun(updated) });
     return;
   }
 

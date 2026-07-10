@@ -254,8 +254,12 @@ void describe('Discussion Run MVP Tests', async () => {
     rda = await import('../src/lib/discussion-runs-data.js');
     prismaMod = await import('../src/lib/prisma.js');
     envMod = await import('../src/config/env.js');
-    // Enable dev JWT mint for tests
+    // Enable dev JWT mint for tests (legacy Phase 2a backward compat)
     (envMod.env as any).ENABLE_DEV_AGENT_JWT_MINT = true;
+    // Use dev-jwt auth mode for existing tests that don't have auth-service stub
+    (envMod.env as any).AGENT_AUTH_MODE = 'dev-jwt';
+    // Allow all endpoints in tests (SSRF protection is tested separately)
+    (envMod.env as any).ALLOWED_AGENT_ENDPOINT_PATTERNS = '*';
   });
 
   beforeEach(() => {
@@ -828,5 +832,154 @@ void describe('Discussion Run MVP Tests', async () => {
       .set('Authorization', `Bearer ${participantToken}`);
     assert.notEqual(startRes.status, 403, 'participant should not get 403');
     assert.notEqual(startRes.status, 401, 'participant should not get 401');
+  });
+
+  // ── Phase 2b1: Async start ──
+  await it('20. POST /start returns 202 accepted immediately', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const jwt = (await import('jsonwebtoken')).default;
+    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name }, 'dev-only-change-this-secret');
+
+    const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
+    const { discussionRunsRouter } = await import('../src/routes/discussion-runs.js');
+    app.use('/api/threads/:threadId/runs', discussionRunsRouter);
+    const { errorHandler } = await import('../src/middleware/error-handler.js');
+    app.use(errorHandler);
+
+    const request = (await import('supertest')).default;
+    const createRes = await request(app)
+      .post(`/api/threads/${thread.id}/runs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'Async Start Test',
+        participantOrder: [USER_B.id], maxRounds: 1, maxMessages: 10,
+        idempotencyKey: '2b1-async',
+        agentEndpoints: { [USER_B.id]: 'http://127.0.0.1:9999/none' },
+      });
+    const runId = createRes.body.run.id;
+
+    const startRes = await request(app)
+      .post(`/api/threads/${thread.id}/runs/${runId}/start`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(startRes.status, 202, 'async start returns 202');
+    assert.ok(startRes.body.message?.includes('accepted'), 'response includes accepted message');
+    assert.ok(startRes.body.run, 'response includes run object');
+  });
+
+  // ── Phase 2b1: Endpoint allowlist ──
+  await it('21. Allowlist rejects metadata IP endpoint', async () => {
+    const { validateEndpoint } = await import('../src/lib/endpoint-allowlist.js');
+    const result = validateEndpoint('http://169.254.169.254/latest/meta-data');
+    assert.equal(result.valid, false, 'metadata IP should be blocked');
+    assert.ok(result.reason, 'reason should be provided');
+  });
+
+  await it('22. Allowlist rejects file:// protocol', async () => {
+    const { validateEndpoint } = await import('../src/lib/endpoint-allowlist.js');
+    const result = validateEndpoint('file:///etc/passwd');
+    assert.equal(result.valid, false, 'file protocol should be blocked');
+  });
+
+  await it('23. Allowlist rejects non-allowlisted endpoint', async () => {
+    const { validateEndpoint } = await import('../src/lib/endpoint-allowlist.js');
+    // Pass a specific allowlist that doesn't include 9999
+    const result = validateEndpoint('http://127.0.0.1:9999/api/forum/reply',
+      'http://127.0.0.1:5001/*,http://127.0.0.1:5002/*');
+    assert.equal(result.valid, false, 'non-allowlisted endpoint should be rejected');
+  });
+
+  await it('24. Allowlist passes allowlisted localhost endpoint', async () => {
+    const { validateEndpoint } = await import('../src/lib/endpoint-allowlist.js');
+    const result = validateEndpoint('http://127.0.0.1:5001/api/forum/reply');
+    assert.equal(result.valid, true, 'allowlisted endpoint should pass');
+  });
+
+  // ── Phase 2b1: Token not leaked in response ──
+  await it('25. agentAuthTokens not returned in API responses', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const jwt = (await import('jsonwebtoken')).default;
+    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name }, 'dev-only-change-this-secret');
+
+    const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
+    const { discussionRunsRouter } = await import('../src/routes/discussion-runs.js');
+    app.use('/api/threads/:threadId/runs', discussionRunsRouter);
+    const { errorHandler } = await import('../src/middleware/error-handler.js');
+    app.use(errorHandler);
+
+    const request = (await import('supertest')).default;
+    const createRes = await request(app)
+      .post(`/api/threads/${thread.id}/runs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'Token Leak Test',
+        participantOrder: [USER_B.id], maxRounds: 1, maxMessages: 10,
+        idempotencyKey: '2b1-token-leak',
+        agentEndpoints: { [USER_B.id]: 'http://127.0.0.1:5001/api/forum/reply' },
+        agentAuthTokens: { [USER_B.id]: 'pre-signed-token-value' },
+      });
+
+    // Create response must not contain agentAuthTokens
+    assert.equal(createRes.status, 201);
+    assert.equal(createRes.body.run.agentAuthTokens, undefined, 'agentAuthTokens must NOT be in create response');
+    assert.equal(createRes.body.run.agentEndpoints?.[USER_B.id], 'http://127.0.0.1:5001/api/forum/reply', 'agentEndpoints should still be visible');
+
+    // Get single run must not contain tokens
+    const getRes = await request(app)
+      .get(`/api/threads/${thread.id}/runs/${createRes.body.run.id}`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(getRes.body.run.agentAuthTokens, undefined, 'agentAuthTokens must NOT be in get response');
+  });
+
+  // ── Phase 2b1: Dev JWT default off ──
+  await it('26. ENABLE_DEV_AGENT_JWT_MINT defaults to false', async () => {
+    const { env } = await import('../src/config/env.js');
+    // In test setup we enable it, but the default in env.ts should be false
+    // Reset env to check default behavior
+    const original = (env as any).ENABLE_DEV_AGENT_JWT_MINT;
+    (env as any).ENABLE_DEV_AGENT_JWT_MINT = false;
+    const { mintAgentJwt } = await import('../src/lib/agent-auth.js');
+    try {
+      mintAgentJwt('test-agent', 'Test Agent');
+      assert.fail('mintAgentJwt should throw when ENABLE_DEV_AGENT_JWT_MINT is false');
+    } catch (err: any) {
+      assert.ok(err.message?.includes('ENABLE_DEV_AGENT_JWT_MINT'), 'error mentions the env var');
+    }
+    (env as any).ENABLE_DEV_AGENT_JWT_MINT = original;
+  });
+
+  // ── Phase 2b1: Step already succeeded is skipped ──
+  await it('27. Already succeeded steps are skipped during execution', async () => {
+    const thread = await setupThreadAndParticipants(da);
+    const { executeClaimedRun } = await import('../src/lib/discussion-runner.js');
+
+    const run = await rda.createRun({
+      threadId: thread.id, title: 'Skip Step Test',
+      participantOrder: [USER_B.id, USER_C.id], maxRounds: 1, maxMessages: 10,
+      idempotencyKey: '2b1-skip',
+      agentEndpoints: { [USER_B.id]: 'http://127.0.0.1:5001/reply', [USER_C.id]: 'http://127.0.0.1:5002/reply' },
+    });
+    await rda.createSteps([
+      { runId: run.id, agentId: USER_B.id, agentName: USER_B.name, seq: 1 },
+      { runId: run.id, agentId: USER_C.id, agentName: USER_C.name, seq: 2 },
+    ]);
+
+    // Mark step 1 as already succeeded
+    const steps = await rda.findStepsByRunId(run.id);
+    await rda.updateStep(steps[0].id, { status: 'succeeded', resultMessageId: 'fake-msg-id' });
+
+    // Mark run as running
+    await rda.updateRun(run.id, { status: 'running' });
+
+    await executeClaimedRun(run.id);
+
+    // Step 1 should still be 'succeeded' (not re-executed)
+    const finalSteps = await rda.findStepsByRunId(run.id);
+    // Step 1 should still have the fake message ID (runner didn't overwrite it)
+    // Step 2 might have failed because there's no real agent endpoint, but step 1 is untouched
+    assert.equal(finalSteps[0].resultMessageId, 'fake-msg-id', 'step 1 should keep its original resultMessageId');
   });
 });

@@ -1,8 +1,9 @@
 /**
- * Minimal Agent HTTP client.
+ * Agent HTTP client.
  *
- * Calls a remote agent HTTP endpoint to get a reply for a discussion run step.
+ * Calls a remote agent HTTP endpoint to get a forum reply.
  * The agent receives the current transcript and returns content + kind.
+ * Authorization is via a bearer token (obtained from auth-service token-login).
  *
  * TODO: Production — replace with authenticated service-to-service call
  *       (mTLS / signed assertion / auth-service token exchange).
@@ -11,6 +12,7 @@
 import { env } from '../config/env.js';
 
 export interface AgentRequest {
+  protocolVersion: string;
   threadId: string;
   runId: string;
   stepId: string;
@@ -35,20 +37,30 @@ const ALLOWED_KINDS = [
 
 /**
  * Call an agent's HTTP endpoint to get a forum reply.
+ * Uses bearer token from Authorization header.
  * Returns the agent's response or throws on failure.
  */
 export async function callAgentReply(
   endpointUrl: string,
   request: AgentRequest,
+  accessToken?: string,
   timeoutMs: number = env.AGENT_REPLY_TIMEOUT_MS,
 ): Promise<AgentResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (accessToken) {
+    headers['Authorization'] = `Bearer ${accessToken}`;
+  }
+
   try {
     const res = await fetch(endpointUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(request),
       signal: controller.signal,
     });

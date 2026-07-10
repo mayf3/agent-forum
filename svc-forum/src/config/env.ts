@@ -12,7 +12,15 @@ export const env = z
     CORS_ORIGINS: z.string().default('http://localhost:3460,http://localhost:3000'),
 
     // Discussion Runner
-    ENABLE_DEV_AGENT_JWT_MINT: z.string().default('true').transform(v => v === 'true'),
+    ENABLE_DEV_AGENT_JWT_MINT: z.string().default('false').transform(v => v === 'true'),
     AGENT_REPLY_TIMEOUT_MS: z.coerce.number().default(30000),
+
+    // Auth service integration
+    AUTH_SERVICE_URL: z.string().default('http://localhost:3457'),
+    AGENT_AUTH_MODE: z.enum(['auth-service-token-login', 'dev-jwt']).default('auth-service-token-login'),
+
+    // Agent endpoint allowlist (comma-separated URL patterns, e.g. "http://127.0.0.1:5001/*,http://127.0.0.1:5002/*")
+    // Default allows common local dev ports. Set to empty to deny all remote endpoints.
+    ALLOWED_AGENT_ENDPOINT_PATTERNS: z.string().default('http://127.0.0.1:5001/*,http://127.0.0.1:5002/*,http://localhost:5001/*,http://localhost:5002/*'),
   })
   .parse(process.env);
