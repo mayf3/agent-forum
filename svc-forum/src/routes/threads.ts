@@ -3,6 +3,7 @@ import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
 import * as db from '../lib/data-access.js';
+import * as rt from '../lib/review-tasks-data.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
   const v = req.params[key];
@@ -48,6 +49,10 @@ threadsRouter.post('/', asyncHandler(async (req, res) => {
         role: p.role || 'member',
         status: p.status || 'invited',
       });
+      // Auto-create review task for required_reviewer
+      if (p.role === 'required_reviewer') {
+        await rt.ensureReviewTask(thread.id, p.agentId || user.id);
+      }
     }
   }
 
@@ -149,6 +154,9 @@ threadsRouter.post('/:threadId/resolve', asyncHandler(async (req, res) => {
     createdById: user.id,
     createdByName: user.name,
   });
+
+  // Cancel any open review tasks for this thread
+  await rt.cancelAllOpenTasksForThread(thread.id);
 
   // Resolve thread
   const updated = await db.updateThread(thread.id, {

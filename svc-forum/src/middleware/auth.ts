@@ -7,7 +7,14 @@ import { asyncHandler } from '../utils/async-handler.js';
 declare global {
   namespace Express {
     interface Request {
-      user?: { id: string; name: string; role?: string; source?: string; permissions?: string[] };
+      user?: {
+        id: string;
+        name: string;
+        role?: string;
+        source?: string;
+        permissions?: string[];
+        agentId?: string;
+      };
     }
   }
 }
@@ -27,7 +34,7 @@ export const authRequired = asyncHandler(async (req: Request, _res: Response, ne
   }
 
   let payload: jwt.JwtPayload & {
-    sub?: string; name?: string; role?: string; permissions?: string[];
+    sub?: string; name?: string; role?: string; permissions?: string[]; agentId?: string;
   } | null = null;
 
   // Priority 1: auth-service JWT
@@ -72,6 +79,7 @@ export const authRequired = asyncHandler(async (req: Request, _res: Response, ne
     role: payload!.role,
     source: 'jwt',
     permissions: payload!.permissions || [],
+    agentId: payload!.agentId,
   };
 
   next();
@@ -91,7 +99,7 @@ export const authOptional = asyncHandler(async (req: Request, _res: Response, ne
           issuer: env.AUTH_JWT_ISSUER,
           audience: env.AUTH_JWT_AUDIENCE,
         }) as any;
-        req.user = { id: payload.sub || '', name: payload.name || '', role: payload.role, source: 'auth-service', permissions: payload.permissions || [] };
+        req.user = { id: payload.sub || '', name: payload.name || '', role: payload.role, source: 'auth-service', permissions: payload.permissions || [], agentId: payload.agentId };
         return next();
       } catch {
         // fall through
@@ -99,9 +107,9 @@ export const authOptional = asyncHandler(async (req: Request, _res: Response, ne
     }
 
     const payload = jwt.verify(token, env.JWT_SECRET) as jwt.JwtPayload & {
-      sub?: string; name?: string; role?: string;
+      sub?: string; name?: string; role?: string; agentId?: string;
     };
-    req.user = { id: payload.sub || '', name: payload.name || '', role: payload.role, source: 'adc' };
+    req.user = { id: payload.sub || '', name: payload.name || '', role: payload.role, source: 'adc', agentId: payload.agentId };
   } catch {
     // Silently ignore
   }
