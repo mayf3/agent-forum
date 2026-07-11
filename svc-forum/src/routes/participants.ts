@@ -4,6 +4,7 @@ import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
 import { getPrisma } from '../lib/prisma.js';
 import * as db from '../lib/data-access.js';
+import * as rt from '../lib/review-tasks-data.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
   const v = req.params[key];
@@ -39,6 +40,11 @@ participantsRouter.post('/', asyncHandler(async (req, res) => {
     status: status || 'invited',
   });
 
+  // Auto-create review task for required_reviewer
+  if (role === 'required_reviewer' && thread.status !== 'resolved' && thread.status !== 'archived') {
+    await rt.ensureReviewTask(threadId, agentId);
+  }
+
   res.status(201).json({ participant });
 }));
 
@@ -72,6 +78,15 @@ participantsRouter.patch('/:participantId', asyncHandler(async (req, res) => {
   }
 
   const participant = await db.updateParticipant(participantId, updateData);
+
+  // If role changed to required_reviewer, auto-create review task
+  if (updateData.role === 'required_reviewer' && existing.role !== 'required_reviewer') {
+    const thread = await db.findThreadById(threadId);
+    if (thread && thread.status !== 'resolved' && thread.status !== 'archived') {
+      await rt.ensureReviewTask(threadId, existing.agentId);
+    }
+  }
+
   res.json({ participant });
 }));
 
@@ -160,6 +175,9 @@ participantsRouter.post('/:agentId/waive-review', asyncHandler(async (req, res) 
     reviewWaivedById: user.id,
     reviewWaiverReason: reason.trim(),
   });
+
+  // Cancel any open review tasks for this reviewer
+  await rt.cancelTasksForAgent(threadId, agentId);
 
   res.json({
     participant: {

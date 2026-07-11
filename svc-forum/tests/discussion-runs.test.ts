@@ -25,10 +25,11 @@ const snapshots = new Map<string, any>();
 const outcomes = new Map<string, any>();
 const runs = new Map<string, any>();
 const runSteps = new Map<string, any>();
+const reviewTasks = new Map<string, any>();
 
 function resetDb() {
   threads.clear(); participants.clear(); messages.clear();
-  snapshots.clear(); outcomes.clear(); runs.clear(); runSteps.clear();
+  snapshots.clear(); outcomes.clear(); runs.clear(); runSteps.clear(); reviewTasks.clear();
 }
 
 // ── Mock Prisma ──
@@ -46,6 +47,13 @@ function mockStore(store: Map<string, any>, name: string) {
         const { runId, seq } = where.runId_seq;
         for (const v of store.values()) {
           if (v.runId === runId && v.seq === seq) return v;
+        }
+        return null;
+      }
+      if (where.threadId_assigneeAgentId) {
+        const { threadId, assigneeAgentId } = where.threadId_assigneeAgentId;
+        for (const v of store.values()) {
+          if (v.threadId === threadId && v.assigneeAgentId === assigneeAgentId) return v;
         }
         return null;
       }
@@ -198,11 +206,13 @@ function createMockPrisma() {
   const o = mockStore(outcomes, 'outcome');
   const r = mockStore(runs, 'run');
   const rs = mockStore(runSteps, 'step');
+  const rt = mockStore(reviewTasks, 'reviewTask');
 
   const mock: any = {
     forumThread: t, forumThreadParticipant: p, forumThreadMessage: m,
     forumContextSnapshot: s, forumOutcome: o,
     discussionRun: r, discussionRunStep: rs,
+    forumReviewTask: rt,
     $queryRaw: async () => [{ 1: 1 }],
     $transaction: async (fn: (tx: any) => any) => {
       const tx = {
@@ -216,7 +226,7 @@ function createMockPrisma() {
             return items.length;
           },
         },
-        forumContextSnapshot: s, forumOutcome: o,
+        forumContextSnapshot: s, forumOutcome: o, forumReviewTask: rt,
         discussionRun: r, discussionRunStep: rs,
         $executeRaw: async () => {},
       };
