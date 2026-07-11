@@ -26,6 +26,18 @@ messagesRouter.post('/', asyncHandler(async (req, res) => {
     throw new HttpError(400, 'content is required');
   }
 
+  // Decision gate: all required reviewers must be satisfied
+  if (kind === 'decision') {
+    const readiness = await db.getThreadReviewReadiness(threadId);
+    if (readiness && !readiness.ready) {
+      res.status(409).json({
+        error: 'Required reviewers have not completed review',
+        pendingReviewerIds: readiness.pendingReviewerIds,
+      });
+      return;
+    }
+  }
+
   if (parentId) {
     const prisma = getPrisma();
     const parentMsg = await prisma.forumThreadMessage.findFirst({

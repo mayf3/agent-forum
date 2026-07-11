@@ -272,6 +272,89 @@ export async function searchAll(q: string) {
   return { threads, messages, outcomes };
 }
 
+// ── Review Readiness ────────────────────────────────────────
+
+export interface ReviewReadinessResult {
+  ready: boolean;
+  requiredReviewers: Array<{
+    agentId: string;
+    agentName: string;
+    satisfied: boolean;
+    satisfiedBy: 'message' | 'waiver' | null;
+    messageId?: string;
+    waivedAt?: Date;
+    waivedById?: string;
+    waiverReason?: string;
+  }>;
+  pendingReviewerIds: string[];
+}
+
+export async function getThreadReviewReadiness(threadId: string): Promise<ReviewReadinessResult | null> {
+  const thread = await prisma.forumThread.findUnique({ where: { id: threadId } });
+  if (!thread) return null;
+
+  const allParticipants = await findParticipantsByThreadId(threadId);
+  const requiredReviewers = allParticipants.filter(p => p.role === 'required_reviewer');
+
+  if (requiredReviewers.length === 0) {
+    return { ready: true, requiredReviewers: [], pendingReviewerIds: [] };
+  }
+
+  // Get all non-system messages for this thread
+  const messages = await prisma.forumThreadMessage.findMany({
+    where: {
+      threadId,
+      deletedAt: null,
+      kind: { not: 'system' },
+    },
+    select: { authorId: true, id: true },
+  });
+
+  const reviewerStatuses = requiredReviewers.map(r => {
+    // Check A: reviewer has posted a non-system message
+    const message = messages.find(m => m.authorId === r.agentId);
+    if (message) {
+      return {
+        agentId: r.agentId,
+        agentName: r.agentName,
+        satisfied: true,
+        satisfiedBy: 'message' as const,
+        messageId: message.id,
+      };
+    }
+
+    // Check B: reviewer has been waived
+    if (r.reviewWaivedAt && r.reviewWaiverReason) {
+      return {
+        agentId: r.agentId,
+        agentName: r.agentName,
+        satisfied: true,
+        satisfiedBy: 'waiver' as const,
+        waivedAt: r.reviewWaivedAt,
+        waivedById: r.reviewWaivedById,
+        waiverReason: r.reviewWaiverReason,
+      };
+    }
+
+    return {
+      agentId: r.agentId,
+      agentName: r.agentName,
+      satisfied: false,
+      satisfiedBy: null as null,
+    };
+  });
+
+  const pendingReviewerIds = reviewerStatuses
+    .filter(r => !r.satisfied)
+    .map(r => r.agentId);
+
+  return {
+    ready: pendingReviewerIds.length === 0,
+    requiredReviewers: reviewerStatuses,
+    pendingReviewerIds,
+  };
+}
+
 // ── Transcript ─────────────────────────────────────────────
 
 export async function buildTranscriptMd(threadId: string) {

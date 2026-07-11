@@ -119,6 +119,16 @@ threadsRouter.post('/:threadId/resolve', asyncHandler(async (req, res) => {
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
 
+  // Resolve gate: all required reviewers must be satisfied
+  const readiness = await db.getThreadReviewReadiness(threadId);
+  if (readiness && !readiness.ready) {
+    res.status(409).json({
+      error: 'Required reviewers have not completed review',
+      pendingReviewerIds: readiness.pendingReviewerIds,
+    });
+    return;
+  }
+
   const { summaryMd, decisionsJson, actionItemsJson, rejectedOptionsJson, openQuestionsJson } = req.body;
   if (!summaryMd || !summaryMd.trim()) {
     throw new HttpError(400, 'summaryMd (outcome summary) is required to resolve thread');

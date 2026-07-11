@@ -88,3 +88,86 @@ participantsRouter.delete('/:participantId', asyncHandler(async (req, res) => {
   await db.softDeleteParticipant(participantId);
   res.json({ ok: true });
 }));
+
+// POST /api/threads/:threadId/participants/:agentId/waive-review — waive required reviewer
+participantsRouter.post('/:agentId/waive-review', asyncHandler(async (req, res) => {
+  const threadId = p(req, 'threadId');
+  const agentId = p(req, 'agentId');
+
+  const user = req.user!;
+
+  // Verify thread exists
+  const thread = await db.findThreadById(threadId);
+  if (!thread) throw new HttpError(404, 'Thread not found');
+
+  // Find the target participant
+  const participant = await db.findParticipant(threadId, agentId);
+  if (!participant) throw new HttpError(404, 'Participant not found');
+
+  // Must be a required_reviewer
+  if (participant.role !== 'required_reviewer') {
+    throw new HttpError(400, 'Only required_reviewer participants can be waived');
+  }
+
+  // Already waived — idempotent
+  if (participant.reviewWaivedAt && participant.reviewWaiverReason) {
+    res.json({
+      participant: {
+        agentId: participant.agentId,
+        agentName: participant.agentName,
+        reviewWaivedAt: participant.reviewWaivedAt,
+        reviewWaivedById: participant.reviewWaivedById,
+        reviewWaiverReason: participant.reviewWaiverReason,
+      },
+    });
+    return;
+  }
+
+  // Check if reviewer has already replied — 409
+  const prisma = getPrisma();
+  const hasReplied = await prisma.forumThreadMessage.findFirst({
+    where: {
+      threadId,
+      authorId: agentId,
+      deletedAt: null,
+      kind: { not: 'system' },
+    },
+    select: { id: true },
+  });
+  if (hasReplied) {
+    throw new HttpError(409, 'Reviewer has already posted a message, waiver not needed');
+  }
+
+  // Authorization: thread creator or moderator
+  const isCreator = thread.createdById === user.id;
+  const callerParticipant = await db.findParticipant(threadId, user.id);
+  const isModerator = callerParticipant?.role === 'moderator';
+
+  if (!isCreator && !isModerator) {
+    throw new HttpError(403, 'Only thread creator or moderator can waive a reviewer');
+  }
+
+  // Validate reason
+  const { reason } = req.body;
+  if (!reason || !reason.trim()) {
+    throw new HttpError(400, 'waiver reason is required');
+  }
+
+  // Apply waiver
+  const now = new Date();
+  await db.updateParticipant(participant.id, {
+    reviewWaivedAt: now,
+    reviewWaivedById: user.id,
+    reviewWaiverReason: reason.trim(),
+  });
+
+  res.json({
+    participant: {
+      agentId: participant.agentId,
+      agentName: participant.agentName,
+      reviewWaivedAt: now,
+      reviewWaivedById: user.id,
+      reviewWaiverReason: reason.trim(),
+    },
+  });
+}));
