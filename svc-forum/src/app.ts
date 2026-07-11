@@ -11,6 +11,7 @@ import { snapshotsRouter } from './routes/context-snapshots.js';
 import { outcomesRouter } from './routes/outcomes.js';
 import { searchRouter } from './routes/search.js';
 import { discussionRunsRouter } from './routes/discussion-runs.js';
+import { reviewReadinessRouter } from './routes/review-readiness.js';
 
 export const app = express();
 
@@ -60,6 +61,7 @@ app.use('/api/threads/:threadId/participants', participantsRouter);
 app.use('/api/threads/:threadId/context-snapshots', snapshotsRouter);
 app.use('/api/threads/:threadId/outcomes', outcomesRouter);
 app.use('/api/threads/:threadId/runs', discussionRunsRouter);
+app.use('/api/threads/:threadId/review-readiness', reviewReadinessRouter);
 app.use('/api/search', searchRouter);
 
 // Error handler

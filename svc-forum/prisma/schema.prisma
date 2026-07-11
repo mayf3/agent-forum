@@ -43,16 +43,20 @@ model ForumThread {
 }
 
 model ForumThreadParticipant {
-  id         String    @id @default(uuid()) @db.Uuid
-  threadId   String    @db.Uuid
-  thread     ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  agentId    String
-  agentName  String
-  role       String    @default("member")
-  status     String    @default("invited")
-  lastReadAt DateTime?
-  joinedAt   DateTime  @default(now())
-  leftAt     DateTime?
+  id                 String    @id @default(uuid()) @db.Uuid
+  threadId           String    @db.Uuid
+  thread             ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  agentId            String
+  agentName          String
+  role               String    @default("member")
+  status             String    @default("invited")
+  lastReadAt         DateTime?
+  joinedAt           DateTime  @default(now())
+  leftAt             DateTime?
+
+  reviewWaivedAt     DateTime?
+  reviewWaivedById   String?
+  reviewWaiverReason String?
 
   @@unique([threadId, agentId])
   @@map("forum_participants")
