@@ -1,0 +1,233 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model ForumThread {
+  id             String    @id @default(uuid()) @db.Uuid
+  title          String
+  type           String    @default("discussion")
+  status         String    @default("open")
+  contextType    String?
+  contextId      String?
+  pipeline       String?
+  layer          String?
+  tags           String[]  @default([])
+  messageCount   Int       @default(0)
+  lastMessageAt  DateTime?
+  createdById    String
+  createdByName  String
+  createdByType  String    @default("agent")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  resolvedAt     DateTime?
+  resolvedById   String?
+  resolvedByName String?
+
+  participants ForumThreadParticipant[]
+  messages     ForumThreadMessage[]
+  snapshots    ForumContextSnapshot[]
+  outcomes     ForumOutcome[]
+  runs         DiscussionRun[]
+  reviewTasks  ForumReviewTask[]
+
+  @@index([status])
+  @@index([type])
+  @@index([contextType, contextId])
+  @@index([pipeline])
+  @@index([lastMessageAt])
+  @@map("forum_threads")
+}
+
+model ForumThreadParticipant {
+  id                 String    @id @default(uuid()) @db.Uuid
+  threadId           String    @db.Uuid
+  thread             ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  agentId            String
+  agentName          String
+  role               String    @default("member")
+  status             String    @default("invited")
+  lastReadAt         DateTime?
+  joinedAt           DateTime  @default(now())
+  leftAt             DateTime?
+
+  reviewWaivedAt     DateTime?
+  reviewWaivedById   String?
+  reviewWaiverReason String?
+
+  @@unique([threadId, agentId])
+  @@map("forum_participants")
+}
+
+model ForumThreadMessage {
+  id         String    @id @default(uuid()) @db.Uuid
+  threadId   String    @db.Uuid
+  thread     ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  parentId   String?   @db.Uuid
+  seq        Int
+  authorId   String
+  authorName String
+  authorType String    @default("agent")
+  kind       String    @default("comment")
+  content    String    @db.Text
+  mentions   String[]  @default([])
+  attachments Json?
+  metadata   Json?
+  editedAt   DateTime?
+  deletedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([threadId, seq])
+  @@index([threadId, createdAt])
+  @@index([authorId])
+  @@index([kind])
+  @@index([parentId])
+  @@map("forum_messages")
+}
+
+model ForumContextSnapshot {
+  id           String    @id @default(uuid()) @db.Uuid
+  threadId     String    @db.Uuid
+  thread       ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  snapshotType String    @default("thread_creation")
+  sourceType   String
+  sourceRef    String
+  title        String
+  excerptMd    String?   @db.Text
+  contentHash  String?
+  snapshot     Json?
+  takenById    String
+  takenByName  String
+  takenAt      DateTime  @default(now())
+  note         String?
+
+  @@index([threadId])
+  @@index([sourceType, sourceRef])
+  @@map("forum_context_snapshots")
+}
+
+model ForumOutcome {
+  id                   String    @id @default(uuid()) @db.Uuid
+  threadId             String    @db.Uuid
+  thread               ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  summaryMd            String    @db.Text
+  decisionsJson        Json?
+  actionItemsJson      Json?
+  rejectedOptionsJson  Json?
+  openQuestionsJson    Json?
+  writebackTargetType  String?
+  writebackTargetRef   String?
+  createdById          String
+  createdByName        String
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([threadId])
+  @@map("forum_outcomes")
+}
+
+model DiscussionRun {
+  id               String   @id @default(uuid()) @db.Uuid
+  threadId         String   @db.Uuid
+  thread           ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  title            String
+  description      String?  @db.Text
+
+  participantOrder String[]
+  maxRounds        Int      @default(1)
+  maxMessages      Int      @default(20)
+
+  status           String   @default("queued")
+  failureReason    String?  @db.Text
+  errorDetail      String?  @db.Text
+
+  idempotencyKey   String   @unique
+  source           String?
+
+  agentEndpoints   Json?
+  agentAuthTokens  Json?
+
+  runnerMode       String?  @default("async")
+  queuedAt         DateTime?
+  claimedAt        DateTime?
+  leaseExpiresAt   DateTime?
+  attemptCount     Int      @default(0)
+  maxAttempts      Int      @default(3)
+  authMode         String?
+
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  steps            DiscussionRunStep[]
+
+  @@index([threadId])
+  @@index([status])
+  @@map("discussion_runs")
+}
+
+model DiscussionRunStep {
+  id               String   @id @default(uuid()) @db.Uuid
+  runId            String   @db.Uuid
+  run              DiscussionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  agentId          String
+  agentName        String
+  instruction      String?  @db.Text
+  seq              Int
+
+  status           String   @default("queued")
+  failureReason    String?  @db.Text
+  errorDetail      String?  @db.Text
+
+  resultMessageId  String?  @db.Uuid
+
+  invokedAt        DateTime?
+  respondedAt      DateTime?
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([runId, seq])
+  @@index([runId])
+  @@index([agentId])
+  @@map("discussion_run_steps")
+}
+
+model ForumReviewTask {
+  id                String    @id @default(uuid()) @db.Uuid
+  threadId          String    @db.Uuid
+  runId             String?   @db.Uuid
+  assigneeAgentId   String
+  instruction       String?   @db.Text
+  status            String    @default("pending")
+
+  claimedAt         DateTime?
+  claimedById       String?
+  leaseExpiresAt    DateTime?
+  attemptCount      Int       @default(0)
+
+  completedAt       DateTime?
+  failedAt          DateTime?
+  cancelledAt       DateTime?
+  lastError         String?   @db.Text
+  resultMessageId   String?   @db.Uuid
+
+  idempotencyKey    String    @unique
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  thread            ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@unique([threadId, assigneeAgentId])
+  @@index([assigneeAgentId, status])
+  @@index([status, leaseExpiresAt])
+  @@map("forum_review_tasks")
+}

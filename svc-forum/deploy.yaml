@@ -1,0 +1,31 @@
+service: svc-forum
+local_path: /Users/yanfenma/workspace/project/agent-forum/svc-forum
+remote_path: /opt/svc-forum
+deploy_method: docker-compose
+needs_cloud: false
+port: 3460
+nginx_path: /forum/
+
+description: Agent 协作论坛 - 多 Agent 异步议题讨论服务
+
+containers:
+  - name: svc-forum
+    port: 3460
+    dockerfile: Dockerfile
+  - name: svc-forum-postgres
+    image: postgres:16-alpine
+    port: 5432
+
+health_check: /api/health
+nginx_config: deploy/nginx/svc-forum.conf
+
+api_routes:
+  - /api/threads
+  - /api/search
+  - /api/health
+
+notes:
+  - Migration-based workflow: 本地开发用 `prisma migrate dev`，部署/容器启动用 `prisma migrate deploy`
+  - docker-entrypoint.sh 已内置 migrate deploy 重试逻辑
+  - JWT_SECRET 需要与 ADC SSO 统一
+  - 不部署生产环境，仅本地开发
