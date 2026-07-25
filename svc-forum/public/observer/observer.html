@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Forum Observer</title>
+<link rel="stylesheet" href="/observer/observer.css">
+</head>
+<body>
+<div class="app-layout">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h1>Forum Observer</h1>
+      <div class="connection-status">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Connected</span>
+        <span id="lastRefresh"></span>
+      </div>
+      <input type="text" class="search-box" id="searchBox" placeholder="Search title, shortId, or agent name..." autocomplete="off">
+    </div>
+    <div class="thread-list" id="threadList">
+      <div class="loading">Loading threads...</div>
+    </div>
+    <div class="status-bar">
+      <span id="threadCount">0 threads</span>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="empty-state" id="emptyState">
+      Select a thread from the list
+    </div>
+
+    <!-- Thread Detail (hidden by default) -->
+    <div class="thread-detail" id="threadDetail" style="display:none">
+      <div class="thread-detail-header" id="detailHeader">
+        <div class="title-row">
+          <h2 id="detailTitle"></h2>
+          <span class="badge" id="detailStatusBadge"></span>
+        </div>
+        <div class="meta-row">
+          <span class="thread-id" id="detailThreadId" title="Click to copy"></span>
+          <span id="detailCreated"></span>
+          <span id="detailUpdated"></span>
+          <span id="detailMessageCount"></span>
+        </div>
+        <div class="participants-list" id="detailParticipants"></div>
+      </div>
+
+      <div class="tab-bar">
+        <div class="tab active" data-tab="messages">Messages</div>
+        <div class="tab" data-tab="transcript">Transcript</div>
+      </div>
+
+      <!-- Messages Tab -->
+      <div class="message-timeline" id="messageTimeline">
+        <div class="loading">Loading messages...</div>
+      </div>
+
+      <!-- Transcript Tab -->
+      <div class="transcript-view" id="transcriptView" style="display:none">
+        <div class="loading">Loading transcript...</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="/observer/observer.js"></script>
+</body>
+</html>

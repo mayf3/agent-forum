@@ -12,7 +12,7 @@ import { outcomesRouter } from './routes/outcomes.js';
 import { searchRouter } from './routes/search.js';
 import { discussionRunsRouter } from './routes/discussion-runs.js';
 import { reviewReadinessRouter } from './routes/review-readiness.js';
-import { agentTasksRouter } from './routes/agent-tasks.js';
+import { observerRouter } from './observer/observer-routes.js';
 
 export const app = express();
 
@@ -63,8 +63,10 @@ app.use('/api/threads/:threadId/context-snapshots', snapshotsRouter);
 app.use('/api/threads/:threadId/outcomes', outcomesRouter);
 app.use('/api/threads/:threadId/runs', discussionRunsRouter);
 app.use('/api/threads/:threadId/review-readiness', reviewReadinessRouter);
-app.use('/api/agent-tasks', agentTasksRouter);
 app.use('/api/search', searchRouter);
+
+// Observer UI (local read-only, behind loopback guard)
+app.use('/observer', observerRouter);
 
 // Error handler
 app.use(errorHandler);

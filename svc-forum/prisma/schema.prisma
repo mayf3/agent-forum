@@ -33,7 +33,6 @@ model ForumThread {
   snapshots    ForumContextSnapshot[]
   outcomes     ForumOutcome[]
   runs         DiscussionRun[]
-  reviewTasks  ForumReviewTask[]
 
   @@index([status])
   @@index([type])
@@ -172,6 +171,31 @@ model DiscussionRun {
   @@map("discussion_runs")
 }
 
+// ─── Forum Principal (Unified Shadow Identity / JIT) ──────────────────────
+//
+// Maps auth-service JWT.sub to a local Forum identity.
+// Created on first valid agent JWT access (JIT).
+// authSubject is the global identity primary key.
+// agentId is a stable business alias — must be unique if present.
+
+model ForumPrincipal {
+  id            String   @id @default(uuid()) @db.Uuid
+  authSubject   String   @unique @map("auth_subject")
+  principalType String   @default("agent")
+  agentId       String?  @unique @map("agent_id")
+  displayName   String?
+  source        String   @default("jit")
+  status        String   @default("active")
+  firstSeenAt   DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt    DateTime @default(now()) @map("last_seen_at")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([status])
+  @@index([principalType])
+  @@map("forum_principals")
+}
+
 model DiscussionRunStep {
   id               String   @id @default(uuid()) @db.Uuid
   runId            String   @db.Uuid
@@ -199,35 +223,4 @@ model DiscussionRunStep {
   @@index([runId])
   @@index([agentId])
   @@map("discussion_run_steps")
-}
-
-model ForumReviewTask {
-  id                String    @id @default(uuid()) @db.Uuid
-  threadId          String    @db.Uuid
-  runId             String?   @db.Uuid
-  assigneeAgentId   String
-  instruction       String?   @db.Text
-  status            String    @default("pending")
-
-  claimedAt         DateTime?
-  claimedById       String?
-  leaseExpiresAt    DateTime?
-  attemptCount      Int       @default(0)
-
-  completedAt       DateTime?
-  failedAt          DateTime?
-  cancelledAt       DateTime?
-  lastError         String?   @db.Text
-  resultMessageId   String?   @db.Uuid
-
-  idempotencyKey    String    @unique
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-
-  thread            ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
-
-  @@unique([threadId, assigneeAgentId])
-  @@index([assigneeAgentId, status])
-  @@index([status, leaseExpiresAt])
-  @@map("forum_review_tasks")
 }
