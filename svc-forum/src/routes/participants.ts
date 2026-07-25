@@ -2,9 +2,10 @@ import { Router } from 'express';
 import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
+import { requireForumWriter } from '../middleware/forum-writer.js';
+import { requireWriteScope } from '../middleware/scope-guard.js';
 import { getPrisma } from '../lib/prisma.js';
 import * as db from '../lib/data-access.js';
-import * as rt from '../lib/review-tasks-data.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
   const v = req.params[key];
@@ -16,7 +17,7 @@ export const participantsRouter = Router({ mergeParams: true });
 participantsRouter.use(authRequired);
 
 // POST /api/threads/:threadId/participants — add participant
-participantsRouter.post('/', asyncHandler(async (req, res) => {
+participantsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
@@ -40,11 +41,6 @@ participantsRouter.post('/', asyncHandler(async (req, res) => {
     status: status || 'invited',
   });
 
-  // Auto-create review task for required_reviewer
-  if (role === 'required_reviewer' && thread.status !== 'resolved' && thread.status !== 'archived') {
-    await rt.ensureReviewTask(threadId, agentId);
-  }
-
   res.status(201).json({ participant });
 }));
 
@@ -59,7 +55,7 @@ participantsRouter.get('/', asyncHandler(async (req, res) => {
 }));
 
 // PATCH /api/threads/:threadId/participants/:participantId — update participant
-participantsRouter.patch('/:participantId', asyncHandler(async (req, res) => {
+participantsRouter.patch('/:participantId', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const participantId = p(req, 'participantId');
 
@@ -78,20 +74,11 @@ participantsRouter.patch('/:participantId', asyncHandler(async (req, res) => {
   }
 
   const participant = await db.updateParticipant(participantId, updateData);
-
-  // If role changed to required_reviewer, auto-create review task
-  if (updateData.role === 'required_reviewer' && existing.role !== 'required_reviewer') {
-    const thread = await db.findThreadById(threadId);
-    if (thread && thread.status !== 'resolved' && thread.status !== 'archived') {
-      await rt.ensureReviewTask(threadId, existing.agentId);
-    }
-  }
-
   res.json({ participant });
 }));
 
 // DELETE /api/threads/:threadId/participants/:participantId — remove participant
-participantsRouter.delete('/:participantId', asyncHandler(async (req, res) => {
+participantsRouter.delete('/:participantId', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const participantId = p(req, 'participantId');
 
   const prisma = getPrisma();
@@ -105,7 +92,7 @@ participantsRouter.delete('/:participantId', asyncHandler(async (req, res) => {
 }));
 
 // POST /api/threads/:threadId/participants/:agentId/waive-review — waive required reviewer
-participantsRouter.post('/:agentId/waive-review', asyncHandler(async (req, res) => {
+participantsRouter.post('/:agentId/waive-review', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const agentId = p(req, 'agentId');
 
@@ -175,9 +162,6 @@ participantsRouter.post('/:agentId/waive-review', asyncHandler(async (req, res) 
     reviewWaivedById: user.id,
     reviewWaiverReason: reason.trim(),
   });
-
-  // Cancel any open review tasks for this reviewer
-  await rt.cancelTasksForAgent(threadId, agentId);
 
   res.json({
     participant: {

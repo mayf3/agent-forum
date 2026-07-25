@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
+import { requireForumWriter } from '../middleware/forum-writer.js';
+import { requireWriteScope } from '../middleware/scope-guard.js';
 import * as db from '../lib/data-access.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
@@ -14,7 +16,7 @@ export const snapshotsRouter = Router({ mergeParams: true });
 snapshotsRouter.use(authRequired);
 
 // POST /api/threads/:threadId/context-snapshots — create snapshot
-snapshotsRouter.post('/', asyncHandler(async (req, res) => {
+snapshotsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');

@@ -25,11 +25,23 @@ const snapshots = new Map<string, any>();
 const outcomes = new Map<string, any>();
 const runs = new Map<string, any>();
 const runSteps = new Map<string, any>();
-const reviewTasks = new Map<string, any>();
 
 function resetDb() {
   threads.clear(); participants.clear(); messages.clear();
-  snapshots.clear(); outcomes.clear(); runs.clear(); runSteps.clear(); reviewTasks.clear();
+  snapshots.clear(); outcomes.clear(); runs.clear(); runSteps.clear();
+}
+
+/** Generate a valid UUID v4 for mock IDs */
+function mockUuid(): string {
+  const h = '0123456789abcdef';
+  let s = '';
+  for (let i = 0; i < 36; i++) {
+    if (i === 8 || i === 13 || i === 18 || i === 23) s += '-';
+    else if (i === 14) s += '4';
+    else if (i === 19) s += h[(Math.random() * 4 | 0) + 8];
+    else s += h[(Math.random() * 16) | 0];
+  }
+  return s;
 }
 
 // ── Mock Prisma ──
@@ -47,13 +59,6 @@ function mockStore(store: Map<string, any>, name: string) {
         const { runId, seq } = where.runId_seq;
         for (const v of store.values()) {
           if (v.runId === runId && v.seq === seq) return v;
-        }
-        return null;
-      }
-      if (where.threadId_assigneeAgentId) {
-        const { threadId, assigneeAgentId } = where.threadId_assigneeAgentId;
-        for (const v of store.values()) {
-          if (v.threadId === threadId && v.assigneeAgentId === assigneeAgentId) return v;
         }
         return null;
       }
@@ -119,7 +124,7 @@ function mockStore(store: Map<string, any>, name: string) {
     },
     create: async ({ data }: any) => {
       const defaults: Record<string, any> = { status: 'queued', messageCount: 0, tags: [], mentions: [] };
-      const doc = { ...defaults, ...data, id: data.id || `mock-${name}-${Date.now()}-${Math.random()}` };
+      const doc = { ...defaults, ...data, id: data.id || mockUuid() };
       if (!doc.createdAt) doc.createdAt = new Date();
       if (!doc.updatedAt) doc.updatedAt = new Date();
       store.set(doc.id, doc);
@@ -128,7 +133,7 @@ function mockStore(store: Map<string, any>, name: string) {
     createMany: async ({ data }: any) => {
       let count = 0;
       for (const item of data) {
-        const doc = { ...item, id: item.id || `mock-${name}-${Date.now()}-${Math.random()}` };
+        const doc = { ...item, id: item.id || mockUuid() };
         if (!doc.createdAt) doc.createdAt = new Date();
         if (!doc.updatedAt) doc.updatedAt = new Date();
         store.set(doc.id, doc);
@@ -191,7 +196,7 @@ function mockStore(store: Map<string, any>, name: string) {
         store.set(existing.id, updated);
         return updated;
       }
-      const doc = { ...create, id: create.id || `mock-${name}-${Date.now()}` };
+      const doc = { ...create, id: create.id || mockUuid() };
       store.set(doc.id, doc);
       return doc;
     },
@@ -206,13 +211,11 @@ function createMockPrisma() {
   const o = mockStore(outcomes, 'outcome');
   const r = mockStore(runs, 'run');
   const rs = mockStore(runSteps, 'step');
-  const rt = mockStore(reviewTasks, 'reviewTask');
 
   const mock: any = {
     forumThread: t, forumThreadParticipant: p, forumThreadMessage: m,
     forumContextSnapshot: s, forumOutcome: o,
     discussionRun: r, discussionRunStep: rs,
-    forumReviewTask: rt,
     $queryRaw: async () => [{ 1: 1 }],
     $transaction: async (fn: (tx: any) => any) => {
       const tx = {
@@ -226,7 +229,7 @@ function createMockPrisma() {
             return items.length;
           },
         },
-        forumContextSnapshot: s, forumOutcome: o, forumReviewTask: rt,
+        forumContextSnapshot: s, forumOutcome: o,
         discussionRun: r, discussionRunStep: rs,
         $executeRaw: async () => {},
       };
@@ -567,7 +570,7 @@ void describe('Discussion Run MVP Tests', async () => {
     const thread = await setupThreadAndParticipants(da);
 
     const jwt = (await import('jsonwebtoken')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name }, 'dev-only-change-this-secret');
+    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
 
     const express = (await import('express')).default;
     const app = express();
@@ -612,7 +615,7 @@ void describe('Discussion Run MVP Tests', async () => {
   await it('14. Route-level: combined validation rejects oversized runs', async () => {
     const thread = await setupThreadAndParticipants(da);
     const jwt = (await import('jsonwebtoken')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name }, 'dev-only-change-this-secret');
+    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
 
     const express = (await import('express')).default;
     const app = express();
@@ -655,7 +658,7 @@ void describe('Discussion Run MVP Tests', async () => {
   await it('15. Concurrent start of same run — only one succeeds', async () => {
     const thread = await setupThreadAndParticipants(da);
     const jwt = (await import('jsonwebtoken')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name }, 'dev-only-change-this-secret');
+    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
 
     const express = (await import('express')).default;
     const app = express();
@@ -734,7 +737,7 @@ void describe('Discussion Run MVP Tests', async () => {
     const jwt = (await import('jsonwebtoken')).default;
     // An unrelated user (not in participants, not creator)
     const intruderToken = jwt.sign(
-      { sub: 'intruder-id', name: 'Intruder' },
+      { sub: 'intruder-id', name: 'Intruder', role: 'agent' },
       'dev-only-change-this-secret',
     );
 
@@ -750,7 +753,7 @@ void describe('Discussion Run MVP Tests', async () => {
 
     // Create run as creator
     const creatorToken = jwt.sign(
-      { sub: USER_A.id, name: USER_A.name },
+      { sub: USER_A.id, name: USER_A.name, role: 'agent' },
       'dev-only-change-this-secret',
     );
     const createRes = await request(app)
@@ -825,7 +828,7 @@ void describe('Discussion Run MVP Tests', async () => {
     const jwt = (await import('jsonwebtoken')).default;
     // USER_B is a participant
     const participantToken = jwt.sign(
-      { sub: USER_B.id, name: USER_B.name },
+      { sub: USER_B.id, name: USER_B.name, role: 'agent' },
       'dev-only-change-this-secret',
     );
 
@@ -841,7 +844,7 @@ void describe('Discussion Run MVP Tests', async () => {
 
     // Creator creates run
     const creatorToken = jwt.sign(
-      { sub: USER_A.id, name: USER_A.name },
+      { sub: USER_A.id, name: USER_A.name, role: 'agent' },
       'dev-only-change-this-secret',
     );
     const createRes = await request(app)
@@ -868,7 +871,7 @@ void describe('Discussion Run MVP Tests', async () => {
   await it('20. POST /start returns 202 accepted immediately', async () => {
     const thread = await setupThreadAndParticipants(da);
     const jwt = (await import('jsonwebtoken')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name }, 'dev-only-change-this-secret');
+    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
 
     const express = (await import('express')).default;
     const app = express();
@@ -930,7 +933,7 @@ void describe('Discussion Run MVP Tests', async () => {
   await it('25. agentAuthTokens not returned in API responses', async () => {
     const thread = await setupThreadAndParticipants(da);
     const jwt = (await import('jsonwebtoken')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name }, 'dev-only-change-this-secret');
+    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
 
     const express = (await import('express')).default;
     const app = express();
