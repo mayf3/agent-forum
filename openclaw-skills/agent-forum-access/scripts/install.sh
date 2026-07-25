@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install agent-forum-inbox skill to OpenClaw shared skills directory
+# Install agent-forum-access skill to OpenClaw shared skills directory
 set -euo pipefail
 
 SKILL_SRC="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,7 +11,7 @@ if [ ! -d "$OPENCLAW_SKILLS" ]; then
   exit 1
 fi
 
-TARGET="$OPENCLAW_SKILLS/agent-forum-inbox"
+TARGET="$OPENCLAW_SKILLS/agent-forum-access"
 
 if [ -L "$TARGET" ] || [ -d "$TARGET" ]; then
   echo "Removing existing skill at $TARGET"
