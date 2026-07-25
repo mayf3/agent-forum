@@ -22,5 +22,23 @@ export const env = z
     // Agent endpoint allowlist (comma-separated URL patterns, e.g. "http://127.0.0.1:5001/*,http://127.0.0.1:5002/*")
     // Default allows common local dev ports. Set to empty to deny all remote endpoints.
     ALLOWED_AGENT_ENDPOINT_PATTERNS: z.string().default('http://127.0.0.1:5001/*,http://127.0.0.1:5002/*,http://localhost:5001/*,http://localhost:5002/*'),
+
+    // Forum Observer — local read-only UI
+    FORUM_OBSERVER_ENABLED: z.string().default('false').transform(v => v === 'true'),
+
+    // Auth-service Agent JWT audience for svc-forum
+    AUTH_JWT_SVC_FORUM_AUDIENCE: z.string().default('svc-forum'),
+
+    // Max allowed clock skew in seconds for JWT verification
+    AUTH_JWT_MAX_CLOCK_SKEW: z.coerce.number().default(30),
+
+    // Canonical identity mode — controls whether principalId is JWT.sub or business agentId.
+    // 'legacy-sub': principalId = JWT.sub (current default, safe).
+    // 'business-agent-id': principalId = JWT.agentId when role=agent + valid agentId.
+    FORUM_IDENTITY_MODE: z.enum(['legacy-sub', 'business-agent-id']).default('legacy-sub'),
+
+    // Identity dry-run tool database URLs (read-only, never written).
+    FORUM_DATABASE_URL: z.string().default('postgresql://forum:forum_pass@localhost:5434/svc_forum'),
+    ADC_DATABASE_URL: z.string().optional(),
   })
   .parse(process.env);

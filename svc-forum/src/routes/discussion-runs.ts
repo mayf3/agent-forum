@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
+import { requireForumWriter } from '../middleware/forum-writer.js';
+import { requireWriteScope } from '../middleware/scope-guard.js';
 import * as db from '../lib/data-access.js';
 import * as runsDb from '../lib/discussion-runs-data.js';
 import { validateRunLimits, enqueueRun } from '../lib/discussion-runner.js';
@@ -25,7 +27,7 @@ export const discussionRunsRouter = Router({ mergeParams: true });
 discussionRunsRouter.use(authRequired);
 
 // POST /api/threads/:threadId/runs — create a discussion run
-discussionRunsRouter.post('/', asyncHandler(async (req, res) => {
+discussionRunsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
@@ -123,7 +125,7 @@ discussionRunsRouter.get('/:runId', asyncHandler(async (req, res) => {
 }));
 
 // POST /api/threads/:threadId/runs/:runId/start — start a run
-discussionRunsRouter.post('/:runId/start', asyncHandler(async (req, res) => {
+discussionRunsRouter.post('/:runId/start', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const runId = p(req, 'runId');
 
@@ -164,7 +166,7 @@ discussionRunsRouter.post('/:runId/start', asyncHandler(async (req, res) => {
 }));
 
 // PATCH /api/threads/:threadId/runs/:runId — update run (cancel)
-discussionRunsRouter.patch('/:runId', asyncHandler(async (req, res) => {
+discussionRunsRouter.patch('/:runId', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const runId = p(req, 'runId');
 

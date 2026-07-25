@@ -22,7 +22,6 @@ const participants = new Map<string, any>();
 const messages = new Map<string, any>();
 const snapshots = new Map<string, any>();
 const outcomes = new Map<string, any>();
-const reviewTasks = new Map<string, any>();
 
 function resetDb() {
   threads.clear();
@@ -30,7 +29,19 @@ function resetDb() {
   messages.clear();
   snapshots.clear();
   outcomes.clear();
-  reviewTasks.clear();
+}
+
+/** Generate a valid UUID v4 for mock IDs */
+function mockUuid(): string {
+  const h = '0123456789abcdef';
+  let s = '';
+  for (let i = 0; i < 36; i++) {
+    if (i === 8 || i === 13 || i === 18 || i === 23) s += '-';
+    else if (i === 14) s += '4';
+    else if (i === 19) s += h[(Math.random() * 4 | 0) + 8];
+    else s += h[(Math.random() * 16) | 0];
+  }
+  return s;
 }
 
 // Build a PrismaClient-compatible mock
@@ -42,13 +53,6 @@ function mockStore(store: Map<string, any>, name: string) {
         const { threadId, agentId } = where.threadId_agentId;
         for (const v of store.values()) {
           if (v.threadId === threadId && v.agentId === agentId) return v;
-        }
-        return null;
-      }
-      if (where.threadId_assigneeAgentId) {
-        const { threadId, assigneeAgentId } = where.threadId_assigneeAgentId;
-        for (const v of store.values()) {
-          if (v.threadId === threadId && v.assigneeAgentId === assigneeAgentId) return v;
         }
         return null;
       }
@@ -150,7 +154,7 @@ function mockStore(store: Map<string, any>, name: string) {
         tags: [],
         mentions: [],
       };
-      const doc = { ...defaults, ...data, id: data.id || `mock-${name}-${Date.now()}-${Math.random()}` };
+      const doc = { ...defaults, ...data, id: data.id || mockUuid() };
       if (!doc.createdAt) doc.createdAt = new Date();
       if (!doc.updatedAt) doc.updatedAt = new Date();
       store.set(doc.id, doc);
@@ -163,43 +167,6 @@ function mockStore(store: Map<string, any>, name: string) {
       store.set(where.id, updated);
       return updated;
     },
-    updateMany: async ({ where, data }: any) => {
-      let count = 0;
-      for (const [key, val] of store.entries()) {
-        let match = true;
-        if (where) {
-          for (const [k, v] of Object.entries(where)) {
-            if (k === 'id') { if (val.id !== v) match = false; }
-            else if (k === 'threadId') { if (val.threadId !== v) match = false; }
-            else if (k === 'assigneeAgentId') { if (val.assigneeAgentId !== v) match = false; }
-            else if (k === 'status') {
-              if (Array.isArray(v)) { if (!v.includes(val.status)) match = false; }
-              else if (typeof v === 'object' && 'in' in v) { if (!v.in.includes(val.status)) match = false; }
-              else if (val.status !== v) match = false;
-            }
-            else if (k === 'OR' && Array.isArray(v)) {
-              match = v.some((cond: any) => {
-                for (const [ck, cv] of Object.entries(cond)) {
-                  if (ck === 'status' && val.status !== cv) return false;
-                  if (ck === 'leaseExpiresAt' && cv?.lte) {
-                    if (!val.leaseExpiresAt || val.leaseExpiresAt > cv.lte) return false;
-                  }
-                }
-                return true;
-              });
-            }
-            else if (k === 'NOT' && typeof v === 'object' && 'in' in v) {
-              if (v.in.includes(val.status)) match = false;
-            }
-          }
-        }
-        if (match) {
-          store.set(key, { ...val, ...data, updatedAt: new Date() });
-          count++;
-        }
-      }
-      return { count };
-    },
   };
 }
 
@@ -209,7 +176,6 @@ function createMockPrisma() {
   const m = mockStore(messages, 'message');
   const s = mockStore(snapshots, 'snapshot');
   const o = mockStore(outcomes, 'outcome');
-  const rt = mockStore(reviewTasks, 'reviewTask');
 
   const mock: any = {
     forumThread: t,
@@ -217,7 +183,6 @@ function createMockPrisma() {
     forumThreadMessage: m,
     forumContextSnapshot: s,
     forumOutcome: o,
-    forumReviewTask: rt,
     $queryRaw: async () => [{ 1: 1 }],
     $transaction: async (fn: (tx: any) => any) => {
       const tx = {
@@ -234,7 +199,6 @@ function createMockPrisma() {
         },
         forumContextSnapshot: s,
         forumOutcome: o,
-        forumReviewTask: rt,
         $executeRaw: async () => {},
       };
       return fn(tx);

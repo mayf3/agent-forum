@@ -2,6 +2,7 @@
  * Data access layer for DiscussionRun and DiscussionRunStep.
  */
 import { getPrisma } from './prisma.js';
+import { isUuid } from '../utils/uuid.js';
 
 // ── Run ──
 
@@ -37,6 +38,7 @@ export async function findRunByIdempotencyKey(key: string) {
 }
 
 export async function findRunsByThreadId(threadId: string) {
+  if (!isUuid(threadId)) return [];
   const prisma = getPrisma();
   return prisma.discussionRun.findMany({
     where: { threadId },
@@ -45,6 +47,7 @@ export async function findRunsByThreadId(threadId: string) {
 }
 
 export async function findActiveRunByThreadId(threadId: string) {
+  if (!isUuid(threadId)) return null;
   const prisma = getPrisma();
   return prisma.discussionRun.findFirst({
     where: { threadId, status: 'running' },
@@ -115,6 +118,8 @@ export async function withTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T
  * caller succeeds. Returns the claimed run or throws an error.
  */
 export async function claimRunForStart(threadId: string, runId: string): Promise<any> {
+  if (!isUuid(threadId)) throw Object.assign(new Error('Thread not found'), { statusCode: 404 });
+
   const prisma = getPrisma();
 
   return prisma.$transaction(async (tx) => {

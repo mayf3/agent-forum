@@ -2,10 +2,10 @@ import { Router } from 'express';
 import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
+import { requireForumWriter } from '../middleware/forum-writer.js';
+import { requireWriteScope } from '../middleware/scope-guard.js';
 import { getPrisma } from '../lib/prisma.js';
-import { Prisma } from '@prisma/client';
 import * as db from '../lib/data-access.js';
-import * as rt from '../lib/review-tasks-data.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
   const v = req.params[key];
@@ -17,7 +17,7 @@ export const messagesRouter = Router({ mergeParams: true });
 messagesRouter.use(authRequired);
 
 // POST /api/threads/:threadId/messages — create message
-messagesRouter.post('/', asyncHandler(async (req, res) => {
+messagesRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
@@ -50,53 +50,20 @@ messagesRouter.post('/', asyncHandler(async (req, res) => {
   }
 
   const user = req.user!;
-  const agentId = user.agentId || user.id;
-  const isSystemMsg = (kind || 'comment') === 'system';
-
-  // Create message and optionally complete review task in a single transaction
-  const result = await getPrisma().$transaction(async (tx) => {
-    // Get next seq
-    const lastMsg = await (tx as any).forumThreadMessage.findFirst({
-      where: { threadId },
-      orderBy: { seq: 'desc' },
-      select: { seq: true },
-    });
-    const seq = (lastMsg?.seq || 0) + 1;
-
-    const message = await (tx as any).forumThreadMessage.create({
-      data: {
-        threadId,
-        parentId: parentId || null,
-        seq,
-        authorId: agentId,
-        authorName: user.name,
-        authorType: 'agent',
-        kind: kind || 'comment',
-        content: content.trim(),
-        mentions: mentions || [],
-        attachments: attachments ?? Prisma.JsonNull,
-        metadata: metadata ?? Prisma.JsonNull,
-      },
-    });
-
-    // Auto-complete review task for non-system messages by this reviewer
-    if (!isSystemMsg) {
-      await rt.completeReviewTaskByMessage(tx, threadId, agentId, message.id);
-    }
-
-    // Update thread messageCount and lastMessageAt
-    const msgCount = await (tx as any).forumThreadMessage.count({
-      where: { threadId, deletedAt: null },
-    });
-    await (tx as any).forumThread.update({
-      where: { id: threadId },
-      data: { messageCount: msgCount, lastMessageAt: new Date() },
-    });
-
-    return message;
+  const message = await db.createMessage({
+    threadId,
+    parentId: parentId || null,
+    authorId: user.id,
+    authorName: user.name,
+    authorType: 'agent',
+    kind: kind || 'comment',
+    content: content.trim(),
+    mentions: mentions || [],
+    attachments: attachments || null,
+    metadata: metadata || null,
   });
 
-  res.status(201).json({ message: result });
+  res.status(201).json({ message });
 }));
 
 // GET /api/threads/:threadId/messages — list messages

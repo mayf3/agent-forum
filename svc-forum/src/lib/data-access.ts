@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from './prisma.js';
+import { isUuid } from '../utils/uuid.js';
 
 // ── Threads ────────────────────────────────────────────────
 
@@ -32,6 +33,7 @@ export async function createThread(data: CreateThreadInput) {
 }
 
 export async function findThreadById(id: string) {
+  if (!isUuid(id)) return null;
   return prisma.forumThread.findUnique({ where: { id } });
 }
 
@@ -71,6 +73,7 @@ export async function findThreads(filter: ThreadFilter) {
 }
 
 export async function updateThread(id: string, data: Prisma.ForumThreadUpdateInput) {
+  if (!isUuid(id)) throw new Error('Invalid thread id format');
   return prisma.forumThread.update({ where: { id }, data });
 }
 
@@ -129,6 +132,7 @@ export async function createMessage(data: CreateMessageInput) {
 }
 
 export async function findMessagesByThreadId(threadId: string) {
+  if (!isUuid(threadId)) return [];
   return prisma.forumThreadMessage.findMany({
     where: { threadId, deletedAt: null },
     orderBy: { seq: 'asc' },
@@ -155,12 +159,14 @@ export async function addParticipant(data: {
 }
 
 export async function findParticipant(threadId: string, agentId: string) {
+  if (!isUuid(threadId)) return null;
   return prisma.forumThreadParticipant.findUnique({
     where: { threadId_agentId: { threadId, agentId } },
   });
 }
 
 export async function findParticipantsByThreadId(threadId: string) {
+  if (!isUuid(threadId)) return [];
   return prisma.forumThreadParticipant.findMany({
     where: { threadId, leftAt: null },
   });
@@ -196,6 +202,7 @@ export async function createContextSnapshot(data: {
 }
 
 export async function findSnapshotsByThreadId(threadId: string) {
+  if (!isUuid(threadId)) return [];
   return prisma.forumContextSnapshot.findMany({
     where: { threadId },
     orderBy: { takenAt: 'desc' },
@@ -220,6 +227,7 @@ export async function createOutcome(data: {
 }
 
 export async function findOutcomesByThreadId(threadId: string) {
+  if (!isUuid(threadId)) return [];
   return prisma.forumOutcome.findMany({
     where: { threadId },
     orderBy: { createdAt: 'desc' },
@@ -227,6 +235,7 @@ export async function findOutcomesByThreadId(threadId: string) {
 }
 
 export async function findLatestOutcomeByThreadId(threadId: string) {
+  if (!isUuid(threadId)) return null;
   return prisma.forumOutcome.findFirst({
     where: { threadId },
     orderBy: { createdAt: 'desc' },
@@ -290,6 +299,7 @@ export interface ReviewReadinessResult {
 }
 
 export async function getThreadReviewReadiness(threadId: string): Promise<ReviewReadinessResult | null> {
+  if (!isUuid(threadId)) return null;
   const thread = await prisma.forumThread.findUnique({ where: { id: threadId } });
   if (!thread) return null;
 
@@ -358,6 +368,7 @@ export async function getThreadReviewReadiness(threadId: string): Promise<Review
 // ── Transcript ─────────────────────────────────────────────
 
 export async function buildTranscriptMd(threadId: string) {
+  if (!isUuid(threadId)) return null;
   const thread = await prisma.forumThread.findUnique({ where: { id: threadId } });
   if (!thread) return null;
 
@@ -367,6 +378,7 @@ export async function buildTranscriptMd(threadId: string) {
   const latestOutcome = await findLatestOutcomeByThreadId(threadId);
 
   let md = `# ${thread.title}\n\n`;
+  md += `**Thread ID:** ${thread.id}\n`;
   md += `**Type:** ${thread.type}  |  **Status:** ${thread.status}\n`;
   md += `**Created by:** ${thread.createdByName} (${thread.createdByType})  |  **Created at:** ${thread.createdAt.toISOString()}\n`;
   if (thread.resolvedAt) {
@@ -406,7 +418,7 @@ export async function buildTranscriptMd(threadId: string) {
     for (const msg of messages) {
       const indent = msg.parentId ? '> ' : '';
       md += `### ${indent}Message #${msg.seq} — ${msg.authorName} (${msg.kind})\n`;
-      md += `${indent}*${msg.createdAt.toISOString()}*\n\n`;
+      md += `${indent}*${msg.createdAt.toISOString()}* | authorId: \`${msg.authorId || 'unavailable'}\`\n\n`;
       md += `${indent}${msg.content}\n\n`;
       if (msg.mentions && msg.mentions.length > 0) {
         md += `${indent}*Mentions: ${msg.mentions.join(', ')}*\n\n`;
