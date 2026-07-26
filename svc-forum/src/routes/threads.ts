@@ -13,10 +13,8 @@ function p(req: { params: Record<string, any> }, key: string): string {
 
 export const threadsRouter = Router();
 
-threadsRouter.use(authRequired);
-
 // POST /api/threads — create thread
-threadsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
+threadsRouter.post('/', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const {
     title, type, contextType, contextId, pipeline, layer,
     tags, participants,
@@ -69,7 +67,7 @@ threadsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(as
 }));
 
 // GET /api/threads — list threads
-threadsRouter.get('/', asyncHandler(async (req, res) => {
+threadsRouter.get('/', authRequired, asyncHandler(async (req, res) => {
   const {
     type, status, agentId, contextType, contextId, q,
     page, limit,
@@ -90,7 +88,7 @@ threadsRouter.get('/', asyncHandler(async (req, res) => {
 }));
 
 // GET /api/threads/:threadId — get single thread
-threadsRouter.get('/:threadId', asyncHandler(async (req, res) => {
+threadsRouter.get('/:threadId', authRequired, asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
@@ -98,7 +96,7 @@ threadsRouter.get('/:threadId', asyncHandler(async (req, res) => {
 }));
 
 // PATCH /api/threads/:threadId — update thread
-threadsRouter.patch('/:threadId', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
+threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const existing = await db.findThreadById(threadId);
   if (!existing) throw new HttpError(404, 'Thread not found');
@@ -116,7 +114,7 @@ threadsRouter.patch('/:threadId', requireForumWriter, requireWriteScope(), async
 }));
 
 // POST /api/threads/:threadId/resolve — resolve thread with outcome
-threadsRouter.post('/:threadId/resolve', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
+threadsRouter.post('/:threadId/resolve', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
@@ -164,7 +162,7 @@ threadsRouter.post('/:threadId/resolve', requireForumWriter, requireWriteScope()
 }));
 
 // POST /api/threads/:threadId/archive — archive thread
-threadsRouter.post('/:threadId/archive', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
+threadsRouter.post('/:threadId/archive', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
@@ -174,7 +172,7 @@ threadsRouter.post('/:threadId/archive', requireForumWriter, requireWriteScope()
 }));
 
 // GET /api/threads/:threadId/transcript — get transcript (MVP core)
-threadsRouter.get('/:threadId/transcript', asyncHandler(async (req, res) => {
+threadsRouter.get('/:threadId/transcript', authRequired, asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const format = (req.query.format as string) || 'md';
 
