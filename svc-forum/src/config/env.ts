@@ -24,9 +24,5 @@ export const env = z
     // 'legacy-sub': principalId = JWT.sub (current default, safe).
     // 'business-agent-id': principalId = JWT.agentId when role=agent + valid agentId.
     FORUM_IDENTITY_MODE: z.enum(['legacy-sub', 'business-agent-id']).default('legacy-sub'),
-
-    // Identity dry-run tool database URLs (read-only, never written).
-    FORUM_DATABASE_URL: z.string().default('postgresql://forum:forum_pass@localhost:5434/svc_forum'),
-    ADC_DATABASE_URL: z.string().optional(),
   })
   .parse(process.env);
