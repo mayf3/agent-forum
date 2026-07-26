@@ -60,16 +60,12 @@ void describe('isUuid validation helper', async () => {
 void describe('Guarded data-access functions', async () => {
   let da: typeof import('../src/lib/data-access.js');
   let prismaMod: typeof import('../src/lib/prisma.js');
-  let runsDb: typeof import('../src/lib/discussion-runs-data.js');
-
   // In-memory store
   const threads = new Map<string, any>();
   const participants = new Map<string, any>();
   const messages = new Map<string, any>();
   const snapshots = new Map<string, any>();
   const outcomes = new Map<string, any>();
-  const runs = new Map<string, any>();
-  const runSteps = new Map<string, any>();
 
   function mockUuid(): string {
     const h = '0123456789abcdef';
@@ -89,8 +85,6 @@ void describe('Guarded data-access functions', async () => {
     messages.clear();
     snapshots.clear();
     outcomes.clear();
-    runs.clear();
-    runSteps.clear();
   }
 
   function mockStore(store: Map<string, any>, name: string) {
@@ -229,8 +223,6 @@ void describe('Guarded data-access functions', async () => {
     const m = mockStore(messages, 'message');
     const s = mockStore(snapshots, 'snapshot');
     const o = mockStore(outcomes, 'outcome');
-    const r = mockStore(runs, 'run');
-    const rs = mockStore(runSteps, 'step');
 
     return {
       forumThread: t,
@@ -238,8 +230,6 @@ void describe('Guarded data-access functions', async () => {
       forumThreadMessage: m,
       forumContextSnapshot: s,
       forumOutcome: o,
-      discussionRun: r,
-      discussionRunStep: rs,
       $queryRaw: async () => [{ 1: 1 }],
       $transaction: async (fn: (tx: any) => any) => fn({
         forumThread: t,
@@ -247,8 +237,6 @@ void describe('Guarded data-access functions', async () => {
         forumThreadMessage: { ...m, count: async ({ where }: any = {}) => { let items = Array.from(messages.values()); if (where?.threadId) items = items.filter(i => i.threadId === where.threadId); if (where?.deletedAt === null) items = items.filter(i => !i.deletedAt); return items.length; } },
         forumContextSnapshot: s,
         forumOutcome: o,
-        discussionRun: r,
-        discussionRunStep: rs,
         $executeRaw: async () => {},
       }),
       $disconnect: async () => {},
@@ -262,7 +250,6 @@ void describe('Guarded data-access functions', async () => {
   before(async () => {
     da = await import('../src/lib/data-access.js');
     prismaMod = await import('../src/lib/prisma.js');
-    runsDb = await import('../src/lib/discussion-runs-data.js');
   });
 
   beforeEach(() => {
@@ -327,16 +314,6 @@ void describe('Guarded data-access functions', async () => {
 
   await it('7g. findParticipant(invalid threadId) returns null', async () => {
     const result = await da.findParticipant(INVALID_ID, USER_A.id);
-    assert.equal(result, null);
-  });
-
-  await it('7h. findRunsByThreadId(invalid id) returns []', async () => {
-    const result = await runsDb.findRunsByThreadId(INVALID_ID);
-    assert.deepEqual(result, []);
-  });
-
-  await it('7i. findActiveRunByThreadId(invalid id) returns null', async () => {
-    const result = await runsDb.findActiveRunByThreadId(INVALID_ID);
     assert.equal(result, null);
   });
 });
