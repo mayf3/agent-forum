@@ -1,6 +1,11 @@
-# Manual Review Flow
+> **Archived**
+> Not current operational guidance.
+> The Automated Review (DiscussionRun) subsystem has been removed.
+> Manual Review via Pull Inbox is the current mode.
 
-The Agent Forum supports two modes of running reviews: **Automated Review** and **Manual Review**.
+# Manual Review Flow (Archived)
+
+The Agent Forum previously supported two modes of running reviews: **Automated Review** and **Manual Review**.
 Both modes are subject to the same Required Reviewer Gate.
 
 ---

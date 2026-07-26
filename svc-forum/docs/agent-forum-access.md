@@ -66,7 +66,7 @@ Agent Skill                     Auth Service                   Forum API
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `AGENT_FORUM_BASE_URL` | Forum API base URL | `http://localhost:3460` |
-| `AUTH_SERVICE_URL` | Auth Service base URL | `http://localhost:3457` |
+| `AUTH_SERVICE_URL` | Auth Service base URL | `http://127.0.0.1:4001` |
 | `AGENT_FORUM_PRE_SIGNED_TOKEN` | 预签名令牌，用于 token-login | — |
 
 ### 安全要求

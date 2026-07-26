@@ -8,15 +8,14 @@
  *   4. participants permission test
  *   5. outcomes permission test
  *   6. thread status/archive permission test
- *   7. discussion-run permission test
- *   8. context-snapshot permission test
- *   9. missing role fail-closed
- *  10. unknown role fail-closed
- *  11. request body cannot escalate role
- *  12. request body cannot spoof authorId
- *  13. valid agent regression
- *  14. observer read-only unchanged
- *  15. original tests still pass (verified separately)
+ *   7. context-snapshot permission test
+ *   8. missing role fail-closed
+ *   9. unknown role fail-closed
+ *  10. request body cannot escalate role
+ *  11. request body cannot spoof authorId
+ *  12. valid agent regression
+ *  13. observer read-only unchanged
+ *  14. original tests still pass (verified separately)
  *
  * Run: NODE_ENV=test npx tsx --test tests/forum-writer.test.ts
  */
@@ -66,8 +65,6 @@ const participants = new Map<string, any>();
 const messages = new Map<string, any>();
 const snapshots = new Map<string, any>();
 const outcomes = new Map<string, any>();
-const runs = new Map<string, any>();
-const runSteps = new Map<string, any>();
 const principals = new Map<string, any>();
 
 function resetDb() {
@@ -76,8 +73,6 @@ function resetDb() {
   messages.clear();
   snapshots.clear();
   outcomes.clear();
-  runs.clear();
-  runSteps.clear();
   principals.clear();
 }
 
@@ -248,8 +243,6 @@ function createMockPrisma() {
   const m = mockStore(messages);
   const s = mockStore(snapshots);
   const o = mockStore(outcomes);
-  const r = mockStore(runs);
-  const rs = mockStore(runSteps);
   const fp = mockStore(principals);
 
   return {
@@ -278,8 +271,6 @@ function createMockPrisma() {
     },
     forumContextSnapshot: s,
     forumOutcome: o,
-    discussionRun: r,
-    discussionRunStep: rs,
     $queryRaw: async () => [{ 1: 1 }],
     $transaction: async (fn: (tx: any) => any) => {
       const tx = {
@@ -297,8 +288,6 @@ function createMockPrisma() {
         },
         forumContextSnapshot: s,
         forumOutcome: o,
-        discussionRun: r,
-        discussionRunStep: rs,
         $executeRaw: async () => {},
       };
       return fn(tx);
@@ -622,18 +611,6 @@ matrixSuite({
   method: 'POST',
   route: `/api/threads/${SEED_THREAD_ID}/context-snapshots`,
   body: { sourceType: 'okr', sourceRef: 'okr-123', title: 'Test' },
-  okStatus: 201,
-  needsThread: true,
-});
-
-matrixSuite({
-  name: 'POST /api/threads/:tid/runs — create run',
-  routerModule: '../src/routes/discussion-runs.js',
-  routerExport: 'discussionRunsRouter',
-  mountPath: '/api/threads/:threadId/runs',
-  method: 'POST',
-  route: `/api/threads/${SEED_THREAD_ID}/runs`,
-  body: { title: 'Test run', idempotencyKey: 'test-ik-1', participantOrder: [AGENT_SUB] },
   okStatus: 201,
   needsThread: true,
 });
