@@ -6,10 +6,26 @@
  * Designed to be invoked by OpenClaw agents via a skill.
  * All secrets come from environment variables — never from arguments or stdin.
  *
+ * Authentication (tried in order):
+ *   Path A (OAuth2 client_credentials):  AGENT_FORUM_CLIENT_ID +
+ *     AGENT_FORUM_CLIENT_SECRET (env var) or AGENT_FORUM_CLIENT_SECRET_FILE (file ref)
+ *   Path B (pre-signed token):           AGENT_FORUM_PRE_SIGNED_TOKEN
+ *
+ * Token management:
+ *   - Token is cached in-memory and refreshed proactively before expiry.
+ *   - On 401 from GET requests: clear cache, re-login, retry exactly once.
+ *   - On 401 from POST/PUT/DELETE: clear cache, re-login, but do NOT retry.
+ *   - Concurrent requests share a single refresh Promise.
+ *
  * Environment variables:
- *   AGENT_FORUM_BASE_URL       (default: http://localhost:3460)
- *   AUTH_SERVICE_URL           (default: http://localhost:3457)
- *   AGENT_FORUM_PRE_SIGNED_TOKEN  (required)
+ *   AGENT_FORUM_BASE_URL           (default: http://localhost:3460)
+ *   AUTH_SERVICE_URL               (default: http://localhost:3457)
+ *   AGENT_FORUM_CLIENT_ID          (optional — OAuth2 client_id)
+ *   AGENT_FORUM_CLIENT_SECRET      (optional — raw client_secret)
+ *   AGENT_FORUM_CLIENT_SECRET_FILE (optional — path to file with client_secret)
+ *   AGENT_FORUM_PRE_SIGNED_TOKEN   (optional — pre-signed agent JWT)
+ *   AGENT_FORUM_AGENT_ID           (default: blog-agent)
+ *   AGENT_FORUM_AGENT_NAME         (optional — display name)
  *
  * Usage:
  *   forum-inbox.mjs login              → get access JWT (for testing)
@@ -29,11 +45,43 @@ import { readFileSync } from 'node:fs';
 const FORUM_BASE_URL   = process.env.AGENT_FORUM_BASE_URL   || 'http://localhost:3460';
 const AUTH_URL         = process.env.AUTH_SERVICE_URL       || 'http://localhost:3457';
 const PRE_SIGNED_TOKEN = process.env.AGENT_FORUM_PRE_SIGNED_TOKEN || '';
+const CLIENT_ID        = process.env.AGENT_FORUM_CLIENT_ID || '';
+const CLIENT_SECRET    = process.env.AGENT_FORUM_CLIENT_SECRET || '';
+const CLIENT_SECRET_FILE = process.env.AGENT_FORUM_CLIENT_SECRET_FILE || '';
 
-if (!PRE_SIGNED_TOKEN) {
-  console.error('[forum-inbox] FATAL: AGENT_FORUM_PRE_SIGNED_TOKEN is not set');
+// Resolve client_secret: prefer direct env var, fall back to file
+let _resolvedClientSecret = '';
+if (CLIENT_SECRET) {
+  _resolvedClientSecret = CLIENT_SECRET;
+} else if (CLIENT_SECRET_FILE) {
+  try {
+    _resolvedClientSecret = readFileSync(CLIENT_SECRET_FILE, 'utf-8').trim();
+  } catch (err) {
+    console.error(`[forum-inbox] FATAL: Cannot read AGENT_FORUM_CLIENT_SECRET_FILE: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+const HAS_CLIENT_CREDENTIALS = !!(CLIENT_ID && _resolvedClientSecret);
+const HAS_PRE_SIGNED_TOKEN   = !!PRE_SIGNED_TOKEN;
+
+if (!HAS_CLIENT_CREDENTIALS && !HAS_PRE_SIGNED_TOKEN) {
+  console.error(
+    '[forum-inbox] FATAL: No authentication configured.\n' +
+    '  Set either AGENT_FORUM_CLIENT_ID + AGENT_FORUM_CLIENT_SECRET (or _FILE)\n' +
+    '  or AGENT_FORUM_PRE_SIGNED_TOKEN.'
+  );
   process.exit(1);
 }
+
+const AGENT_ID   = process.env.AGENT_FORUM_AGENT_ID   || 'blog-agent';
+const AGENT_NAME = process.env.AGENT_FORUM_AGENT_NAME || '';
+
+// ── Token cache ──────────────────────────────────────────────────────────
+
+let _cachedAccessToken = null;
+let _cachedExpiresAt = 0;
+let _refreshPromise = null;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -72,22 +120,44 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-// Prevent injection from task content — used only as fixed URL path segments
 function safePathSegment(s) {
   if (typeof s !== 'string') return '';
-  // Only allow alphanumeric, hyphens, underscores, and dots
   return s.replace(/[^a-zA-Z0-9\-_.]/g, '');
 }
 
-// ── Auth: token-login ────────────────────────────────────────────────────
+// ── Auth: token-login with caching & refresh ────────────────────────────
 
-let _cachedAccessToken = null;
+function decodeExp(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return 0;
+    const payload = JSON.parse(
+      Buffer.from(parts[1], 'base64url').toString('utf-8'),
+    );
+    return typeof payload.exp === 'number' ? payload.exp : 0;
+  } catch {
+    return 0;
+  }
+}
 
-async function login() {
+async function doLogin() {
   const url = `${AUTH_URL}/api/auth/token-login`;
+
+  let body;
+  let headers = { 'Content-Type': 'application/json' };
+
+  if (HAS_CLIENT_CREDENTIALS) {
+    const credentials = Buffer.from(`${CLIENT_ID}:${_resolvedClientSecret}`).toString('base64');
+    headers['Authorization'] = `Basic ${credentials}`;
+    body = JSON.stringify({});
+  } else {
+    body = JSON.stringify({ token: PRE_SIGNED_TOKEN });
+  }
+
   const { ok, status, data } = await fetchJson(url, {
     method: 'POST',
-    body: JSON.stringify({ token: PRE_SIGNED_TOKEN }),
+    headers,
+    body,
   });
 
   if (!ok) {
@@ -100,23 +170,76 @@ async function login() {
   }
 
   _cachedAccessToken = data.accessToken;
+  _cachedExpiresAt = decodeExp(data.accessToken);
   return data;
 }
 
-function getAccessToken() {
-  if (!_cachedAccessToken) throw new Error('Not logged in — call login() first');
+const PRE_REFRESH_SECONDS = 300; // 5 min
+
+async function getAccessToken() {
+  if (!_cachedAccessToken || (_cachedExpiresAt > 0 && (Date.now() / 1000) >= _cachedExpiresAt - PRE_REFRESH_SECONDS)) {
+    if (!_refreshPromise) {
+      _refreshPromise = doLogin().then(() => {
+        _refreshPromise = null;
+        return _cachedAccessToken;
+      }).catch((err) => {
+        _refreshPromise = null;
+        throw err;
+      });
+    }
+    return _refreshPromise;
+  }
+
   return _cachedAccessToken;
 }
 
-function authHeader() {
-  return { Authorization: `Bearer ${getAccessToken()}` };
+function clearTokenCache() {
+  _cachedAccessToken = null;
+  _cachedExpiresAt = 0;
+}
+
+async function authHeader() {
+  const token = await getAccessToken();
+  return { Authorization: `Bearer ${token}` };
+}
+
+async function authenticatedFetch(method, url, bodyPayload = null) {
+  const headers = await authHeader();
+  const body = bodyPayload ? JSON.stringify(bodyPayload) : undefined;
+
+  const result = await fetchJson(url, {
+    method,
+    headers,
+    body,
+  });
+
+  if (result.status === 401 && (result.data?.error === 'TOKEN_INVALID_OR_EXPIRED' || result.data?.error === 'Token 无效')) {
+    clearTokenCache();
+
+    if (method === 'GET' || method === 'get') {
+      const freshHeaders = await authHeader();
+      const retryResult = await fetchJson(url, {
+        method,
+        headers: freshHeaders,
+        body,
+      });
+      if (retryResult.status === 401) {
+        throw new Error('Token refresh failed after retry — authentication rejected');
+      }
+      return retryResult;
+    }
+
+    throw new Error(`Authentication expired (HTTP 401) — token refreshed, please retry operation`);
+  }
+
+  return result;
 }
 
 // ── Forum API calls ──────────────────────────────────────────────────────
 
 async function getInbox() {
   const url = `${FORUM_BASE_URL}/api/agent-tasks`;
-  const { ok, status, data } = await fetchJson(url, { headers: authHeader() });
+  const { ok, status, data } = await authenticatedFetch('GET', url);
   if (!ok) throw new Error(`Inbox failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
   return data.tasks || [];
 }
@@ -124,16 +247,10 @@ async function getInbox() {
 async function claimTask(taskId) {
   const safeId = safePathSegment(taskId);
   const url = `${FORUM_BASE_URL}/api/agent-tasks/${safeId}/claim`;
-  const { ok, status, data } = await fetchJson(url, {
-    method: 'POST',
-    headers: authHeader(),
-    body: JSON.stringify({}),
-  });
+  const { ok, status, data } = await authenticatedFetch('POST', url, {});
 
   if (!ok) {
-    // 409 means another agent already claimed — not an error
     if (status === 409) return { status: 409, error: data && data.error || 'Already claimed' };
-    // 403/404 mean cross-agent isolation
     if (status === 403 || status === 404) return { status, error: data && data.error || 'Not accessible' };
     throw new Error(`Claim failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
   }
@@ -144,7 +261,7 @@ async function claimTask(taskId) {
 async function getTaskDetail(taskId) {
   const safeId = safePathSegment(taskId);
   const url = `${FORUM_BASE_URL}/api/agent-tasks/${safeId}`;
-  const { ok, status, data } = await fetchJson(url, { headers: authHeader() });
+  const { ok, status, data } = await authenticatedFetch('GET', url);
   if (!ok) throw new Error(`Detail failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
   return data;
 }
@@ -153,18 +270,9 @@ async function completeTask(taskId, content, kind = 'challenge') {
   const safeId = safePathSegment(taskId);
   const url = `${FORUM_BASE_URL}/api/agent-tasks/${safeId}/complete`;
 
-  const body = {
-    content,
-    kind,
-    mentions: [],
-  };
+  const body = { content, kind, mentions: [] };
 
-  const { ok, status, data } = await fetchJson(url, {
-    method: 'POST',
-    headers: authHeader(),
-    body: JSON.stringify(body),
-  });
-
+  const { ok, status, data } = await authenticatedFetch('POST', url, body);
   if (!ok) throw new Error(`Complete failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
 
   return { task: data.task, message: data.message };
@@ -174,12 +282,7 @@ async function failTask(taskId, errorMsg) {
   const safeId = safePathSegment(taskId);
   const url = `${FORUM_BASE_URL}/api/agent-tasks/${safeId}/fail`;
 
-  const { ok, status, data } = await fetchJson(url, {
-    method: 'POST',
-    headers: authHeader(),
-    body: JSON.stringify({ error: errorMsg }),
-  });
-
+  const { ok, status, data } = await authenticatedFetch('POST', url, { error: errorMsg });
   if (!ok) throw new Error(`Fail failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
 
   return true;
@@ -188,20 +291,18 @@ async function failTask(taskId, errorMsg) {
 // ── CLI commands ─────────────────────────────────────────────────────────
 
 async function cmdLogin() {
-  const result = await login();
+  clearTokenCache();
+  const result = await doLogin();
   console.log(JSON.stringify({ accessToken: result.accessToken, user: result.user }, null, 2));
 }
 
 async function cmdInbox() {
-  await login();
   const tasks = await getInbox();
-  // Filter to only pending tasks (default inbox includes claimed-by-me)
   const pending = tasks.filter(t => t.status === 'pending');
   console.log(JSON.stringify({ tasks: pending, count: pending.length }, null, 2));
 }
 
 async function cmdClaim(taskId) {
-  await login();
   const result = await claimTask(taskId);
   if (result.status === 409) {
     console.log(JSON.stringify({ status: 'conflict', error: result.error }, null, 2));
@@ -215,9 +316,7 @@ async function cmdClaim(taskId) {
 }
 
 async function cmdDetail(taskId) {
-  await login();
   const detail = await getTaskDetail(taskId);
-  // Strip any tokens from output
   const safe = {
     task: detail.task,
     thread: detail.thread,
@@ -234,7 +333,6 @@ async function cmdDetail(taskId) {
 }
 
 async function cmdComplete(taskId) {
-  // Read content + kind from stdin (JSON)
   const stdin = readFileSync(0, 'utf-8').trim();
   let input;
   try {
@@ -256,7 +354,6 @@ async function cmdComplete(taskId) {
     process.exit(1);
   }
 
-  await login();
   const result = await completeTask(taskId, input.content.trim(), kind);
   console.log(JSON.stringify({
     status: 'completed',
@@ -282,15 +379,11 @@ async function cmdFail(taskId) {
     process.exit(1);
   }
 
-  await login();
   await failTask(taskId, input.error.trim());
   console.log(JSON.stringify({ status: 'failed', taskId }, null, 2));
 }
 
 async function cmdSmoke() {
-  // Full pull flow (no agent content generation)
-  await login();
-
   const tasks = await getInbox();
   const pending = tasks.filter(t => t.status === 'pending');
   if (pending.length === 0) {
@@ -298,7 +391,6 @@ async function cmdSmoke() {
     return;
   }
 
-  // Pick the oldest pending task
   const task = pending.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))[0];
 
   const claimResult = await claimTask(task.id);
@@ -313,7 +405,6 @@ async function cmdSmoke() {
 
   const detail = await getTaskDetail(task.id);
 
-  // Output the context for the agent to review
   const output = {
     status: 'claimed',
     taskId: task.id,
@@ -378,7 +469,6 @@ async function main() {
         process.exit(1);
     }
   } catch (err) {
-    // Print safe error (no stack traces, no tokens)
     console.error(`[forum-inbox] Error: ${err.message}`);
     process.exit(1);
   }
