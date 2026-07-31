@@ -21,17 +21,34 @@
  * Run: NODE_ENV=test npx tsx --test tests/review-readiness.test.ts
  */
 
-import { describe, it, before, beforeEach } from 'node:test';
+import { describe, it, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
+
+// ── Test JWKS + deferred signTestToken (standard OAuth RS256) ──────────
+// The JWKS server starts (and AUTH_JWKS_URL is set) BEFORE the first import
+// of any src module so auth-jwt.ts freezes the test URL at module load.
+let _jwksCleanup: { url: string; close: () => void };
+let _signTestToken: typeof import('./helpers/auth-keys.js').signTestToken;
+before(async () => {
+  const { startTestJwksServer } = await import('./helpers/jwks-server.js');
+  _jwksCleanup = await startTestJwksServer();
+  process.env.AUTH_JWKS_URL = _jwksCleanup.url;
+  const authKeys = await import('./helpers/auth-keys.js');
+  _signTestToken = authKeys.signTestToken;
+});
+after(() => { if (_jwksCleanup) _jwksCleanup.close(); });
 
 // ── Test agents ──
 
-const CREATOR = { id: 'user-creator-uuid', name: 'Creator Agent' };
-const MODERATOR = { id: 'user-moderator-uuid', name: 'Moderator Agent' };
-const REVIEWER_A = { id: 'blog-agent-uuid', name: '博客写作专家' };
-const REVIEWER_B = { id: 'analyst-uuid', name: '写作风格分析师' };
-const INTRUDER = { id: 'intruder-uuid', name: 'Intruder' };
-const REGULAR_MEMBER = { id: 'member-uuid', name: 'Regular Member' };
+// Identity ids must be valid UUIDs: standard OAuth requires sub to be a
+// MachinePrincipal UUID, and the mock resolves principal.id = authSubject,
+// so thread/participant ids must match the token sub.
+const CREATOR = { id: '550e8400-e29b-41d4-a716-446655440001', name: 'Creator Agent' };
+const MODERATOR = { id: '550e8400-e29b-41d4-a716-446655440002', name: 'Moderator Agent' };
+const REVIEWER_A = { id: '550e8400-e29b-41d4-a716-446655440003', name: '博客写作专家' };
+const REVIEWER_B = { id: '550e8400-e29b-41d4-a716-446655440004', name: '写作风格分析师' };
+const INTRUDER = { id: '550e8400-e29b-41d4-a716-446655440005', name: 'Intruder' };
+const REGULAR_MEMBER = { id: '550e8400-e29b-41d4-a716-446655440006', name: 'Regular Member' };
 
 // ── In-memory stores ──
 
@@ -206,12 +223,49 @@ function createMockPrisma() {
   const s = mockStore(snapshots, 'snapshot');
   const o = mockStore(outcomes, 'outcome');
 
+  // Principal store: principal.id = authSubject (JWT sub) so that
+  // req.user.id matches the test data ids (creator/participant lookups).
+  const principalsStore = new Map<string, any>();
+  const fp = {
+    findUnique: async ({ where }: any) => {
+      if (where.authSubject) return principalsStore.get(where.authSubject) || null;
+      if (where.agentId) {
+        for (const v of principalsStore.values()) { if (v.agentId === where.agentId) return v; }
+        return null;
+      }
+      if (where.id) {
+        for (const v of principalsStore.values()) { if (v.id === where.id) return v; }
+        return null;
+      }
+      return null;
+    },
+    findFirst: async () => null,
+    findMany: async () => [],
+    count: async () => 0,
+    create: async ({ data }: any) => {
+      const doc = { ...data, id: data.authSubject || 'fp-' + Math.random().toString(36).slice(2), createdAt: new Date(), updatedAt: new Date() };
+      principalsStore.set(data.authSubject, doc);
+      return doc;
+    },
+    update: async ({ where, data }: any) => {
+      for (const [key, v] of principalsStore) {
+        if (v.authSubject === where.authSubject || v.id === where.id) {
+          const updated = { ...v, ...data, updatedAt: new Date() };
+          principalsStore.set(key, updated);
+          return updated;
+        }
+      }
+      throw new Error('Not found');
+    },
+  };
+
   const mock: any = {
     forumThread: t,
     forumThreadParticipant: p,
     forumThreadMessage: m,
     forumContextSnapshot: s,
     forumOutcome: o,
+    forumPrincipal: fp,
     $queryRaw: async () => [{ 1: 1 }],
     $transaction: async (fn: (tx: any) => any) => {
       const tx = {
@@ -230,6 +284,7 @@ function createMockPrisma() {
         },
         forumContextSnapshot: s,
         forumOutcome: o,
+        forumPrincipal: fp,
         $executeRaw: async () => {},
       };
       return fn(tx);
@@ -265,9 +320,16 @@ async function addParticipants(da: any, threadId: string, extra: Array<{ id: str
   }
 }
 
-async function signToken(userId: string, userName: string) {
-  const jwt = (await import('jsonwebtoken')).default;
-  return jwt.sign({ sub: userId, name: userName, role: 'agent' }, 'dev-only-change-this-secret');
+async function signToken(userId: string, _userName: string) {
+  // Standard OAuth access token: RS256 + full forum scopes.
+  // agent_id must be unique per token — JIT principal resolution rejects a
+  // second authSubject claiming an already-mapped agent_id (409 → 401).
+  return _signTestToken({
+    sub: userId,
+    agent_id: userId,
+    client_id: 'mc_test_client',
+    scope: 'forum.read forum.write',
+  });
 }
 
 function buildApp() {

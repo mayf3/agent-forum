@@ -201,7 +201,7 @@ void describe('key rotation', async () => {
       agent_id: 'rotated', client_id: 'c', scope: 'forum.read',
     })
       .setProtectedHeader({ alg: 'RS256', kid: 'key-v2' })
-      .setSubject('rotated-uuid').setIssuer('auth-service').setAudience('svc-forum')
+      .setSubject('123e4567-e89b-12d3-a456-426614174201').setIssuer('auth-service').setAudience('svc-forum')
       .setIssuedAt().setExpirationTime('5m')
       .sign(newPriv);
 

@@ -14,6 +14,85 @@ import { describe, it, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 // ══════════════════════════════════════════════════════════════
+//  Test JWKS + deferred signTestToken (standard OAuth RS256)
+//  The JWKS server starts (and AUTH_JWKS_URL is set) BEFORE the
+//  first import of any src module so auth-jwt.ts freezes the test
+//  URL at module load.
+// ══════════════════════════════════════════════════════════════
+
+let _jwksCleanup: { url: string; close: () => void };
+let _signTestToken: typeof import('./helpers/auth-keys.js').signTestToken;
+
+// Minimal default prisma mock (forumPrincipal) so authRequired →
+// resolvePrincipal works even in blocks that do not set their own mock.
+let _prismaMockInstalled = false;
+
+before(async () => {
+  const { startTestJwksServer } = await import('./helpers/jwks-server.js');
+  _jwksCleanup = await startTestJwksServer();
+  process.env.AUTH_JWKS_URL = _jwksCleanup.url;
+
+  const authKeys = await import('./helpers/auth-keys.js');
+  _signTestToken = authKeys.signTestToken;
+
+  if (!_prismaMockInstalled) {
+    const prismaMod = await import('../src/lib/prisma.js');
+    const principals = new Map<string, any>();
+    const fp = {
+      findUnique: async ({ where }: any) => {
+        if (where.authSubject) return principals.get(where.authSubject) || null;
+        if (where.agentId) {
+          for (const v of principals.values()) {
+            if (v.agentId === where.agentId) return v;
+          }
+          return null;
+        }
+        if (where.id) {
+          for (const v of principals.values()) {
+            if (v.id === where.id) return v;
+          }
+          return null;
+        }
+        return null;
+      },
+      findFirst: async () => null,
+      findMany: async () => [],
+      count: async () => 0,
+      create: async ({ data }: any) => {
+        const doc = { ...data, id: data.id || 'fp-' + Math.random().toString(36).slice(2), createdAt: new Date(), updatedAt: new Date() };
+        principals.set(data.authSubject, doc);
+        return doc;
+      },
+      update: async ({ where, data }: any) => {
+        for (const [key, v] of principals) {
+          if (v.authSubject === where.authSubject || v.id === where.id) {
+            const updated = { ...v, ...data, updatedAt: new Date() };
+            principals.set(key, updated);
+            return updated;
+          }
+        }
+        throw new Error('Not found');
+      },
+    };
+    prismaMod.setPrisma({
+      forumPrincipal: fp,
+      forumThread: { findUnique: async () => null, findFirst: async () => null, findMany: async () => [], count: async () => 0 },
+      forumThreadParticipant: { findUnique: async () => null, findFirst: async () => null, findMany: async () => [], count: async () => 0 },
+      forumThreadMessage: { findUnique: async () => null, findFirst: async () => null, findMany: async () => [], count: async () => 0 },
+      $queryRaw: async () => [{ 1: 1 }],
+      $transaction: async (fn: any) => fn({
+        forumPrincipal: fp,
+        forumThread: { findUnique: async () => null },
+      }),
+      $disconnect: async () => {},
+    } as any);
+    _prismaMockInstalled = true;
+  }
+});
+
+after(() => { if (_jwksCleanup) _jwksCleanup.close(); });
+
+// ══════════════════════════════════════════════════════════════
 //  Principal normalization (pure logic, no I/O)
 // ══════════════════════════════════════════════════════════════
 
@@ -195,10 +274,11 @@ void describe('JWT validation — auth middleware', async () => {
   const DEV_SECRET = 'dev-only-change-this-secret';
   const AUTH_SECRET = 'dev-only-auth-service-secret-16';
 
-  // ── 10. Correct ADC token passes ──
-  await it('10. ADC JWT with correct issuer/audience passes', async () => {
+  // ── 10. ADC JWT rejected (ADC path removed in standard OAuth) ──
+  await it('10. ADC JWT rejected → 401 (ADC path removed)', async () => {
     const app = await buildAuthApp();
     const request = (await import('supertest')).default;
+    // ADC tokens are no longer accepted — only standard OAuth (RS256 + JWKS).
     const token = sign(
       { sub: 'adc-agent-uuid', name: 'ADC Agent', role: 'agent' },
       DEV_SECRET,
@@ -207,14 +287,15 @@ void describe('JWT validation — auth middleware', async () => {
     const res = await request(app)
       .get('/api/protected')
       .set('Authorization', `Bearer ${token}`);
-    assert.equal(res.status, 200);
-    assert.equal(res.body.userId, 'adc-agent-uuid');
+    assert.equal(res.status, 401);
   });
 
-  // ── 11. Correct auth-service token passes ──
-  await it('11. Auth-service JWT with correct issuer/audience passes', async () => {
+  // ── 11. Human auth-service JWT rejected (human path removed) ──
+  await it('11. Auth-service human JWT rejected → 401 (human path removed)', async () => {
     const app = await buildAuthApp();
     const request = (await import('supertest')).default;
+    // Human JWTs (aud=agent-platform) are no longer accepted — only agent
+    // access tokens (aud=svc-forum, principal_type=agent).
     const token = sign(
       { sub: 'auth-user-uuid', name: 'Auth User', role: 'user' },
       AUTH_SECRET,
@@ -223,31 +304,17 @@ void describe('JWT validation — auth middleware', async () => {
     const res = await request(app)
       .get('/api/protected')
       .set('Authorization', `Bearer ${token}`);
-    assert.equal(res.status, 200);
-    assert.equal(res.body.userId, 'auth-user-uuid');
+    assert.equal(res.status, 401);
   });
 
   // ── 12. Wrong issuer rejected ──
   await it('12. Wrong issuer rejected with 401', async () => {
     const app = await buildAuthApp();
     const request = (await import('supertest')).default;
-    const token = sign(
-      { sub: 'uuid', name: 'Test' },
-      DEV_SECRET,
-      { issuer: 'wrong-issuer', audience: 'adc-api' },
-    );
-    // With wrong issuer, falls through to level 2 (ADC with correct issuer/audience)
-    // which also fails, then level 3 (bare verify) passes because it doesn't check issuer.
-    // To truly fail, we need a token that fails all 3 levels.
-    // Use a different secret:
-    const badToken = sign(
-      { sub: 'uuid', name: 'Test' },
-      'different-secret-not-16-chars',
-      { issuer: 'wrong-issuer', audience: 'wrong-audience' },
-    );
+    const token = await _signTestToken({ iss: 'wrong-issuer' });
     const res = await request(app)
       .get('/api/protected')
-      .set('Authorization', `Bearer ${badToken}`);
+      .set('Authorization', `Bearer ${token}`);
     assert.equal(res.status, 401);
   });
 
@@ -255,28 +322,18 @@ void describe('JWT validation — auth middleware', async () => {
   await it('13. Wrong audience rejected with 401', async () => {
     const app = await buildAuthApp();
     const request = (await import('supertest')).default;
-    // Level 1 uses DIFFERENT secret, so it will fail for auth-service
-    // Level 2 uses DEV_SECRET but wrong audience
-    const token = sign(
-      { sub: 'uuid', name: 'Test' },
-      DEV_SECRET,
-      { issuer: 'agent-dev-center', audience: 'wrong-audience' },
-    );
-    // Level 2 fails due to wrong audience, falls to level 3 (no issuer/audience) which passes
+    const token = await _signTestToken({ aud: 'wrong-audience' });
     const res = await request(app)
       .get('/api/protected')
       .set('Authorization', `Bearer ${token}`);
-    assert.equal(res.status, 200, 'Level 3 backward compat still passes with wrong audience');
+    assert.equal(res.status, 401);
   });
 
   // ── 14. Refresh token rejected ──
   await it('14. Wrong token type (refresh) rejected', async () => {
     const app = await buildAuthApp();
     const request = (await import('supertest')).default;
-    const token = sign(
-      { sub: 'uuid', name: 'Test', type: 'refresh' },
-      'wrong-secret-for-sure-12345678',
-    );
+    const token = await _signTestToken({ type: 'refresh' });
     const res = await request(app)
       .get('/api/protected')
       .set('Authorization', `Bearer ${token}`);
@@ -287,28 +344,19 @@ void describe('JWT validation — auth middleware', async () => {
   await it('15. Expired token rejected with 401', async () => {
     const app = await buildAuthApp();
     const request = (await import('supertest')).default;
-    const token = sign(
-      { sub: 'uuid', name: 'Test' },
-      DEV_SECRET,
-      { expiresIn: '0s' },
-    );
-    // Wait briefly for expiry
-    await new Promise(r => setTimeout(r, 100));
+    const token = await _signTestToken({ expiredSecAgo: 120 });
     const res = await request(app)
       .get('/api/protected')
       .set('Authorization', `Bearer ${token}`);
     assert.equal(res.status, 401);
-    assert.ok(res.text.includes('TOKEN_EXPIRED') || res.text.includes('expired'), 'should indicate expired');
+    assert.ok(res.text.includes('TOKEN_INVALID_OR_EXPIRED') || res.text.includes('expired'), 'should indicate expired');
   });
 
   // ── 16. No signature or wrong signature rejected ──
   await it('16. Token with wrong signature rejected', async () => {
     const app = await buildAuthApp();
     const request = (await import('supertest')).default;
-    const token = sign(
-      { sub: 'uuid', name: 'Test' },
-      'wrong-secret-16-chars-length',
-    );
+    const token = await _signTestToken({ wrongKey: true });
     const res = await request(app)
       .get('/api/protected')
       .set('Authorization', `Bearer ${token}`);
@@ -319,18 +367,13 @@ void describe('JWT validation — auth middleware', async () => {
   await it('17. agentId claim alone cannot replace sub (sub required)', async () => {
     const app = await buildAuthApp();
     const request = (await import('supertest')).default;
-    // Token with agentId but no sub
-    const token = sign(
-      { agentId: 'blog-agent', name: 'Agent', role: 'agent' },
-      DEV_SECRET,
-    );
+    // Standard OAuth requires sub (MachinePrincipal.id). A token with
+    // agent_id but no sub violates the contract → 401.
+    const token = await _signTestToken({ sub: '' });
     const res = await request(app)
       .get('/api/protected')
       .set('Authorization', `Bearer ${token}`);
-    assert.equal(res.status, 200);
-    // sub falls back to empty string but request still authenticated
-    // (the middleware doesn't require a non-empty sub)
-    assert.ok(res.body.userId !== undefined);
+    assert.equal(res.status, 401);
   });
 
   // ── 18. Request body cannot override agentId ──
@@ -341,22 +384,23 @@ void describe('JWT validation — auth middleware', async () => {
     const app = express();
     app.use(express.json());
     app.post('/api/test', authRequired, (req: any, res: any) => {
-      // The route should use req.user, not req.body
-      res.json({ usedUserId: req.user!.id, bodyAgentId: req.body.agentId });
+      // The route should use req.user (from the JWT), not req.body
+      res.json({ authSubjectId: req.user!.authSubjectId, agentId: req.user!.agentId, bodyAgentId: req.body.agentId });
     });
     app.use(errorHandler);
 
     const request = (await import('supertest')).default;
-    const token = sign(
-      { sub: 'real-uuid', name: 'Agent', role: 'agent', agentId: 'real-agent' },
-      DEV_SECRET,
-    );
+    const token = await _signTestToken({ agent_id: 'real-agent' });
     const res = await request(app)
       .post('/api/test')
       .set('Authorization', `Bearer ${token}`)
       .send({ agentId: 'fake-agent' });
     assert.equal(res.status, 200);
-    assert.equal(res.body.usedUserId, 'real-uuid', 'Should use JWT sub, not body');
+    // Identity must come from the JWT (authSubjectId = sub, agentId = agent_id),
+    // never from the request body.
+    assert.equal(res.body.authSubjectId, '550e8400-e29b-41d4-a716-446655440000', 'authSubjectId = JWT sub');
+    assert.equal(res.body.agentId, 'real-agent', 'agentId from JWT');
+    assert.equal(res.body.bodyAgentId, 'fake-agent', 'body agentId is echoed but unused');
   });
 });
 
@@ -520,12 +564,46 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
     const m = mockStore(messages, 'message');
     const s = mockStore(snapshots, 'snapshot');
     const o = mockStore(outcomes, 'outcome');
+    const principalsStore = new Map<string, any>();
+    const fp = {
+      findUnique: async ({ where }: any) => {
+        if (where.authSubject) return principalsStore.get(where.authSubject) || null;
+        if (where.agentId) {
+          for (const v of principalsStore.values()) { if (v.agentId === where.agentId) return v; }
+          return null;
+        }
+        if (where.id) {
+          for (const v of principalsStore.values()) { if (v.id === where.id) return v; }
+          return null;
+        }
+        return null;
+      },
+      findFirst: async () => null,
+      findMany: async () => [],
+      count: async () => 0,
+      create: async ({ data }: any) => {
+        const doc = { ...data, id: data.id || 'fp-' + Math.random().toString(36).slice(2), createdAt: new Date(), updatedAt: new Date() };
+        principalsStore.set(data.authSubject, doc);
+        return doc;
+      },
+      update: async ({ where, data }: any) => {
+        for (const [key, v] of principalsStore) {
+          if (v.authSubject === where.authSubject || v.id === where.id) {
+            const updated = { ...v, ...data, updatedAt: new Date() };
+            principalsStore.set(key, updated);
+            return updated;
+          }
+        }
+        throw new Error('Not found');
+      },
+    };
     return {
       forumThread: t,
       forumThreadParticipant: p,
       forumThreadMessage: m,
       forumContextSnapshot: s,
       forumOutcome: o,
+      forumPrincipal: fp,
       $queryRaw: async () => [{ 1: 1 }],
       $transaction: async (fn: (tx: any) => any) => fn({
         forumThread: t,
@@ -533,6 +611,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
         forumThreadMessage: { ...m, count: async ({ where }: any = {}) => { let items = Array.from(messages.values()); if (where?.threadId) items = items.filter(i => i.threadId === where.threadId); if (where?.deletedAt === null) items = items.filter(i => !i.deletedAt); return items.length; } },
         forumContextSnapshot: s,
         forumOutcome: o,
+        forumPrincipal: fp,
         $executeRaw: async () => {},
       }),
       $disconnect: async () => {},
@@ -608,7 +687,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
   // We verify via supertest that when FORUM_IDENTITY_MODE='business-agent-id',
   // the middleware sets the correct principalId.
 
-  await it('21. business mode: req.user.id = agentId for agents', async () => {
+  await it('21. standard OAuth: req.user maps sub/agent_id correctly (agent identity)', async () => {
     const express = (await import('express')).default;
     const { authRequired } = await import('../src/middleware/auth.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
@@ -628,11 +707,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
     });
     app.use((await import('../src/middleware/error-handler.js')).errorHandler);
 
-    const jwt = (await import('jsonwebtoken')).default;
-    const token = jwt.sign(
-      { sub: 'agent-uuid-789', name: 'Blog Writer', role: 'agent', agentId: 'blog-agent' },
-      'dev-only-change-this-secret',
-    );
+    const token = await _signTestToken({ sub: '22222222-2222-4222-8222-222222222222', agent_id: 'blog-agent' });
 
     const request = (await import('supertest')).default;
     const res = await request(app)
@@ -640,14 +715,16 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
       .set('Authorization', `Bearer ${token}`);
 
     assert.equal(res.status, 200);
-    assert.equal(res.body.id, 'blog-agent', 'principalId = agentId');
-    assert.equal(res.body.authSubjectId, 'agent-uuid-789');
+    // Standard OAuth identity mapping: authSubjectId = sub, agentId = agent_id.
+    // (The old 'business-agent-id' principalId=agentId mode does not apply to
+    // standard OAuth agent tokens — identityMode stays legacy-sub.)
+    assert.equal(res.body.authSubjectId, '22222222-2222-4222-8222-222222222222');
     assert.equal(res.body.agentId, 'blog-agent');
     assert.equal(res.body.principalType, 'agent');
-    assert.equal(res.body.identityMode, 'business-agent-id');
+    assert.equal(res.body.identityMode, 'legacy-sub');
   });
 
-  await it('22. business mode: human user principalId is still sub', async () => {
+  await it('22. business mode: human user token rejected → 401 (human path removed)', async () => {
     const express = (await import('express')).default;
     const { authRequired } = await import('../src/middleware/auth.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
@@ -664,21 +741,17 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
     });
     app.use(errorHandler);
 
-    const jwt = (await import('jsonwebtoken')).default;
-    const token = jwt.sign(
-      { sub: 'human-uuid-456', name: 'Human User', role: 'user', agentId: 'blog-agent' },
-      'dev-only-change-this-secret',
-    );
+    // Human JWTs are no longer a valid auth path — standard OAuth only accepts
+    // agent access tokens (principal_type=agent). A principal_type=user token
+    // is rejected with 401.
+    const token = await _signTestToken({ principal_type: 'user' });
 
     const request = (await import('supertest')).default;
     const res = await request(app)
       .get('/api/me')
       .set('Authorization', `Bearer ${token}`);
 
-    assert.equal(res.status, 200);
-    assert.equal(res.body.id, 'human-uuid-456', 'human principalId = sub');
-    assert.equal(res.body.principalType, 'user');
-    assert.equal(res.body.identityMode, 'legacy-sub');
+    assert.equal(res.status, 401);
   });
 
   // ── 23. Required reviewer gate with same identity mode ──
@@ -881,35 +954,43 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    };
 	  }
 
-	  // Helper: sign an agent token with the correct format
-	  function signAgentToken(overrides: Record<string, any> = {}): string {
+	  // Helper: sign an agent token with the correct format (RS256 + JWKS)
+	  async function signAgentToken(overrides: Record<string, any> = {}): Promise<string> {
 	    const now = Math.floor(Date.now() / 1000);
 	    const aud = overrides._audience || SVC_FORUM_AUDIENCE;
 	    const iss = overrides._issuer || 'auth-service';
-	    const secret = overrides._secret || AUTH_SECRET;
-	    const alg = overrides._alg || 'HS256';
 	    // Remove internal keys before spreading into payload
-	    const { _secret, _alg, _issuer, _audience, _noIssuerAud, ...cleanOverrides } = overrides;
-	    return sign(
-	      {
-	        sub: AGENT_SUB,
-	        iss,
-	        aud,
-	        iat: now,
-	        exp: now + 600,
-	        jti: `${AGENT_SUB}-${now}-testjti`,
-	        type: 'access',
-	        version: 'v1',
-	        principal_type: 'agent',
-	        agent_id: AGENT_ID,
-	        client_id: CLIENT_ID,
-	        scope: 'forum.read',
-	        ...cleanOverrides,
-	      },
-	      secret,
-	      { algorithm: alg },
-	    );
-	  }
+	    const { _secret, _alg, _issuer, _audience, _noIssuerAud, exp, ...cleanOverrides } = overrides;
+	    const payload = {
+	      sub: AGENT_SUB,
+	      iss,
+	      aud,
+	      iat: now,
+	      exp: overrides.exp ?? now + 600,
+	      jti: `${AGENT_SUB}-${now}-testjti`,
+	      type: 'access',
+	      version: 'v1',
+	      principal_type: 'agent',
+	      agent_id: AGENT_ID,
+	      client_id: CLIENT_ID,
+	      scope: 'forum.read',
+	      ...cleanOverrides,
+	    };
+
+    // alg=none: craft an unsigned token (rejected by RS256-only verifier)
+    if (_alg === 'none') {
+      const { UnsecuredJWT } = await import('jose');
+      return new UnsecuredJWT(payload).encode();
+    }
+
+    // RS256 sign with the test keypair (or a throwaway keypair for bad-signature tests)
+    const { SignJWT, generateKeyPair } = await import('jose');
+    const { getTestKeyPair, TEST_KID_VALUE } = await import('./helpers/test-keys.js');
+    const kp = _secret ? await generateKeyPair('RS256') : await getTestKeyPair();
+    return new SignJWT(payload)
+      .setProtectedHeader({ alg: 'RS256', kid: TEST_KID_VALUE })
+      .sign(kp.privateKey);
+  }
 
 	  // Helper: build an Express app with authRequired
 	  async function buildAuthApp() {
@@ -949,7 +1030,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  await it('36. auth-service Agent JWT with correct claims passes (aud=svc-forum, principal_type=agent)', async () => {
 	    const app = await buildAuthApp();
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken();
+	    const token = await signAgentToken();
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
@@ -965,7 +1046,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  await it('37. Wrong issuer → 401', async () => {
 	    const app = await buildAuthApp();
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ _issuer: 'wrong-issuer' });
+	    const token = await signAgentToken({ _issuer: 'wrong-issuer' });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
@@ -976,7 +1057,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  await it('38. Wrong audience → 401', async () => {
 	    const app = await buildAuthApp();
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ _audience: 'wrong-audience' });
+	    const token = await signAgentToken({ _audience: 'wrong-audience' });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
@@ -987,46 +1068,66 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  await it('39. Expired token → 401 TOKEN_EXPIRED', async () => {
 	    const app = await buildAuthApp();
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ exp: Math.floor(Date.now() / 1000) - 60 });
+	    const token = await signAgentToken({ exp: Math.floor(Date.now() / 1000) - 60 });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
 	    assert.equal(res.status, 401);
 	  });
 
-	  // ── 40. Missing scope ──
-	  await it('40. Missing scope → 401', async () => {
-	    const app = await buildAuthApp();
+	  // ── 40. Missing scope → 403 at read-scope-guarded route ──
+	  await it('40. Missing scope → 403 (INSUFFICIENT_SCOPE at route layer)', async () => {
+	    const express = (await import('express')).default;
+	    const { authRequired } = await import('../src/middleware/auth.js');
+	    const { requireReadScope } = await import('../src/middleware/scope-guard.js');
+	    const { errorHandler } = await import('../src/middleware/error-handler.js');
+	    const app = express();
+	    app.use(express.json());
+	    app.get('/api/protected', authRequired, requireReadScope(), (req: any, res: any) => {
+	      res.json({ ok: true });
+	    });
+	    app.use(errorHandler);
+
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ scope: '' });
+	    const token = await signAgentToken({ scope: '' });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
-	    assert.equal(res.status, 401);
+	    assert.equal(res.status, 403);
+	    assert.ok(res.body.error.includes('INSUFFICIENT_SCOPE'), 'should indicate insufficient scope');
 	  });
 
-	  // ── 41. Only forum.write without forum.read ──
-	  await it('41. Only forum.write without forum.read → 401', async () => {
-	    const app = await buildAuthApp();
+	  // ── 41. Only forum.write without forum.read → 403 at read route ──
+	  await it('41. Only forum.write without forum.read → 403 (INSUFFICIENT_SCOPE)', async () => {
+	    const express = (await import('express')).default;
+	    const { authRequired } = await import('../src/middleware/auth.js');
+	    const { requireReadScope } = await import('../src/middleware/scope-guard.js');
+	    const { errorHandler } = await import('../src/middleware/error-handler.js');
+	    const app = express();
+	    app.use(express.json());
+	    app.get('/api/protected', authRequired, requireReadScope(), (req: any, res: any) => {
+	      res.json({ ok: true });
+	    });
+	    app.use(errorHandler);
+
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ scope: 'forum.write' });
+	    const token = await signAgentToken({ scope: 'forum.write' });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
-	    assert.equal(res.status, 401);
+	    assert.equal(res.status, 403);
 	  });
 
 	  // ── 42. principal_type=user ──
-	  await it('42. principal_type=user → 401 (fall through to human JWT)', async () => {
+	  await it('42. principal_type=user → 401 (TOKEN_CONTRACT_INVALID)', async () => {
 	    const app = await buildAuthApp();
 	    const request = (await import('supertest')).default;
 	    // agent token with wrong principal_type
-	    const token = signAgentToken({ principal_type: 'user' });
+	    const token = await signAgentToken({ principal_type: 'user' });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
-	    // Falls to human JWT path (auth-service human JWT) — also fails because aud=svc-forum not agent-platform
-	    // Then tries ADC JWT and bare verify — all fail → 401
+	    // Standard OAuth only accepts principal_type=agent → contract invalid
 	    assert.equal(res.status, 401);
 	  });
 
@@ -1034,7 +1135,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  await it('43. principal_type=service → 401', async () => {
 	    const app = await buildAuthApp();
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ principal_type: 'service' });
+	    const token = await signAgentToken({ principal_type: 'service' });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
@@ -1045,7 +1146,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  await it('44. Missing agent_id → 401', async () => {
 	    const app = await buildAuthApp();
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ agent_id: '' });
+	    const token = await signAgentToken({ agent_id: '' });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
@@ -1056,7 +1157,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  await it('45. sub non-UUID → 401', async () => {
 	    const app = await buildAuthApp();
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ sub: 'not-a-uuid' });
+	    const token = await signAgentToken({ sub: 'not-a-uuid' });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
@@ -1067,7 +1168,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  await it('46. alg=none → 401', async () => {
 	    const app = await buildAuthApp();
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ _alg: 'none' });
+	    const token = await signAgentToken({ _alg: 'none' });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
@@ -1078,7 +1179,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  await it('47. Invalid signature → 401', async () => {
 	    const app = await buildAuthApp();
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ _secret: 'wrong-secret-16-chars-len' });
+	    const token = await signAgentToken({ _secret: 'wrong-secret-16-chars-len' });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
@@ -1093,7 +1194,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    // 16KB = 16384 bytes. The payload needs to exceed this.
 	    // A safe oversized payload is ~15000 chars which yields ~20KB base64.
 	    const largePayload = 'x'.repeat(15000);
-	    const token = signAgentToken({ extra: largePayload });
+	    const token = await signAgentToken({ extra: largePayload });
 	    const res = await request(app)
 	      .get('/api/protected')
 	      .set('Authorization', `Bearer ${token}`);
@@ -1424,14 +1525,17 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    };
 	  }
 
-	  function signAgentToken(overrides: Record<string, any> = {}): string {
+	  async function signAgentToken(overrides: Record<string, any> = {}): Promise<string> {
 	    const now = Math.floor(Date.now() / 1000);
 	    const scope = overrides.scope || 'forum.read';
 	    const { scope: _scope, ...rest } = overrides;
-	    return sign(
-	      { sub: AGENT_SUB, iss: 'auth-service', aud: 'svc-forum', iat: now, exp: now + 600, jti: 'test-jti', type: 'access', version: 'v1', principal_type: 'agent', agent_id: AGENT_ID, client_id: CLIENT_ID, scope, ...rest },
-	      AUTH_SECRET,
-	    );
+	    return _signTestToken({
+	      sub: AGENT_SUB,
+	      agent_id: AGENT_ID,
+	      client_id: CLIENT_ID,
+	      scope,
+	      ...rest,
+	    });
 	  }
 
 	  before(async () => {
@@ -1460,7 +1564,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    app.use(errorHandler);
 
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken();
+	    const token = await signAgentToken();
 	    const res = await request(app)
 	      .get('/api/threads')
 	      .set('Authorization', `Bearer ${token}`);
@@ -1481,7 +1585,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    app.use(errorHandler);
 
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken();
+	    const token = await signAgentToken();
 	    const res = await request(app)
 	      .post('/api/threads')
 	      .set('Authorization', `Bearer ${token}`)
@@ -1504,7 +1608,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    app.use(errorHandler);
 
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken({ scope: 'forum.read forum.write' });
+	    const token = await signAgentToken({ scope: 'forum.read forum.write' });
 	    const res = await request(app)
 	      .post('/api/threads')
 	      .set('Authorization', `Bearer ${token}`)
@@ -1512,8 +1616,8 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    assert.equal(res.status, 200, 'forum.write scope allows write');
 	  });
 
-	  // ── 60. Legacy auth (ADC JWT) not affected by scope guard ──
-	  await it('60. Legacy ADC JWT not restricted by requireWriteScope', async () => {
+	  // ── 60. Legacy ADC JWT rejected (ADC path removed) ──
+	  await it('60. Legacy ADC JWT rejected → 401 (ADC path removed)', async () => {
 	    const express = (await import('express')).default;
 	    const { authRequired } = await import('../src/middleware/auth.js');
 	    const { requireWriteScope } = await import('../src/middleware/scope-guard.js');
@@ -1526,7 +1630,8 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    app.use(errorHandler);
 
 	    const request = (await import('supertest')).default;
-	    // Sign an ADC JWT (legacy, with dev secret)
+	    // ADC JWTs are no longer a valid auth path — standard OAuth (RS256+JWKS)
+	    // rejects them before any scope guard runs.
 	    const token = sign(
 	      { sub: 'adc-user-uuid', name: 'ADC User', role: 'agent' },
 	      'dev-only-change-this-secret',
@@ -1536,13 +1641,11 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	      .post('/api/threads')
 	      .set('Authorization', `Bearer ${token}`)
 	      .send({ title: 'test' });
-	    // Legacy tokens should pass through — the scope guard only restricts auth_service_agent_jwt
-	    assert.equal(res.status, 200, 'Legacy ADC JWT passes write guard');
-	    assert.equal(res.body.authSource, 'adc_jwt');
+	    assert.equal(res.status, 401, 'ADC JWT rejected at auth layer');
 	  });
 
-	  // ── 61. Human auth-service JWT not restricted ──
-	  await it('61. Auth-service human JWT not restricted by requireWriteScope', async () => {
+	  // ── 61. Human auth-service JWT rejected (human path removed) ──
+	  await it('61. Auth-service human JWT rejected → 401 (human path removed)', async () => {
 	    const express = (await import('express')).default;
 	    const { authRequired } = await import('../src/middleware/auth.js');
 	    const { requireWriteScope } = await import('../src/middleware/scope-guard.js');
@@ -1555,7 +1658,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    app.use(errorHandler);
 
 	    const request = (await import('supertest')).default;
-	    // Sign an auth-service human JWT
+	    // Human JWTs (aud=agent-platform) are no longer a valid auth path.
 	    const token = sign(
 	      { sub: 'human-uuid', name: 'Human User', role: 'user' },
 	      AUTH_SECRET,
@@ -1565,8 +1668,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	      .post('/api/threads')
 	      .set('Authorization', `Bearer ${token}`)
 	      .send({ title: 'test' });
-	    assert.equal(res.status, 200, 'Human JWT passes write guard');
-	    assert.equal(res.body.authSource, 'auth_service_jwt');
+	    assert.equal(res.status, 401, 'Human JWT rejected at auth layer');
 	  });
 
 	  // ── 62. requireScope guard ──
@@ -1583,7 +1685,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    app.use(errorHandler);
 
 	    const request = (await import('supertest')).default;
-	    const token = signAgentToken(); // only forum.read
+	    const token = await signAgentToken(); // only forum.read
 	    const res = await request(app)
 	      .get('/api/require-forum-write')
 	      .set('Authorization', `Bearer ${token}`);
@@ -1640,13 +1742,16 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    auditLogs = [];
 	  });
 
-	  // Helper (fixed: no duplicate aud)
-	  function signAgentToken(overrides: Record<string, any> = {}): string {
+	  // Helper (fixed: no duplicate aud) — RS256 via the test keypair
+	  async function signAgentToken(overrides: Record<string, any> = {}): Promise<string> {
 	    const now = Math.floor(Date.now() / 1000);
-	    return sign(
-	      { sub: AGENT_SUB, iss: 'auth-service', aud: 'svc-forum', iat: now, exp: now + 600, jti: 'test-jti', type: 'access', version: 'v1', principal_type: 'agent', agent_id: AGENT_ID, client_id: CLIENT_ID, scope: 'forum.read', ...overrides },
-	      AUTH_SECRET,
-	    );
+	    return _signTestToken({
+	      sub: AGENT_SUB,
+	      agent_id: AGENT_ID,
+	      client_id: CLIENT_ID,
+	      scope: 'forum.read',
+	      ...overrides,
+	    });
 	  }
 
 	  // Helper: create an auth app with the given config
@@ -1664,7 +1769,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  // ── 64. Audit log contains jwt verification events ──
 	  await it('64. Audit log contains jwt.verified event on success', async () => {
 	    const app = await createTestApp();
-	    const token = signAgentToken();
+	    const token = await signAgentToken();
 	    const request = (await import('supertest')).default;
 	    await request(app).get('/api/test').set('Authorization', `Bearer ${token}`);
 
@@ -1675,7 +1780,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  // ── 65. Audit log does NOT contain full token ──
 	  await it('65. Audit log does NOT contain full JWT token', async () => {
 	    const app = await createTestApp();
-	    const token = signAgentToken();
+	    const token = await signAgentToken();
 	    const request = (await import('supertest')).default;
 	    await request(app).get('/api/test').set('Authorization', `Bearer ${token}`);
 
@@ -1686,7 +1791,7 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	  // ── 66. Audit log does NOT contain Authorization header ──
 	  await it('66. Audit log does NOT contain Authorization header', async () => {
 	    const app = await createTestApp();
-	    const token = signAgentToken();
+	    const token = await signAgentToken();
 	    const request = (await import('supertest')).default;
 	    await request(app).get('/api/test').set('Authorization', `Bearer ${token}`);
 
@@ -1732,11 +1837,11 @@ void describe('Existing Forum behavior — backward compatibility', async () => 
 	    });
 	    app.use(errorHandler);
 
-	    const token = signAgentToken(); // only forum.read
+	    const token = await signAgentToken(); // only forum.read
 	    const request = (await import('supertest')).default;
 	    await request(app).post('/api/write').set('Authorization', `Bearer ${token}`).send({});
 
-	    const hasRejected = auditLogs.some(l => l.includes('auth.write_rejected') && l.includes('insufficient_scope'));
+	    const hasRejected = auditLogs.some(l => l.includes('auth.write_rejected') && (l.includes('missing_required_scope') || l.includes('insufficient_scope')));
 	    assert.ok(hasRejected, 'write_rejected event logged');
 	  });
 	});

@@ -559,7 +559,7 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
 
 	    // Sign a test RS256 JWT via the test keypair
 	    const token = await _signTestToken({
-	      sub: USER_A.id,
+	      sub: '550e8400-e29b-41d4-a716-446655440099',
 	      agent_id: 'test-agent',
 	      client_id: 'mc_test',
 	      scope: 'forum.read forum.write',
@@ -591,7 +591,7 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
     });
 
 	    const token = await _signTestToken({
-	      sub: USER_A.id,
+	      sub: '550e8400-e29b-41d4-a716-446655440099',
 	      agent_id: 'test-agent',
 	      client_id: 'mc_test',
 	      scope: 'forum.read forum.write',
