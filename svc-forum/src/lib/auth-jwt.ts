@@ -262,28 +262,35 @@ function isInfrastructureError(err: unknown): boolean {
   return false;
 }
 
-// ── Production verifier (lazy-init, bound to the trusted remote JWKS) ──────
+// ── Production verifier ─────────────────────────────────────────────────────
+//
+// The trusted JWKS URL is frozen at module load from the validated env
+// (src/config/env.ts parses + validates AUTH_JWKS_URL at startup). It is
+// NEVER re-read from process.env at request time, so a running process
+// cannot silently switch JWKS sources.
+//
+// The RemoteJWKSet is created lazily (first verify call) from the frozen URL.
+// There is NO global set/reset test hook: tests build an isolated verifier
+// via createAccessTokenVerifier(localKeyResolver), or set AUTH_JWKS_URL in a
+// dedicated test process before any module import.
 
-let _lazyProductionVerifier: ReturnType<typeof createAccessTokenVerifier> | null = null;
+const trustedJwksUrl = new URL(env.AUTH_JWKS_URL);
 
-function getProductionVerifier() {
-  if (!_lazyProductionVerifier) {
-    // Read env at first-call time so tests can set process.env before any verify.
-    const jwksUrl = process.env.AUTH_JWKS_URL || 'http://localhost:4001/.well-known/jwks.json';
-    _lazyProductionVerifier = createAccessTokenVerifier(
-      createRemoteJWKSet(new URL(jwksUrl)),
-    );
-  }
-  return _lazyProductionVerifier;
-}
+let productionVerifier:
+  | ReturnType<typeof createAccessTokenVerifier>
+  | undefined;
 
 /**
- * Production default verifier: lazily bound to the remote auth-service JWKS.
- * Tests should set process.env.AUTH_JWKS_URL (or use createAccessTokenVerifier
- * directly via createLocalJWKSet) before any call to this function.
+ * Production default verifier: lazily bound to the trusted remote JWKS
+ * configured at startup via env.AUTH_JWKS_URL.
  */
-export async function verifyAuthAccessToken(token: string): Promise<VerifiedAccessToken> {
-  return getProductionVerifier()(token);
+export function verifyAuthAccessToken(token: string): Promise<VerifiedAccessToken> {
+  productionVerifier ??=
+    createAccessTokenVerifier(
+      createRemoteJWKSet(trustedJwksUrl),
+    );
+
+  return productionVerifier(token);
 }
 
 // Re-export the local-JWKS constructor so tests can build an isolated verifier
