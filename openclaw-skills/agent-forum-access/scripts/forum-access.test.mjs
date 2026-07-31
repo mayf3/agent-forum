@@ -64,18 +64,40 @@ function createMockServer(customRoutes) {
     const url = req.url;
     const method = req.method;
 
-    if (url === '/api/auth/token-login' && method === 'POST') {
-      const parsed = JSON.parse(body || '{}');
-      if (parsed.token === 'test-pre-signed-token') {
-        sendJson(res, 200, {
-          accessToken: 'mock-access-jwt',
-          user: { id: 'mock-uuid', name: 'Test Agent', agentId: 'test-agent', role: 'agent' },
-        });
-      } else {
-        sendJson(res, 401, { message: 'Invalid token' });
-      }
-      return;
-    }
+	    if (url === '/oauth/token' && method === 'POST') {
+	      // Check for Basic auth and x-www-form-urlencoded body with client_credentials
+	      const authHeader = req.headers['authorization'] || '';
+	      const contentType = req.headers['content-type'] || '';
+	      const hasBasic = authHeader.startsWith('Basic ');
+	      const hasFormEncoded = contentType.includes('application/x-www-form-urlencoded');
+	      const hasClientCredentials = body && body.includes('grant_type=client_credentials');
+	      const hasSvcForum = body && body.includes('resource=svc-forum');
+	      const hasForumScopes = body && body.includes('scope=forum.read');
+
+	      // Validate credentials: expect test-client-id:test-client-secret
+	      const expectedCreds = Buffer.from('test-client-id:test-client-secret').toString('base64');
+	      const providedCreds = authHeader.replace('Basic ', '');
+	      const validCredentials = providedCreds === expectedCreds;
+
+	      if (hasBasic && hasFormEncoded && hasClientCredentials && hasSvcForum && hasForumScopes && validCredentials) {
+	        // Return a minimal JWT that decodeTokenClaims can parse
+	        const payload = Buffer.from(JSON.stringify({
+	          agent_id: 'test-agent',
+	          sub: 'mock-uuid',
+	          client_id: 'test-client',
+	          scope: 'forum.read forum.write',
+	        })).toString('base64url');
+	        sendJson(res, 200, {
+	          access_token: `header.${payload}.fakesignature`,
+	          token_type: 'Bearer',
+	          expires_in: 3600,
+	          scope: 'forum.read forum.write',
+	        });
+	      } else {
+	        sendJson(res, 401, { error: 'invalid_client', error_description: 'Invalid client credentials' });
+	      }
+	      return;
+	    }
 
     if (url === '/api/threads/' + VALID_UUID && method === 'GET') {
       sendJson(res, 200, { thread: { id: VALID_UUID, title: 'Test Thread', status: 'active' } });
@@ -151,13 +173,14 @@ function createMockServer(customRoutes) {
  * (needed for the mock HTTP server).
  */
 function runScriptAsync(args, stdin, port) {
-  return new Promise((resolve, reject) => {
+	return new Promise((resolve, reject) => {
     const child = spawn('node', [SCRIPT, ...args], {
       encoding: 'utf-8',
       timeout: 5000,
       env: {
         ...process.env,
-        AGENT_FORUM_PRE_SIGNED_TOKEN: 'test-pre-signed-token',
+        AGENT_FORUM_CLIENT_ID: 'test-client-id',
+        AGENT_FORUM_CLIENT_SECRET: 'test-client-secret',
         AGENT_FORUM_BASE_URL: `http://127.0.0.1:${port}`,
         AUTH_SERVICE_URL: `http://127.0.0.1:${port}`,
       },
@@ -245,7 +268,8 @@ describe('static analysis', () => {
   it('env var config for base URLs', () => {
     assert.ok(SOURCE.includes('AGENT_FORUM_BASE_URL'));
     assert.ok(SOURCE.includes('AUTH_SERVICE_URL'));
-    assert.ok(SOURCE.includes('AGENT_FORUM_PRE_SIGNED_TOKEN'));
+    assert.ok(SOURCE.includes('AGENT_FORUM_CLIENT_ID'));
+    assert.ok(SOURCE.includes('AGENT_FORUM_CLIENT_SECRET'));
   });
 
   it('no system/decision in allowed kinds', () => {
@@ -270,10 +294,10 @@ describe('static analysis', () => {
     }
   });
 
-  it('login does not print accessToken', () => {
-    const m = SOURCE.match(/async function cmdLogin[\s\S]{0,1500}console\.log\(JSON/);
+  it('login output does not contain access_token key', () => {
+    const m = SOURCE.match(/console\.log\(JSON\.stringify\(\{([\s\S]{0,500})\},.*\)\)/);
     if (m) {
-      assert.ok(!m[0].includes('accessToken'));
+      assert.ok(!m[0].includes('access_token'), 'access_token must not be in JSON output');
     }
   });
 });
@@ -281,10 +305,10 @@ describe('static analysis', () => {
 // ── 2. CLI Argument Parsing (sync — no HTTP calls made) ──────────────────
 
 describe('cli parsing', () => {
-  it('no args shows usage', () => {
+	  it('no args shows usage', () => {
     const r = spawnSync('node', [SCRIPT], {
       encoding: 'utf-8', timeout: 3000,
-      env: { ...process.env, AGENT_FORUM_PRE_SIGNED_TOKEN: 'test' },
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
     });
     assert.equal(r.status, 1);
     assert.ok(r.stderr.includes('Usage'));
@@ -293,7 +317,7 @@ describe('cli parsing', () => {
   it('unknown command shows error', () => {
     const r = spawnSync('node', [SCRIPT, 'bogus'], {
       encoding: 'utf-8', timeout: 3000,
-      env: { ...process.env, AGENT_FORUM_PRE_SIGNED_TOKEN: 'test' },
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
     });
     assert.equal(r.status, 1);
     assert.ok(r.stderr.includes('Unknown'));
@@ -302,7 +326,7 @@ describe('cli parsing', () => {
   it('read-thread without threadId fails', () => {
     const r = spawnSync('node', [SCRIPT, 'read-thread'], {
       encoding: 'utf-8', timeout: 3000,
-      env: { ...process.env, AGENT_FORUM_PRE_SIGNED_TOKEN: 'test' },
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
     });
     assert.equal(r.status, 1);
     assert.ok(r.stderr.includes('requires a threadId'));
@@ -311,7 +335,7 @@ describe('cli parsing', () => {
   it('read-transcript without threadId fails', () => {
     const r = spawnSync('node', [SCRIPT, 'read-transcript'], {
       encoding: 'utf-8', timeout: 3000,
-      env: { ...process.env, AGENT_FORUM_PRE_SIGNED_TOKEN: 'test' },
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
     });
     assert.equal(r.status, 1);
     assert.ok(r.stderr.includes('requires a threadId'));
@@ -320,7 +344,7 @@ describe('cli parsing', () => {
   it('post-message without threadId fails', () => {
     const r = spawnSync('node', [SCRIPT, 'post-message'], {
       encoding: 'utf-8', timeout: 3000,
-      env: { ...process.env, AGENT_FORUM_PRE_SIGNED_TOKEN: 'test' },
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
     });
     assert.equal(r.status, 1);
     assert.ok(r.stderr.includes('requires a threadId'));
@@ -329,7 +353,7 @@ describe('cli parsing', () => {
   it('post-message without --kind fails', () => {
     const r = spawnSync('node', [SCRIPT, 'post-message', 'thread-1'], {
       encoding: 'utf-8', timeout: 3000,
-      env: { ...process.env, AGENT_FORUM_PRE_SIGNED_TOKEN: 'test' },
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
     });
     assert.equal(r.status, 1);
     assert.ok(r.stderr.includes('--kind'));
@@ -338,7 +362,7 @@ describe('cli parsing', () => {
   it('post-message with invalid kind fails', () => {
     const r = spawnSync('node', [SCRIPT, 'post-message', 'thread-1', '--kind', 'invalid'], {
       encoding: 'utf-8', timeout: 3000, input: 'content',
-      env: { ...process.env, AGENT_FORUM_PRE_SIGNED_TOKEN: 'test' },
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
     });
     assert.equal(r.status, 1);
     assert.ok(r.stderr.includes('Invalid kind'));
@@ -347,19 +371,19 @@ describe('cli parsing', () => {
   it('readiness without threadId fails', () => {
     const r = spawnSync('node', [SCRIPT, 'readiness'], {
       encoding: 'utf-8', timeout: 3000,
-      env: { ...process.env, AGENT_FORUM_PRE_SIGNED_TOKEN: 'test' },
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
     });
     assert.equal(r.status, 1);
     assert.ok(r.stderr.includes('requires a threadId'));
   });
 
-  it('missing PRE_SIGNED_TOKEN exits', () => {
-    const r = spawnSync('node', [SCRIPT, 'login'], {
+  it('missing CLIENT_ID exits', () => {
+    const r = spawnSync('node', [SCRIPT], {
       encoding: 'utf-8', timeout: 3000,
-      env: { ...process.env, AGENT_FORUM_PRE_SIGNED_TOKEN: '' },
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: '', AGENT_FORUM_CLIENT_SECRET: '' },
     });
     assert.equal(r.status, 1);
-    assert.ok(r.stderr.includes('AGENT_FORUM_PRE_SIGNED_TOKEN'));
+    assert.ok(r.stderr.includes('AGENT_FORUM_CLIENT_ID'));
   });
 });
 
@@ -390,15 +414,17 @@ describe('integration', () => {
     const o = JSON.parse(r.stdout);
     assert.equal(o.loggedIn, true);
     assert.equal(o.agentId, 'test-agent');
-    assert.equal(o.name, 'Test Agent');
+    assert.equal(o.principalId, 'mock-uuid');
+    assert.ok(o.scope);
   });
 
   it('login failure exits with error', async () => {
     const child = spawn('node', [SCRIPT, 'login'], {
       encoding: 'utf-8', timeout: 5000,
-      env: {
+	      env: {
         ...process.env,
-        AGENT_FORUM_PRE_SIGNED_TOKEN: 'wrong-token',
+        AGENT_FORUM_CLIENT_ID: 'wrong-client-id',
+        AGENT_FORUM_CLIENT_SECRET: 'wrong-secret',
         AGENT_FORUM_BASE_URL: `http://127.0.0.1:${port}`,
         AUTH_SERVICE_URL: `http://127.0.0.1:${port}`,
       },
@@ -407,8 +433,9 @@ describe('integration', () => {
     child.stderr.on('data', (d) => { stderr += d; });
     const code = await new Promise(r => child.on('close', r));
     assert.equal(code, 1);
-    assert.ok(stderr.includes('Error'));
-    assert.ok(stderr.includes('Invalid token'));
+    const lower = stderr.toLowerCase();
+    assert.ok(lower.includes('error'), 'stderr should include Error');
+    assert.ok(lower.includes('invalid') || lower.includes('fail'), 'stderr should describe the failure');
   });
 
   // ── Read Thread ──
@@ -591,9 +618,10 @@ describe('integration', () => {
   it('no stack trace in error output', async () => {
     const child = spawn('node', [SCRIPT, 'read-thread', 'nonexistent'], {
       encoding: 'utf-8', timeout: 5000,
-      env: {
+	      env: {
         ...process.env,
-        AGENT_FORUM_PRE_SIGNED_TOKEN: 'test-pre-signed-token',
+        AGENT_FORUM_CLIENT_ID: 'test-client-id',
+        AGENT_FORUM_CLIENT_SECRET: 'test-client-secret',
         AGENT_FORUM_BASE_URL: `http://127.0.0.1:${port}`,
         AUTH_SERVICE_URL: `http://127.0.0.1:${port}`,
       },

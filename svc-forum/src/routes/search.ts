@@ -2,11 +2,13 @@ import { Router } from 'express';
 import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
+import { requireReadScope } from '../middleware/scope-guard.js';
 import * as db from '../lib/data-access.js';
 
 export const searchRouter = Router();
 
 searchRouter.use(authRequired);
+searchRouter.use(requireReadScope());
 
 // GET /api/search?q=...
 searchRouter.get('/', asyncHandler(async (req, res) => {

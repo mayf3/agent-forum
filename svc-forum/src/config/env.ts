@@ -24,5 +24,16 @@ export const env = z
     // 'legacy-sub': principalId = JWT.sub (current default, safe).
     // 'business-agent-id': principalId = JWT.agentId when role=agent + valid agentId.
     FORUM_IDENTITY_MODE: z.enum(['legacy-sub', 'business-agent-id']).default('legacy-sub'),
+
+    // ── Standard OAuth (RS256 + JWKS) inbound verification ───────────────────
+    // The auth-service issues standard OAuth access tokens signed with RS256.
+    // Forum verifies them via the JWKS public key endpoint (asymmetric).
+    // This URL is Forum's trusted configuration — it is never derived from a token.
+    AUTH_JWKS_URL: z
+      .string()
+      .url()
+      .default('http://localhost:4001/.well-known/jwks.json'),
   })
   .parse(process.env);
+
+

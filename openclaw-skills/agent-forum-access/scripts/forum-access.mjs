@@ -4,7 +4,7 @@
  * agent-forum-access — Shared OpenClaw skill for Agent Forum thin access.
  *
  * Provides four capabilities:
- *   1. login           — authenticate via pre-signed token, cache JWT in-process
+ *   1. login           — obtain a standard OAuth access token, cache in-process
  *   2. read-thread     — fetch thread metadata
  *   3. read-transcript — fetch thread transcript (markdown or JSON)
  *   4. post-message    — post a message to a thread (content from stdin)
@@ -13,10 +13,39 @@
  * No task/inbox/claim/complete/fail/cron concepts.  Only notification-driven
  * agent collaboration.
  *
+ * ── Authentication: standard OAuth2 client_credentials ──────────────────────
+ * Obtains an RS256 access token from the auth-service `/oauth/token` endpoint:
+ *   POST /oauth/token
+ *   Content-Type: application/x-www-form-urlencoded
+ *   Authorization: Basic base64(client_id:client_secret)
+ *   grant_type=client_credentials&resource=svc-forum&scope=forum.read forum.write
+ *
+ * Credentials come from (never from arguments/stdin):
+ *   AGENT_FORUM_CLIENT_ID          (required)
+ *   AGENT_FORUM_CLIENT_SECRET      (optional — raw client_secret)
+ *   AGENT_FORUM_CLIENT_SECRET_FILE (optional — path to file with client_secret)
+ *
+ * Token lifecycle (short-lived, matches the auth-service TTL):
+ *   - Cached in-memory only; refreshed proactively before `exp`.
+ *   - Concurrent callers share a single refresh Promise (deduplication).
+ *   - On a GET that receives a clear token-invalid error (TOKEN_INVALID_OR_EXPIRED),
+ *     clear the cache, refresh once, and retry exactly once; a second failure stops.
+ *   - Contract errors (TOKEN_CONTRACT_INVALID), permission errors (403),
+ *     and JWKS-unavailable (503) do NOT trigger a refresh.
+ *   - POST/PUT/DELETE are never auto-retried (the token is refreshed so the
+ *     caller can retry the operation explicitly).
+ *
+ * This script does NOT use:
+ *   - abandoned token-login endpoint (Forum-specific, removed)
+ *   - AGENT_FORUM_PRE_SIGNED_TOKEN / pre-signed JWT
+ *   - AGENT_FORUM_JWT_SECRET / local JWT minting
+ *
  * Environment variables:
  *   AGENT_FORUM_BASE_URL       (default: http://localhost:3460)
- *   AUTH_SERVICE_URL           (default: http://localhost:3457)
- *   AGENT_FORUM_PRE_SIGNED_TOKEN  (required)
+ *   AUTH_SERVICE_URL           (default: http://localhost:4001)
+ *   AGENT_FORUM_CLIENT_ID      (required)
+ *   AGENT_FORUM_CLIENT_SECRET  (optional — or use _FILE)
+ *   AGENT_FORUM_CLIENT_SECRET_FILE (optional)
  *
  * Usage:
  *   forum-access.mjs login
@@ -32,14 +61,34 @@
  *   system | decision
  */
 
+import { readFileSync } from 'node:fs';
+
 // ── Config from environment ──────────────────────────────────────────────
 
-const FORUM_BASE_URL   = process.env.AGENT_FORUM_BASE_URL   || 'http://localhost:3460';
-const AUTH_URL         = process.env.AUTH_SERVICE_URL       || 'http://localhost:3457';
-const PRE_SIGNED_TOKEN = process.env.AGENT_FORUM_PRE_SIGNED_TOKEN || '';
+const FORUM_BASE_URL = process.env.AGENT_FORUM_BASE_URL || 'http://localhost:3460';
+const AUTH_URL       = process.env.AUTH_SERVICE_URL    || 'http://localhost:4001';
+const CLIENT_ID        = process.env.AGENT_FORUM_CLIENT_ID || '';
+const CLIENT_SECRET      = process.env.AGENT_FORUM_CLIENT_SECRET || '';
+const CLIENT_SECRET_FILE = process.env.AGENT_FORUM_CLIENT_SECRET_FILE || '';
 
-if (!PRE_SIGNED_TOKEN) {
-  console.error('[forum-access] FATAL: AGENT_FORUM_PRE_SIGNED_TOKEN is not set');
+// Resolve client_secret: prefer direct env var, fall back to file.
+let _resolvedClientSecret = '';
+if (CLIENT_SECRET) {
+  _resolvedClientSecret = CLIENT_SECRET;
+} else if (CLIENT_SECRET_FILE) {
+  try {
+    _resolvedClientSecret = readFileSync(CLIENT_SECRET_FILE, 'utf-8').trim();
+  } catch (err) {
+    console.error(`[forum-access] FATAL: Cannot read AGENT_FORUM_CLIENT_SECRET_FILE: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+if (!CLIENT_ID || !_resolvedClientSecret) {
+  console.error(
+    '[forum-access] FATAL: Standard OAuth credentials not configured.\n' +
+    '  Set AGENT_FORUM_CLIENT_ID and AGENT_FORUM_CLIENT_SECRET (or AGENT_FORUM_CLIENT_SECRET_FILE).'
+  );
   process.exit(1);
 }
 
@@ -47,12 +96,22 @@ if (!PRE_SIGNED_TOKEN) {
 
 const REQUEST_TIMEOUT = 15_000;        // 15 seconds
 const MAX_RESPONSE_SIZE = 500_000;     // 500 KB
-
+const PRE_REFRESH_SECONDS = 60;        // refresh 60s before expiry
 const ALLOWED_MESSAGE_KINDS = ['comment', 'proposal', 'challenge', 'clarification', 'evidence'];
+
+// Standard OAuth request constants.
+const OAUTH_RESOURCE = 'svc-forum';
+const OAUTH_SCOPE = 'forum.read forum.write';
+
+// ── Token cache ──────────────────────────────────────────────────────────
+
+let _cachedAccessToken = null;   // raw JWT string
+let _cachedExpiresAt = 0;        // unix timestamp (seconds); 0 = unknown
+let _refreshPromise = null;      // shared Promise to deduplicate concurrent refreshes
 
 // ── Safe HTTP helper ─────────────────────────────────────────────────────
 
-async function fetchJson(url, options = {}) {
+async function fetchResponse(url, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
@@ -61,7 +120,6 @@ async function fetchJson(url, options = {}) {
       ...options,
       signal: controller.signal,
       headers: {
-        'Content-Type': 'application/json',
         ...(options.headers || {}),
       },
     });
@@ -114,45 +172,160 @@ function safePathSegment(s) {
   return s.replace(/[^a-zA-Z0-9\-_.]/g, '');
 }
 
-// ── Auth: token-login ────────────────────────────────────────────────────
+// ── Auth: standard OAuth client_credentials ──────────────────────────────
 
-let _cachedAccessToken = null;
+/**
+ * Decode a JWT payload without verification to extract the `exp` claim.
+ */
+function decodeExp(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return 0;
+    const payload = JSON.parse(
+      Buffer.from(parts[1], 'base64url').toString('utf-8'),
+    );
+    return typeof payload.exp === 'number' ? payload.exp : 0;
+  } catch {
+    return 0;
+  }
+}
 
-async function login() {
-  const url = `${AUTH_URL}/api/auth/token-login`;
-  const { ok, status, data } = await fetchJson(url, {
+/**
+ * Obtain a standard OAuth access token from /oauth/token and cache it.
+ */
+async function doLogin() {
+  const url = `${AUTH_URL}/oauth/token`;
+  const credentials = Buffer.from(`${CLIENT_ID}:${_resolvedClientSecret}`).toString('base64');
+  const body = `grant_type=client_credentials&resource=${encodeURIComponent(OAUTH_RESOURCE)}&scope=${encodeURIComponent(OAUTH_SCOPE)}`;
+
+  const { ok, status, data } = await fetchResponse(url, {
     method: 'POST',
-    body: JSON.stringify({ token: PRE_SIGNED_TOKEN }),
+    headers: {
+      'Authorization': `Basic ${credentials}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
   });
 
   if (!ok) {
-    const msg = (data && data.message) || `Login failed (HTTP ${status})`;
+    const msg = (data && (data.error_description || data.message)) ||
+                (data && data.error) ||
+                `Login failed (HTTP ${status})`;
     throw new Error(msg);
   }
 
-  if (!data.accessToken || typeof data.accessToken !== 'string') {
-    throw new Error('Login response missing accessToken');
+  // Standard OAuth uses snake_case `access_token`.
+  if (!data.access_token || typeof data.access_token !== 'string') {
+    throw new Error('Login response missing access_token');
   }
 
-  _cachedAccessToken = data.accessToken;
+  _cachedAccessToken = data.access_token;
+  _cachedExpiresAt = decodeExp(data.access_token);
   return data;
 }
 
-function getAccessToken() {
-  if (!_cachedAccessToken) throw new Error('Not logged in — call login() first');
+/**
+ * Get a valid access token, refreshing if needed.
+ * Concurrent calls share a single refresh Promise (deduplication).
+ */
+async function getAccessToken() {
+  const nowSec = Date.now() / 1000;
+  const needsRefresh =
+    !_cachedAccessToken ||
+    (_cachedExpiresAt > 0 && nowSec >= _cachedExpiresAt - PRE_REFRESH_SECONDS);
+
+  if (needsRefresh) {
+    if (!_refreshPromise) {
+      _refreshPromise = doLogin()
+        .then(() => {
+          _refreshPromise = null;
+          return _cachedAccessToken;
+        })
+        .catch((err) => {
+          _refreshPromise = null;
+          throw err;
+        });
+    }
+    return _refreshPromise;
+  }
+
   return _cachedAccessToken;
 }
 
-function authHeader() {
-  return { Authorization: `Bearer ${getAccessToken()}` };
+/**
+ * Force-clear the cached token (used on a token-invalid 401).
+ */
+function clearTokenCache() {
+  _cachedAccessToken = null;
+  _cachedExpiresAt = 0;
+}
+
+async function authHeader() {
+  const token = await getAccessToken();
+  return { Authorization: `Bearer ${token}` };
+}
+
+// ── Error-code helpers ───────────────────────────────────────────────────
+
+/**
+ * A response error the client may refresh in response to.
+ * Only TOKEN_INVALID_OR_EXPIRED means the token is stale/expired and a fresh
+ * token could help. CONTRACT_INVALID, INSUFFICIENT_SCOPE, and AUTH_JWKS_UNAVAILABLE
+ * must NOT trigger a refresh.
+ */
+function isRefreshableTokenError(status, data) {
+  return status === 401 && data && data.error === 'TOKEN_INVALID_OR_EXPIRED';
+}
+
+// ── Authenticated request with 401 handling ─────────────────────────────
+
+/**
+ * Wrapper around fetchResponse that handles token-invalid 401s for GET:
+ *   - On a refreshable token error: clear cache, refresh once, retry once.
+ *   - On a contract/permission/503 error: surface as-is (no refresh).
+ *   - POST/PUT/DELETE: never auto-retry (the cache is cleared so the caller
+ *     can refresh + retry explicitly).
+ */
+async function authenticatedFetch(method, url, bodyPayload = null) {
+  const headers = await authHeader();
+  const body = bodyPayload ? JSON.stringify(bodyPayload) : undefined;
+
+  const result = await fetchResponse(url, {
+    method,
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body,
+  });
+
+  if (isRefreshableTokenError(result.status, result.data)) {
+    clearTokenCache();
+
+    if (method === 'GET') {
+      // Retry exactly once with a freshly minted token.
+      const freshHeaders = await authHeader();
+      const retryResult = await fetchResponse(url, {
+        method,
+        headers: { ...freshHeaders, 'Content-Type': 'application/json' },
+        body,
+      });
+      if (isRefreshableTokenError(retryResult.status, retryResult.data)) {
+        // Second consecutive token failure — stop.
+        throw new Error('Token refresh failed after retry — authentication rejected');
+      }
+      return retryResult;
+    }
+
+    // Write operations: refresh but do NOT retry.
+    throw new Error('Authentication expired (HTTP 401) — token refreshed, please retry operation');
+  }
+
+  return result;
 }
 
 // ── Forum API calls ──────────────────────────────────────────────────────
 
 async function listThreads() {
-  await login();
   const url = `${FORUM_BASE_URL}/api/threads`;
-  const { ok, status, data } = await fetchJson(url, { headers: authHeader() });
+  const { ok, status, data } = await authenticatedFetch('GET', url);
   if (!ok) throw new Error(`list-threads failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
   return data;
 }
@@ -161,7 +334,7 @@ async function getThread(threadId) {
   requireFullUuid(threadId, 'threadId');
   const safeId = safePathSegment(threadId);
   const url = `${FORUM_BASE_URL}/api/threads/${safeId}`;
-  const { ok, status, data } = await fetchJson(url, { headers: authHeader() });
+  const { ok, status, data } = await authenticatedFetch('GET', url);
   if (!ok) throw new Error(`read-thread failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
   return data.thread;
 }
@@ -170,7 +343,7 @@ async function getTranscript(threadId, format = 'md') {
   requireFullUuid(threadId, 'threadId');
   const safeId = safePathSegment(threadId);
   const url = `${FORUM_BASE_URL}/api/threads/${safeId}/transcript?format=${format}`;
-  const { ok, status, data, raw } = await fetchJson(url, { headers: authHeader() });
+  const { ok, status, data, raw } = await authenticatedFetch('GET', url);
 
   if (!ok) throw new Error(`read-transcript failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
 
@@ -196,13 +369,9 @@ async function postMessage(threadId, content, kind = 'comment') {
   }
 
   const url = `${FORUM_BASE_URL}/api/threads/${safeId}/messages`;
-  const { ok, status, data } = await fetchJson(url, {
-    method: 'POST',
-    headers: authHeader(),
-    body: JSON.stringify({
-      content: content.trim(),
-      kind,
-    }),
+  const { ok, status, data } = await authenticatedFetch('POST', url, {
+    content: content.trim(),
+    kind,
   });
 
   if (!ok) throw new Error(`post-message failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
@@ -213,7 +382,7 @@ async function getReadiness(threadId) {
   requireFullUuid(threadId, 'threadId');
   const safeId = safePathSegment(threadId);
   const url = `${FORUM_BASE_URL}/api/threads/${safeId}/review-readiness`;
-  const { ok, status, data } = await fetchJson(url, { headers: authHeader() });
+  const { ok, status, data } = await authenticatedFetch('GET', url);
   if (!ok) throw new Error(`readiness failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
   return data;
 }
@@ -221,14 +390,31 @@ async function getReadiness(threadId) {
 // ── CLI commands ─────────────────────────────────────────────────────────
 
 async function cmdLogin() {
-  const result = await login();
-  // Print only safe user info (access token is never printed)
+  const result = await doLogin();
+  // Print only safe info derived from the token (the access token itself is never printed).
+  const claims = decodeTokenClaims(result.access_token);
   console.log(JSON.stringify({
     loggedIn: true,
-    agentId: result.user.agentId,
-    name: result.user.name,
-    role: result.user.role,
+    agentId: claims.agent_id || '',
+    principalId: claims.sub || '',
+    clientId: claims.client_id || '',
+    scope: claims.scope || OAUTH_SCOPE,
+    expiresIn: result.expires_in,
   }, null, 2));
+}
+
+/**
+ * Decode a JWT payload (without verification) to read identity claims for
+ * the login summary. Signature is verified by the server, not here.
+ */
+function decodeTokenClaims(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return {};
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+  } catch {
+    return {};
+  }
 }
 
 async function cmdReadThread(threadId) {
@@ -236,7 +422,7 @@ async function cmdReadThread(threadId) {
     console.error('[forum-access] read-thread requires a threadId');
     process.exit(1);
   }
-  await login();
+  await getAccessToken(); // ensure logged in
   const thread = await getThread(threadId);
   // Always expose both threadId (full UUID) and shortId (display-only prefix)
   thread.threadId = thread.id;
@@ -251,7 +437,7 @@ async function cmdReadTranscript(threadId, format) {
   }
 
   const fmt = format === 'json' ? 'json' : 'md';
-  await login();
+  await getAccessToken(); // ensure logged in
 
   if (fmt === 'json') {
     const data = await getTranscript(threadId, 'json');
@@ -289,7 +475,7 @@ async function cmdPostMessage(threadId, kind) {
     process.exit(1);
   }
 
-  await login();
+  await getAccessToken(); // ensure logged in
   const message = await postMessage(threadId, stdin.trim(), kind);
   console.log(JSON.stringify({
     status: 'posted',
@@ -300,7 +486,7 @@ async function cmdPostMessage(threadId, kind) {
 }
 
 async function cmdListThreads() {
-  await login();
+  await getAccessToken(); // ensure logged in
   const data = await listThreads();
   // Always output threadId as full UUID (never truncated)
   for (const t of (data.threads || data.items || [])) {
@@ -316,7 +502,7 @@ async function cmdReadiness(threadId) {
     console.error('[forum-access] readiness requires a threadId');
     process.exit(1);
   }
-  await login();
+  await getAccessToken(); // ensure logged in
   const readiness = await getReadiness(threadId);
 
   // Readiness output is always read-only
@@ -351,38 +537,39 @@ async function main() {
 
   if (!cmd) {
     console.error(`Usage:
-	  forum-access.mjs login                           — authenticate and print agent info
-	  forum-access.mjs list-threads                    — list all threads (returns full UUID)
-	  forum-access.mjs read-thread <threadId>          — fetch thread metadata
-	  forum-access.mjs read-transcript <threadId>      — fetch transcript as markdown
-	  forum-access.mjs read-transcript <threadId> --format json  — fetch transcript as JSON
-	  forum-access.mjs post-message <threadId> --kind <kind>     — post message (content from stdin)
-	  forum-access.mjs readiness <threadId>            — check required reviewer gate (read-only)
+  forum-access.mjs login                           — authenticate and print agent info
+  forum-access.mjs list-threads                    — list all threads (returns full UUID)
+  forum-access.mjs read-thread <threadId>          — fetch thread metadata
+  forum-access.mjs read-transcript <threadId>      — fetch transcript as markdown
+  forum-access.mjs read-transcript <threadId> --format json  — fetch transcript as JSON
+  forum-access.mjs post-message <threadId> --kind <kind>     — post message (content from stdin)
+  forum-access.mjs readiness <threadId>            — check required reviewer gate (read-only)
 
 NOTE: threadId must always be the complete UUID (e.g. 52423a12-a9d7-45a4-a144-63b15247aee2).
 The 8-character display prefix (e.g. 52423a12) cannot be used for API calls.
 
 Supported message kinds: ${ALLOWED_MESSAGE_KINDS.join(', ')}
 
-Environment variables:
-  AGENT_FORUM_BASE_URL      (default: http://localhost:3460)
-  AUTH_SERVICE_URL          (default: http://localhost:3457)
-  AGENT_FORUM_PRE_SIGNED_TOKEN  (required)
+Authentication (standard OAuth2 client_credentials):
+  AGENT_FORUM_BASE_URL          (default: http://localhost:3460)
+  AUTH_SERVICE_URL              (default: http://localhost:4001)
+  AGENT_FORUM_CLIENT_ID         (required)
+  AGENT_FORUM_CLIENT_SECRET     (or AGENT_FORUM_CLIENT_SECRET_FILE)
 `);
     process.exit(1);
   }
 
   try {
-	    switch (cmd) {
-	      case 'login':
-	        await cmdLogin();
-	        break;
+    switch (cmd) {
+      case 'login':
+        await cmdLogin();
+        break;
 
-	      case 'list-threads':
-	        await cmdListThreads();
-	        break;
+      case 'list-threads':
+        await cmdListThreads();
+        break;
 
-	      case 'read-thread': {
+      case 'read-thread': {
         const threadId = args[1];
         await cmdReadThread(threadId);
         break;
