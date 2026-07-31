@@ -1,8 +1,15 @@
 /**
  * Scope-based authorization middleware.
  *
- * Enforces that agent tokens with only "forum.read" scope cannot perform
- * write operations. Fails closed on insufficient scope.
+ * Enforces that a verified standard OAuth access token also carries the scope
+ * required for the operation:
+ *   • read operations  → forum.read
+ *   • write operations → forum.write
+ *
+ * All inbound tokens are standard OAuth (RS256/JWKS) with principal_type=agent,
+ * so scope is enforced uniformly — there is no longer a human-token bypass.
+ * Fails closed (403 INSUFFICIENT_SCOPE) on missing scope. A scope failure is a
+ * permission error, NOT a token-validity error, so clients must NOT refresh.
  */
 
 import type { Request, Response, NextFunction } from 'express';
@@ -11,7 +18,7 @@ import { auditLog } from '../lib/audit.js';
 
 /**
  * Require specific scopes to access this endpoint.
- * Fails 403 if the required scopes are not present in req.user.scopes.
+ * Fails 403 INSUFFICIENT_SCOPE if any required scope is absent.
  */
 export function requireScope(...requiredScopes: string[]) {
   return (req: Request, _res: Response, next: NextFunction): void => {
@@ -36,7 +43,7 @@ export function requireScope(...requiredScopes: string[]) {
           success: false,
           errorCategory: 'missing_required_scope',
         });
-        throw new HttpError(403, `Required scope "${required}" not present`);
+        throw new HttpError(403, `INSUFFICIENT_SCOPE: required "${required}"`);
       }
     }
 
@@ -45,48 +52,19 @@ export function requireScope(...requiredScopes: string[]) {
 }
 
 /**
- * Write scope guard — blocks write operations for agent tokens
- * that only have "forum.read" scope (no "forum.write").
- *
- * This ensures agent tokens are limited to read-only access unless
- * explicitly granted write scope.
- *
- * Human tokens (auth_service_jwt, adc_jwt) are NOT restricted by this guard
- * since they have their own role-based authorization.
+ * Read scope guard — requires forum.read.
+ * Use on all GET endpoints so a token without forum.read cannot read forum data.
+ */
+export function requireReadScope() {
+  return requireScope('forum.read');
+}
+
+/**
+ * Write scope guard — requires forum.write.
+ * Use on all POST/PATCH/PUT/DELETE endpoints.
  */
 export function requireWriteScope() {
-  return (req: Request, _res: Response, next: NextFunction): void => {
-    const user = req.user;
-    if (!user) {
-      throw new HttpError(401, '请先登录');
-    }
-
-    // Only enforce for auth_service_agent_jwt tokens
-    if (user.authSource !== 'auth_service_agent_jwt') {
-      return next();
-    }
-
-    const userScopes: string[] = user.scopes || [];
-
-    // If the token has forum.write (or higher), allow
-    if (userScopes.includes('forum.write')) {
-      return next();
-    }
-
-    // Token only has forum.read (or other non-write scopes) — block write
-    auditLog({
-      timestamp: new Date().toISOString(),
-      type: 'auth.write_rejected',
-      authSubject: user.authSubjectId,
-      principalId: user.id,
-      agentId: user.agentId,
-      method: req.method,
-      path: req.path,
-      scope: userScopes.join(' '),
-      success: false,
-      errorCategory: 'insufficient_scope_readonly',
-    });
-
-    throw new HttpError(403, 'Insufficient scope: write operations require forum.write scope');
-  };
+  return requireScope('forum.write');
 }
+
+

@@ -20,42 +20,47 @@
  * Run: NODE_ENV=test npx tsx --test tests/forum-writer.test.ts
  */
 
-import { describe, it, before, beforeEach } from 'node:test';
+import { describe, it, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import jwt from 'jsonwebtoken';
 import express from 'express';
+import { signTestToken } from './helpers/auth-keys.js';
+
+// ── Test JWKS server (shared across all tests in this file) ────────
+// Starts a local HTTP server serving the test RSA public key so the
+// production `verifyAuthAccessToken` (lazy-init) can verify RS256 tokens.
+let _jwksCleanup: { close: () => void };
+before(async () => {
+  const { setupTestJwks } = await import('./helpers/jwks-server.js');
+  _jwksCleanup = await setupTestJwks();
+});
+after(() => { if (_jwksCleanup) _jwksCleanup.close(); });
 
 // ── Constants ─────────────────────────────────────────────────────
 
-const AUTH_SECRET = 'dev-only-auth-service-secret-16';
 const AGENT_SUB = '550e8400-e29b-41d4-a716-446655440000';
 
 // ── JWT helpers ────────────────────────────────────────────────────
 
-function signAgentToken(scopes = 'forum.read forum.write') {
-  return jwt.sign(
-    {
-      sub: AGENT_SUB,
-      iss: 'auth-service',
-      aud: 'svc-forum',
-      principal_type: 'agent',
-      agent_id: 'test-forum-agent',
-      client_id: 'test-client',
-      scope: scopes,
-    },
-    AUTH_SECRET,
-  );
+async function signAgentToken(scopes = 'forum.read forum.write') {
+  return signTestToken({
+    sub: AGENT_SUB,
+    agent_id: 'test-forum-agent',
+    client_id: 'test-client',
+    scope: scopes,
+  });
 }
 
-function signHumanToken(overrides: { role?: string; sub?: string } = {}) {
-  const payload: Record<string, string> = {
-    sub: overrides.sub || 'user-' + String(Math.random()).slice(2),
-    iss: 'auth-service',
-    aud: 'agent-platform',
-    name: 'Test User',
-  };
-  if (overrides.role !== undefined) payload.role = overrides.role;
-  return jwt.sign(payload, AUTH_SECRET);
+// Human tokens no longer exist as a valid auth path (all tokens are agent
+// tokens via standard OAuth). This helper produces a token whose
+// principal_type=user, which is rejected by the auth layer with 401.
+async function signHumanToken(overrides: { role?: string; sub?: string } = {}) {
+  return signTestToken({
+    sub: overrides.sub || ('user-' + String(Math.random()).slice(2)),
+    agent_id: 'human-test',
+    client_id: 'test-client',
+    principal_type: 'user',  // Not 'agent' — rejected at auth layer
+    scope: 'forum.read forum.write',
+  });
 }
 
 // ── In-memory database ────────────────────────────────────────────
@@ -322,7 +327,7 @@ async function request(app: any, method: string, path: string, token?: string, b
 type Principal = 'no-token' | 'requester' | 'missing-role' | 'unknown-role' | 'valid-agent';
 const PRINCIPAL_LABELS: Principal[] = ['no-token', 'requester', 'missing-role', 'unknown-role', 'valid-agent'];
 
-function getToken(principal: Principal): string | undefined {
+async function getToken(principal: Principal): Promise<string | undefined> {
   switch (principal) {
     case 'no-token': return undefined;
     case 'requester': return signHumanToken({ role: 'requester' });
@@ -335,9 +340,12 @@ function getToken(principal: Principal): string | undefined {
 function expectedStatus(principal: Principal, okStatus = 201): number {
   switch (principal) {
     case 'no-token': return 401;
-    case 'requester': return 403;
-    case 'missing-role': return 403;
-    case 'unknown-role': return 403;
+    // requester/missing-role/unknown-role now use principal_type=user tokens,
+    // rejected at the auth layer (not at forum-writer) since human tokens
+    // are no longer a valid auth path in standard OAuth mode.
+    case 'requester': return 401;
+    case 'missing-role': return 401;
+    case 'unknown-role': return 401;
     case 'valid-agent': return okStatus;
   }
 }
@@ -455,7 +463,7 @@ function matrixSuite(opts: {
     for (const principal of PRINCIPAL_LABELS) {
       await it(`${opts.method} ${opts.route} — ${principal} → ${expectedStatus(principal, okStatus)}`, async () => {
         const app = await buildApp(opts.routerModule, opts.routerExport, opts.mountPath);
-        const token = getToken(principal);
+        const token = await getToken(principal);
         const res = await request(app, opts.method, opts.route, token, opts.body);
         const expected = expectedStatus(principal, okStatus);
         assert.equal(res.status, expected,
@@ -497,17 +505,17 @@ matrixSuite({
   body: { title: 'Test thread', type: 'discussion' },
   okStatus: 201,
   extra: () => {
-    it('body cannot escalate role', async () => {
-      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
-      const token = signHumanToken({ role: 'requester' });
-      const res = await request(app, 'POST', '/api/threads', token, { title: 'Spoof', type: 'discussion', role: 'agent' });
-      assert.equal(res.status, 403);
-      assert.equal(threads.size, 0);
+	    it('body cannot escalate role', async () => {
+	      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+	      const token = await signHumanToken({ role: 'requester' });
+	      const res = await request(app, 'POST', '/api/threads', token, { title: 'Spoof', type: 'discussion', role: 'agent' });
+	      assert.equal(res.status, 401); // Human tokens rejected at auth layer
+	      assert.equal(threads.size, 0);
     });
-    it('valid agent creates thread', async () => {
-      threads.clear();
-      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
-      const token = getToken('valid-agent');
+	    it('valid agent creates thread', async () => {
+	      threads.clear();
+	      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+	      const token = await getToken('valid-agent');
       const res = await request(app, 'POST', '/api/threads', token, { title: 'Regression', type: 'discussion' });
       assert.equal(res.status, 201);
       assert.ok(res.body?.thread?.id);
@@ -518,7 +526,7 @@ matrixSuite({
     it('valid agent can GET /api/threads', async () => {
       seedThread();
       const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
-      const token = getToken('valid-agent');
+      const token = await getToken('valid-agent');
       const res = await request(app, 'GET', '/api/threads', token);
       assert.equal(res.status, 200);
     });
@@ -538,7 +546,7 @@ matrixSuite({
   extra: () => {
     it('body cannot spoof authorId', async () => {
       const app = await buildApp('../src/routes/messages.js', 'messagesRouter', '/api/threads/:threadId/messages');
-      const token = getToken('valid-agent');
+      const token = await getToken('valid-agent');
       const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/messages`, token, {
         content: 'Spoof test', kind: 'comment', authorId: 'spoofed-id', authorName: 'Spoofed', authorType: 'user',
       });
@@ -586,19 +594,19 @@ matrixSuite({
   extra: () => {
     it('valid agent archive changes status', async () => {
       const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
-      const token = getToken('valid-agent');
+      const token = await getToken('valid-agent');
       const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
       assert.equal(res.status, 200);
       const t = threads.get(SEED_THREAD_ID);
       assert.equal(t?.status, 'archived');
     });
-    it('requester cannot archive', async () => {
-      threads.get(SEED_THREAD_ID)!.status = 'open';
-      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
-      const token = signHumanToken({ role: 'requester' });
-      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
-      assert.equal(res.status, 403);
-      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
+	    it('requester cannot archive', async () => {
+	      threads.get(SEED_THREAD_ID)!.status = 'open';
+	      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+	      const token = await signHumanToken({ role: 'requester' });
+	      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
+	      assert.equal(res.status, 401); // Human tokens rejected at auth layer
+	      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
     });
   },
 });

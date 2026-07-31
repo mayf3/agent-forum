@@ -3,7 +3,7 @@ import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
 import { requireForumWriter } from '../middleware/forum-writer.js';
-import { requireWriteScope } from '../middleware/scope-guard.js';
+import { requireWriteScope, requireReadScope } from '../middleware/scope-guard.js';
 import * as db from '../lib/data-access.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
@@ -67,7 +67,7 @@ threadsRouter.post('/', authRequired, requireForumWriter, requireWriteScope(), a
 }));
 
 // GET /api/threads — list threads
-threadsRouter.get('/', authRequired, asyncHandler(async (req, res) => {
+threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req, res) => {
   const {
     type, status, agentId, contextType, contextId, q,
     page, limit,
@@ -88,7 +88,7 @@ threadsRouter.get('/', authRequired, asyncHandler(async (req, res) => {
 }));
 
 // GET /api/threads/:threadId — get single thread
-threadsRouter.get('/:threadId', authRequired, asyncHandler(async (req, res) => {
+threadsRouter.get('/:threadId', authRequired, requireReadScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
@@ -172,7 +172,7 @@ threadsRouter.post('/:threadId/archive', authRequired, requireForumWriter, requi
 }));
 
 // GET /api/threads/:threadId/transcript — get transcript (MVP core)
-threadsRouter.get('/:threadId/transcript', authRequired, asyncHandler(async (req, res) => {
+threadsRouter.get('/:threadId/transcript', authRequired, requireReadScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const format = (req.query.format as string) || 'md';
 

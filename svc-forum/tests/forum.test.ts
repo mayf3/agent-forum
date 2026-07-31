@@ -7,8 +7,17 @@
  * Run: npx tsx --test tests/forum.test.ts
  */
 
-import { describe, it, before, beforeEach } from 'node:test';
+import { describe, it, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { signTestToken } from './helpers/auth-keys.js';
+
+// ── Test JWKS server ──────────────────────────────────────────────
+let _jwksCleanup: { close: () => void };
+before(async () => {
+  const { setupTestJwks } = await import('./helpers/jwks-server.js');
+  _jwksCleanup = await setupTestJwks();
+});
+after(() => { if (_jwksCleanup) _jwksCleanup.close(); });
 
 // ── Test data ──
 
@@ -22,6 +31,7 @@ const participants = new Map<string, any>();
 const messages = new Map<string, any>();
 const snapshots = new Map<string, any>();
 const outcomes = new Map<string, any>();
+const principals = new Map<string, any>();
 
 function resetDb() {
   threads.clear();
@@ -29,6 +39,7 @@ function resetDb() {
   messages.clear();
   snapshots.clear();
   outcomes.clear();
+  principals.clear();
 }
 
 /** Generate a valid UUID v4 for mock IDs */
@@ -176,6 +187,7 @@ function createMockPrisma() {
   const m = mockStore(messages, 'message');
   const s = mockStore(snapshots, 'snapshot');
   const o = mockStore(outcomes, 'outcome');
+  const fp = mockStore(principals, 'principal');
 
   const mock: any = {
     forumThread: t,
@@ -183,6 +195,7 @@ function createMockPrisma() {
     forumThreadMessage: m,
     forumContextSnapshot: s,
     forumOutcome: o,
+    forumPrincipal: fp,
     $queryRaw: async () => [{ 1: 1 }],
     $transaction: async (fn: (tx: any) => any) => {
       const tx = {
@@ -199,6 +212,7 @@ function createMockPrisma() {
         },
         forumContextSnapshot: s,
         forumOutcome: o,
+        forumPrincipal: fp,
         $executeRaw: async () => {},
       };
       return fn(tx);
@@ -538,12 +552,13 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
       authorType: 'agent', kind: 'comment', content: 'Route-level test message',
     });
 
-    // Sign a test JWT matching the default dev secret from env.ts
-    const jwt = (await import('jsonwebtoken')).default;
-    const token = jwt.sign(
-      { sub: USER_A.id, name: USER_A.name },
-      'dev-only-change-this-secret'
-    );
+	    // Sign a test RS256 JWT via the test keypair
+	    const token = await signTestToken({
+	      sub: USER_A.id,
+	      agent_id: 'test-agent',
+	      client_id: 'mc_test',
+	      scope: 'forum.read forum.write',
+	    });
 
     const express = (await import('express')).default;
     const app = express();
@@ -570,13 +585,14 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
       createdById: USER_A.id, createdByName: USER_A.name, createdByType: 'agent',
     });
 
-    const jwt = (await import('jsonwebtoken')).default;
-    const token = jwt.sign(
-      { sub: USER_A.id, name: USER_A.name },
-      'dev-only-change-this-secret'
-    );
+	    const token = await signTestToken({
+	      sub: USER_A.id,
+	      agent_id: 'test-agent',
+	      client_id: 'mc_test',
+	      scope: 'forum.read forum.write',
+	    });
 
-    const express = (await import('express')).default;
+	    const express = (await import('express')).default;
     const app = express();
     app.use(express.json());
     const { threadsRouter } = await import('../src/routes/threads.js');
