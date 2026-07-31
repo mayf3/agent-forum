@@ -341,7 +341,7 @@ export async function getThreadReviewReadiness(threadId: string): Promise<Review
         satisfied: true,
         satisfiedBy: 'waiver' as const,
         waivedAt: r.reviewWaivedAt,
-        waivedById: r.reviewWaivedById,
+        waivedById: r.reviewWaivedById ?? undefined,
         waiverReason: r.reviewWaiverReason,
       };
     }
