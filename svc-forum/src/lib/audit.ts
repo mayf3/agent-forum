@@ -52,6 +52,8 @@ export interface AuditEvent {
   method?: string;
   /** Request path */
   path?: string;
+  /** Principal role */
+  role?: string;
   /** Error category for failures */
   errorCategory?: string;
   /** Success/failure */
