@@ -9,8 +9,22 @@
  * Run: npx tsx --test tests/thread-id-validation.test.ts
  */
 
-import { describe, it, before, beforeEach } from 'node:test';
+import { describe, it, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
+
+// ── Test JWKS + deferred signTestToken (standard OAuth RS256) ──────────
+// The JWKS server starts (and AUTH_JWKS_URL is set) BEFORE the first import
+// of any src module so auth-jwt.ts freezes the test URL at module load.
+let _jwksCleanup: { url: string; close: () => void };
+let _signTestToken: typeof import('./helpers/auth-keys.js').signTestToken;
+before(async () => {
+  const { startTestJwksServer } = await import('./helpers/jwks-server.js');
+  _jwksCleanup = await startTestJwksServer();
+  process.env.AUTH_JWKS_URL = _jwksCleanup.url;
+  const authKeys = await import('./helpers/auth-keys.js');
+  _signTestToken = authKeys.signTestToken;
+});
+after(() => { if (_jwksCleanup) _jwksCleanup.close(); });
 
 void describe('isUuid validation helper', async () => {
   let isUuid: typeof import('../src/utils/uuid.js').isUuid;
@@ -244,7 +258,7 @@ void describe('Guarded data-access functions', async () => {
   }
 
   const VALID_THREAD_ID = '11111111-1111-4111-8111-111111111111';
-  const USER_A = { id: 'user-a-uuid', name: 'Agent Alpha' };
+  const USER_A = { id: '550e8400-e29b-41d4-a716-446655440010', name: 'Agent Alpha' };
   const INVALID_ID = 'not-a-uuid';
 
   before(async () => {
@@ -479,6 +493,16 @@ void describe('Route-level non-UUID threadId', async () => {
       forumThreadMessage: m,
       forumContextSnapshot: s,
       forumOutcome: o,
+      forumPrincipal: {
+        findUnique: async ({ where }: any) => {
+          if (where.authSubject) return null;
+          if (where.agentId) return null;
+          return null;
+        },
+        findFirst: async () => null,
+        create: async ({ data }: any) => ({ ...data, id: data.authSubject || 'fp-1', createdAt: new Date(), updatedAt: new Date() }),
+        update: async ({ data }: any) => data,
+      },
       $queryRaw: async () => [{ 1: 1 }],
       $transaction: async (fn: (tx: any) => any) => fn({
         forumThread: t,
@@ -486,13 +510,18 @@ void describe('Route-level non-UUID threadId', async () => {
         forumThreadMessage: { ...m, count: async ({ where }: any = {}) => { let items = Array.from(messages.values()); if (where?.threadId) items = items.filter(i => i.threadId === where.threadId); if (where?.deletedAt === null) items = items.filter(i => !i.deletedAt); return items.length; } },
         forumContextSnapshot: s,
         forumOutcome: o,
+        forumPrincipal: {
+          findUnique: async () => null,
+          create: async ({ data }: any) => ({ ...data, id: data.authSubject || 'fp-1', createdAt: new Date(), updatedAt: new Date() }),
+          update: async ({ data }: any) => data,
+        },
         $executeRaw: async () => {},
       }),
       $disconnect: async () => {},
     };
   }
 
-  const USER_A = { id: 'user-a-uuid', name: 'Agent Alpha' };
+  const USER_A = { id: '550e8400-e29b-41d4-a716-446655440010', name: 'Agent Alpha' };
   const NON_UUID = 'not-a-uuid';
 
   before(async () => {
@@ -509,7 +538,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 8. GET /api/threads/not-a-uuid → 404 ──
   await it('8. GET /api/threads/not-a-uuid returns 404', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { threadsRouter } = await import('../src/routes/threads.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
     const app = express();
@@ -517,7 +545,7 @@ void describe('Route-level non-UUID threadId', async () => {
     app.use('/api/threads', threadsRouter);
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     const res = await request(app)
       .get(`/api/threads/${NON_UUID}`)
@@ -528,7 +556,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 9. GET /api/threads/not-a-uuid/messages → 404 ──
   await it('9. GET /api/threads/not-a-uuid/messages returns 404', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { threadsRouter } = await import('../src/routes/threads.js');
     const { messagesRouter } = await import('../src/routes/messages.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
@@ -538,7 +565,7 @@ void describe('Route-level non-UUID threadId', async () => {
     app.use('/api/threads/:threadId/messages', messagesRouter);
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     const res = await request(app)
       .get(`/api/threads/${NON_UUID}/messages`)
@@ -549,7 +576,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 10. GET /api/threads/not-a-uuid/transcript → 404 ──
   await it('10. GET /api/threads/not-a-uuid/transcript returns 404', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { threadsRouter } = await import('../src/routes/threads.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
     const app = express();
@@ -557,7 +583,7 @@ void describe('Route-level non-UUID threadId', async () => {
     app.use('/api/threads', threadsRouter);
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     const res = await request(app)
       .get(`/api/threads/${NON_UUID}/transcript`)
@@ -568,7 +594,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 11. POST /api/threads/not-a-uuid/messages → 404 ──
   await it('11. POST /api/threads/not-a-uuid/messages returns 404', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { threadsRouter } = await import('../src/routes/threads.js');
     const { messagesRouter } = await import('../src/routes/messages.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
@@ -578,7 +603,7 @@ void describe('Route-level non-UUID threadId', async () => {
     app.use('/api/threads/:threadId/messages', messagesRouter);
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     const res = await request(app)
       .post(`/api/threads/${NON_UUID}/messages`)
@@ -590,7 +615,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 12. PATCH /api/threads/not-a-uuid → 404 ──
   await it('12. PATCH /api/threads/not-a-uuid returns 404', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { threadsRouter } = await import('../src/routes/threads.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
     const app = express();
@@ -598,7 +622,7 @@ void describe('Route-level non-UUID threadId', async () => {
     app.use('/api/threads', threadsRouter);
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     const res = await request(app)
       .patch(`/api/threads/${NON_UUID}`)
@@ -610,7 +634,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 13. Valid UUID thread returns 200 ──
   await it('13. Valid UUID thread returns 200', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { threadsRouter } = await import('../src/routes/threads.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
     const app = express();
@@ -618,7 +641,7 @@ void describe('Route-level non-UUID threadId', async () => {
     app.use('/api/threads', threadsRouter);
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     // Create thread first
     const createRes = await request(app)
@@ -638,7 +661,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 14. Valid UUID messages returns 200 ──
   await it('14. Valid UUID thread messages returns 200', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { threadsRouter } = await import('../src/routes/threads.js');
     const { messagesRouter } = await import('../src/routes/messages.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
@@ -648,7 +670,7 @@ void describe('Route-level non-UUID threadId', async () => {
     app.use('/api/threads/:threadId/messages', messagesRouter);
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     const createRes = await request(app)
       .post('/api/threads')
@@ -666,7 +688,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 15. Valid UUID transcript returns 200 ──
   await it('15. Valid UUID thread transcript returns 200', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { threadsRouter } = await import('../src/routes/threads.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
     const app = express();
@@ -674,7 +695,7 @@ void describe('Route-level non-UUID threadId', async () => {
     app.use('/api/threads', threadsRouter);
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     const createRes = await request(app)
       .post('/api/threads')
@@ -692,7 +713,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 16. Malformed JSON body → 400 ──
   await it('16. Malformed JSON body returns 400 without stack/Prisma info', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { threadsRouter } = await import('../src/routes/threads.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
     const app = express();
@@ -700,7 +720,7 @@ void describe('Route-level non-UUID threadId', async () => {
     app.use('/api/threads', threadsRouter);
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     const res = await request(app)
       .post('/api/threads')
@@ -720,7 +740,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 17. Internal SyntaxError → 500 ──
   await it('17. Internal SyntaxError returns 500 not 400', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { errorHandler } = await import('../src/middleware/error-handler.js');
     const app = express();
     app.use(express.json());
@@ -732,7 +751,7 @@ void describe('Route-level non-UUID threadId', async () => {
 
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     const res = await request(app)
       .get('/api/syntax-error')
@@ -746,7 +765,6 @@ void describe('Route-level non-UUID threadId', async () => {
   // ── 18. Confirm malformed JSON still returns 400 with correct body ──
   await it('18. Malformed JSON returns { error: "Invalid JSON body" }', async () => {
     const express = (await import('express')).default;
-    const jwt = (await import('jsonwebtoken')).default;
     const { threadsRouter } = await import('../src/routes/threads.js');
     const { errorHandler } = await import('../src/middleware/error-handler.js');
     const app = express();
@@ -754,7 +772,7 @@ void describe('Route-level non-UUID threadId', async () => {
     app.use('/api/threads', threadsRouter);
     app.use(errorHandler);
     const request = (await import('supertest')).default;
-    const token = jwt.sign({ sub: USER_A.id, name: USER_A.name, role: 'agent' }, 'dev-only-change-this-secret');
+    const token = await _signTestToken({ sub: USER_A.id, agent_id: USER_A.id, client_id: 'mc_test', scope: 'forum.read forum.write' });
 
     const res = await request(app)
       .post('/api/threads')

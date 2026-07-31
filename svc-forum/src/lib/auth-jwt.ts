@@ -54,6 +54,16 @@ import { env } from '../config/env.js';
 
 // ── Result / error types ────────────────────────────────────────────────────
 
+/** Strict UUID v4 pattern (MachinePrincipal.id format). */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Max accepted token size (16KB) — matches the original Forum contract. */
+const MAX_TOKEN_SIZE = 16384;
+
+function isUuid(value: string): boolean {
+  return UUID_PATTERN.test(value);
+}
+
 /** A successfully verified standard OAuth access token. */
 export interface VerifiedAccessToken {
   /** JWT.sub — MachinePrincipal.id (global auth-service identity). */
@@ -104,6 +114,11 @@ export function createAccessTokenVerifier(keyResolver: KeyResolver) {
     let payload: Awaited<ReturnType<typeof jwtVerify>>['payload'];
     let protectedHeader: Awaited<ReturnType<typeof jwtVerify>>['protectedHeader'];
 
+    // Size check before any parsing (mirrors the original Forum contract).
+    if (token.length > MAX_TOKEN_SIZE) {
+      throw new VerifyTokenError('TOKEN_INVALID_OR_EXPIRED', 'token too large');
+    }
+
     try {
       ({ payload, protectedHeader } = await jwtVerify(token, keyResolver, {
         // Only RS256 is accepted — never auto-select HS256/RS256 by alg.
@@ -136,10 +151,13 @@ export function createAccessTokenVerifier(keyResolver: KeyResolver) {
     }
     if (
       typeof payload.sub !== 'string' ||
+      !isUuid(payload.sub) ||
       typeof (payload as any).agent_id !== 'string' ||
-      typeof (payload as any).client_id !== 'string'
+      (payload as any).agent_id.length === 0 ||
+      typeof (payload as any).client_id !== 'string' ||
+      (payload as any).client_id.length === 0
     ) {
-      throw new VerifyTokenError('TOKEN_CONTRACT_INVALID', 'missing sub / agent_id / client_id');
+      throw new VerifyTokenError('TOKEN_CONTRACT_INVALID', 'invalid or missing sub / agent_id / client_id');
     }
 
     const scopeRaw = (payload as any).scope;
