@@ -23,15 +23,18 @@
 import { describe, it, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
-import { signTestToken } from './helpers/auth-keys.js';
 
-// ── Test JWKS server (shared across all tests in this file) ────────
-// Starts a local HTTP server serving the test RSA public key so the
-// production `verifyAuthAccessToken` (lazy-init) can verify RS256 tokens.
-let _jwksCleanup: { close: () => void };
+// ── Test JWKS server + deferred signTestToken ──────────────────────────
+// The JWKS server starts (and AUTH_JWKS_URL is set) BEFORE the first import
+// of any src module, so auth-jwt.ts freezes the test URL at module load.
+let _jwksCleanup: { url: string; close: () => void };
+let _signTestToken: typeof import('./helpers/auth-keys.js').signTestToken;
 before(async () => {
-  const { setupTestJwks } = await import('./helpers/jwks-server.js');
-  _jwksCleanup = await setupTestJwks();
+  const { startTestJwksServer } = await import('./helpers/jwks-server.js');
+  _jwksCleanup = await startTestJwksServer();
+  process.env.AUTH_JWKS_URL = _jwksCleanup.url;
+  const authKeys = await import('./helpers/auth-keys.js');
+  _signTestToken = authKeys.signTestToken;
 });
 after(() => { if (_jwksCleanup) _jwksCleanup.close(); });
 
@@ -42,7 +45,7 @@ const AGENT_SUB = '550e8400-e29b-41d4-a716-446655440000';
 // ── JWT helpers ────────────────────────────────────────────────────
 
 async function signAgentToken(scopes = 'forum.read forum.write') {
-  return signTestToken({
+  return _signTestToken({
     sub: AGENT_SUB,
     agent_id: 'test-forum-agent',
     client_id: 'test-client',
@@ -54,7 +57,7 @@ async function signAgentToken(scopes = 'forum.read forum.write') {
 // tokens via standard OAuth). This helper produces a token whose
 // principal_type=user, which is rejected by the auth layer with 401.
 async function signHumanToken(overrides: { role?: string; sub?: string } = {}) {
-  return signTestToken({
+  return _signTestToken({
     sub: overrides.sub || ('user-' + String(Math.random()).slice(2)),
     agent_id: 'human-test',
     client_id: 'test-client',

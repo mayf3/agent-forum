@@ -9,13 +9,18 @@
 
 import { describe, it, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { signTestToken } from './helpers/auth-keys.js';
 
-// ── Test JWKS server ──────────────────────────────────────────────
-let _jwksCleanup: { close: () => void };
+// ── Test JWKS server + deferred signTestToken ─────────────────────
+// The JWKS server starts (and AUTH_JWKS_URL is set) BEFORE the first import
+// of any src module, so auth-jwt.ts freezes the test URL at module load.
+let _jwksCleanup: { url: string; close: () => void };
+let _signTestToken: typeof import('./helpers/auth-keys.js').signTestToken;
 before(async () => {
-  const { setupTestJwks } = await import('./helpers/jwks-server.js');
-  _jwksCleanup = await setupTestJwks();
+  const { startTestJwksServer } = await import('./helpers/jwks-server.js');
+  _jwksCleanup = await startTestJwksServer();
+  process.env.AUTH_JWKS_URL = _jwksCleanup.url;
+  const authKeys = await import('./helpers/auth-keys.js');
+  _signTestToken = authKeys.signTestToken;
 });
 after(() => { if (_jwksCleanup) _jwksCleanup.close(); });
 
@@ -553,7 +558,7 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
     });
 
 	    // Sign a test RS256 JWT via the test keypair
-	    const token = await signTestToken({
+	    const token = await _signTestToken({
 	      sub: USER_A.id,
 	      agent_id: 'test-agent',
 	      client_id: 'mc_test',
@@ -585,7 +590,7 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
       createdById: USER_A.id, createdByName: USER_A.name, createdByType: 'agent',
     });
 
-	    const token = await signTestToken({
+	    const token = await _signTestToken({
 	      sub: USER_A.id,
 	      agent_id: 'test-agent',
 	      client_id: 'mc_test',

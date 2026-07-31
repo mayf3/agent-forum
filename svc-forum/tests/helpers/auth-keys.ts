@@ -1,7 +1,7 @@
 /**
  * Test helper for standard OAuth (RS256 + JWKS) token signing.
  *
- * Generates a single RSA keypair per test process and exposes:
+ * Provides:
  *   - signTestToken(overrides)  : sign an RS256 access token with full Forum claims
  *   - createTestVerifier()      : build a verifier bound to a local JWKS (no network),
  *                                 using createAccessTokenVerifier() from production code
@@ -10,36 +10,23 @@
  * This lets tests verify the REAL production verifier logic (auth-jwt.ts) with an
  * isolated key source — no mutable global state, no .env dependency, no network.
  *
+ * IMPORTANT for integration tests: importing this module triggers
+ * src/lib/auth-jwt.ts, which reads env.AUTH_JWKS_URL at module load. Set
+ * process.env.AUTH_JWKS_URL (e.g. via startTestJwksServer from jwks-server.ts)
+ * BEFORE the first import of this module in the test process.
+ *
  * Production verification is unchanged: createAccessTokenVerifier() is the same
  * function the server uses; tests only swap the key resolver.
  */
 
-import { generateKeyPair, exportJWK, SignJWT } from 'jose';
+import { SignJWT } from 'jose';
 import { createLocalJWKSet } from 'jose';
 import { createAccessTokenVerifier } from '../../src/lib/auth-jwt.js';
-
-// ── Shared test keypair (generated once per process) ───────────────────────
-
-const TEST_KID = 'test-key-1';
-
-let _keypair: Awaited<ReturnType<typeof generateKeyPair>> | null = null;
-let _publicJwk: any = null;
-
-async function ensureKeyPair() {
-  if (!_keypair) {
-    _keypair = await generateKeyPair('RS256');
-    _publicJwk = await exportJWK(_keypair.publicKey);
-  }
-  return _keypair;
-}
-
-/** JWKS document containing the test public key. */
-export async function testJwks() {
-  await ensureKeyPair();
-  return { keys: [{ ..._publicJwk, kid: TEST_KID, use: 'sig', alg: 'RS256' }] };
-}
-
-export const TEST_KID_VALUE = TEST_KID;
+import {
+  testJwks,
+  getTestKeyPair,
+  TEST_KID_VALUE,
+} from './test-keys.js';
 
 // ── Token signing ──────────────────────────────────────────────────────────
 
@@ -83,8 +70,8 @@ const DEFAULT_SUB = '550e8400-e29b-41d4-a716-446655440000';
  * Defaults produce a valid token; overrides let tests craft negative cases.
  */
 export async function signTestToken(overrides: SignTokenOverrides = {}): Promise<string> {
-  const kp = await ensureKeyPair();
-  const signer = overrides.wrongKey ? await generateKeyPair('RS256') : kp;
+  const kp = await getTestKeyPair();
+  const signer = overrides.wrongKey ? await (await import('jose')).generateKeyPair('RS256') : kp;
 
   const now = Math.floor(Date.now() / 1000);
   const exp = overrides.expiredSecAgo
@@ -101,14 +88,12 @@ export async function signTestToken(overrides: SignTokenOverrides = {}): Promise
   };
 
   let builder = new SignJWT(payload)
-    .setProtectedHeader({ alg: 'RS256', kid: overrides.kid ?? TEST_KID })
+    .setProtectedHeader({ alg: 'RS256', kid: overrides.kid ?? TEST_KID_VALUE })
     .setIssuer(overrides.iss ?? 'auth-service')
     .setAudience(overrides.aud ?? 'svc-forum')
     .setIssuedAt(now)
     .setExpirationTime(exp);
 
-  // sub: set only if provided or default; omit for "missing sub" tests by
-  // passing sub: null explicitly.
   if (overrides.sub !== undefined) {
     builder = builder.setSubject(overrides.sub as string);
   } else {
@@ -127,3 +112,5 @@ export async function signTestToken(overrides: SignTokenOverrides = {}): Promise
 export async function createTestVerifier() {
   return createAccessTokenVerifier(createLocalJWKSet(await testJwks()));
 }
+
+export { testJwks, TEST_KID_VALUE };

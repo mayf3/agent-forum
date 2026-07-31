@@ -1,39 +1,46 @@
 /**
  * Standard OAuth integration tests — middleware + scope guards.
  *
- * A SINGLE JWKS server is shared across all describe blocks (started once
- * at file-level) so the lazy production `verifyAuthAccessToken` always
- * resolves to the same URL.
+ * A SINGLE JWKS server is shared across all describe blocks. The server is
+ * started (and process.env.AUTH_JWKS_URL set) BEFORE the first import of any
+ * src module, so the production auth-jwt.ts freezes the test URL at load.
  */
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { signTestToken } from './helpers/auth-keys.js';
 
-// ── File-level JWKS server (shared across all tests) ─────────────────────
-let server: { close: () => void };
+// ── File-level JWKS server + deferred imports (see helper docs) ────────────
+let server: { url: string; close: () => void };
+let signTestToken: typeof import('./helpers/auth-keys.js').signTestToken;
 const principals = new Map<string, any>();
 
 before(async () => {
-  const { setupTestJwks } = await import('./helpers/jwks-server.js');
-  server = await setupTestJwks();
+  // 1. Start the JWKS server FIRST (only depends on pure-jose test-keys).
+  const { startTestJwksServer } = await import('./helpers/jwks-server.js');
+  server = await startTestJwksServer();
 
-  // Set up a minimal prisma mock so auth middleware's resolvePrincipal works.
+  // 2. Freeze the URL into env BEFORE importing any src module.
+  process.env.AUTH_JWKS_URL = server.url;
+
+  // 3. Now import src-dependent modules (auth-jwt.ts reads env at load).
+  const authKeys = await import('./helpers/auth-keys.js');
+  signTestToken = authKeys.signTestToken;
+
+  // 4. Minimal prisma mock so auth middleware's resolvePrincipal works.
   const prismaMod = await import('../src/lib/prisma.js');
-    const fp = {
-        findUnique: async ({ where }: any) => {
-            const result = principals.get(where.authSubject) || null;
-            if (where.agentId) {
-                // Find by iterating over all values to match agentId
-                for (const v of principals.values()) {
-                    if (v.agentId === where.agentId) {
-                        return v;
-                    }
-                }
-                return null;
-            }
-            return result;
-        },
+  const fp = {
+    findUnique: async ({ where }: any) => {
+      const result = principals.get(where.authSubject) || null;
+      if (where.agentId) {
+        for (const v of principals.values()) {
+          if (v.agentId === where.agentId) {
+            return v;
+          }
+        }
+        return null;
+      }
+      return result;
+    },
     create: async ({ data }: any) => {
       const record = { ...data, id: data.id || 'p-' + Date.now() };
       principals.set(record.authSubject, record);
@@ -54,6 +61,8 @@ before(async () => {
     $disconnect: async () => {},
   } as any);
 });
+
+after(() => { if (server) server.close(); });
 
 after(() => { if (server) server.close(); });
 
