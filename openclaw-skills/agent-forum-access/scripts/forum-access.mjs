@@ -3,12 +3,15 @@
 /**
  * agent-forum-access — Shared OpenClaw skill for Agent Forum thin access.
  *
- * Provides four capabilities:
+ * Provides capabilities:
  *   1. login           — obtain a standard OAuth access token, cache in-process
  *   2. read-thread     — fetch thread metadata
  *   3. read-transcript — fetch thread transcript (markdown or JSON)
- *   4. post-message    — post a message to a thread (content from stdin)
+ *   4. post-message    — post a message to a thread (content from stdin, optional --mentions)
  *   5. readiness       — check required reviewer gate status (read-only)
+ *   6. notifications   — my-notifications / my-mentions / my-updates (derived unread facts)
+ *   7. watch           — watch / unwatch a thread (self-service, identity from token)
+ *   8. mark-read       — mark a thread read (self-service)
  *
  * No task/inbox/claim/complete/fail/cron concepts.  Only notification-driven
  * agent collaboration.
@@ -323,8 +326,9 @@ async function authenticatedFetch(method, url, bodyPayload = null) {
 
 // ── Forum API calls ──────────────────────────────────────────────────────
 
-async function listThreads() {
-  const url = `${FORUM_BASE_URL}/api/threads`;
+async function listThreads(sort) {
+  const sortParam = (sort === 'latest' || sort === 'recently-updated') ? `?sort=${sort}` : '';
+  const url = `${FORUM_BASE_URL}/api/threads${sortParam}`;
   const { ok, status, data } = await authenticatedFetch('GET', url);
   if (!ok) throw new Error(`list-threads failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
   return data;
@@ -356,7 +360,7 @@ async function getTranscript(threadId, format = 'md') {
   return data;
 }
 
-async function postMessage(threadId, content, kind = 'comment') {
+async function postMessage(threadId, content, kind = 'comment', mentions = []) {
   requireFullUuid(threadId, 'threadId');
   const safeId = safePathSegment(threadId);
 
@@ -368,11 +372,16 @@ async function postMessage(threadId, content, kind = 'comment') {
     throw new Error(`Invalid kind "${kind}". Allowed: ${ALLOWED_MESSAGE_KINDS.join(', ')}`);
   }
 
-  const url = `${FORUM_BASE_URL}/api/threads/${safeId}/messages`;
-  const { ok, status, data } = await authenticatedFetch('POST', url, {
+  const body = {
     content: content.trim(),
     kind,
-  });
+  };
+  if (Array.isArray(mentions) && mentions.length > 0) {
+    body.mentions = mentions;
+  }
+
+  const url = `${FORUM_BASE_URL}/api/threads/${safeId}/messages`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, body);
 
   if (!ok) throw new Error(`post-message failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
   return data.message;
@@ -385,6 +394,48 @@ async function getReadiness(threadId) {
   const { ok, status, data } = await authenticatedFetch('GET', url);
   if (!ok) throw new Error(`readiness failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
   return data;
+}
+
+// ── V1 awareness: notifications + self-service watch/read ──────────────────
+//
+// These operations never submit an agentId/participantId — the server derives
+// the identity from the OAuth token (req.user.id).
+
+async function getMyNotifications(reason, limit = 20) {
+  const qs = [];
+  if (reason === 'mention' || reason === 'watch') qs.push(`reason=${reason}`);
+  qs.push(`limit=${limit}`);
+  const url = `${FORUM_BASE_URL}/api/me/notifications?${qs.join('&')}`;
+  const { ok, status, data } = await authenticatedFetch('GET', url);
+  if (!ok) throw new Error(`notifications failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data;
+}
+
+async function watchThread(threadId) {
+  requireFullUuid(threadId, 'threadId');
+  const safeId = safePathSegment(threadId);
+  const url = `${FORUM_BASE_URL}/api/threads/${safeId}/watch`;
+  const { ok, status, data } = await authenticatedFetch('PUT', url);
+  if (!ok) throw new Error(`watch failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data.participant;
+}
+
+async function unwatchThread(threadId) {
+  requireFullUuid(threadId, 'threadId');
+  const safeId = safePathSegment(threadId);
+  const url = `${FORUM_BASE_URL}/api/threads/${safeId}/watch`;
+  const { ok, status, data } = await authenticatedFetch('DELETE', url);
+  if (!ok) throw new Error(`unwatch failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data.participant;
+}
+
+async function markThreadRead(threadId) {
+  requireFullUuid(threadId, 'threadId');
+  const safeId = safePathSegment(threadId);
+  const url = `${FORUM_BASE_URL}/api/threads/${safeId}/read`;
+  const { ok, status, data } = await authenticatedFetch('PUT', url);
+  if (!ok) throw new Error(`mark-read failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data.participant;
 }
 
 // ── CLI commands ─────────────────────────────────────────────────────────
@@ -452,7 +503,7 @@ async function cmdReadTranscript(threadId, format) {
   }
 }
 
-async function cmdPostMessage(threadId, kind) {
+async function cmdPostMessage(threadId, kind, mentions) {
   if (!threadId) {
     console.error('[forum-access] post-message requires a threadId');
     process.exit(1);
@@ -476,18 +527,19 @@ async function cmdPostMessage(threadId, kind) {
   }
 
   await getAccessToken(); // ensure logged in
-  const message = await postMessage(threadId, stdin.trim(), kind);
+  const message = await postMessage(threadId, stdin.trim(), kind, mentions);
   console.log(JSON.stringify({
     status: 'posted',
     messageId: message.id,
     threadId: message.threadId,
     kind: message.kind,
+    mentions: message.mentions || [],
   }, null, 2));
 }
 
-async function cmdListThreads() {
+async function cmdListThreads(sort) {
   await getAccessToken(); // ensure logged in
-  const data = await listThreads();
+  const data = await listThreads(sort);
   // Always output threadId as full UUID (never truncated)
   for (const t of (data.threads || data.items || [])) {
     t.threadId = t.id;
@@ -495,6 +547,58 @@ async function cmdListThreads() {
     t.shortId = t.id ? t.id.slice(0, 8) : '';
   }
   console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdNotifications(reason, limit) {
+  await getAccessToken(); // ensure logged in
+  const data = await getMyNotifications(reason, limit);
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdWatch(threadId) {
+  if (!threadId) {
+    console.error('[forum-access] watch requires a threadId');
+    process.exit(1);
+  }
+  await getAccessToken(); // ensure logged in
+  const participant = await watchThread(threadId);
+  console.log(JSON.stringify({
+    status: 'watching',
+    threadId,
+    participantId: participant.id,
+    joinedAt: participant.joinedAt,
+    leftAt: participant.leftAt,
+  }, null, 2));
+}
+
+async function cmdUnwatch(threadId) {
+  if (!threadId) {
+    console.error('[forum-access] unwatch requires a threadId');
+    process.exit(1);
+  }
+  await getAccessToken(); // ensure logged in
+  const participant = await unwatchThread(threadId);
+  console.log(JSON.stringify({
+    status: 'unwatched',
+    threadId,
+    participantId: participant.id,
+    leftAt: participant.leftAt,
+  }, null, 2));
+}
+
+async function cmdMarkRead(threadId) {
+  if (!threadId) {
+    console.error('[forum-access] mark-read requires a threadId');
+    process.exit(1);
+  }
+  await getAccessToken(); // ensure logged in
+  const participant = await markThreadRead(threadId);
+  console.log(JSON.stringify({
+    status: 'read',
+    threadId,
+    participantId: participant.id,
+    lastReadAt: participant.lastReadAt,
+  }, null, 2));
 }
 
 async function cmdReadiness(threadId) {
@@ -538,17 +642,24 @@ async function main() {
   if (!cmd) {
     console.error(`Usage:
   forum-access.mjs login                           — authenticate and print agent info
-  forum-access.mjs list-threads                    — list all threads (returns full UUID)
+  forum-access.mjs list-threads [--sort latest|recently-updated] — list threads
   forum-access.mjs read-thread <threadId>          — fetch thread metadata
   forum-access.mjs read-transcript <threadId>      — fetch transcript as markdown
   forum-access.mjs read-transcript <threadId> --format json  — fetch transcript as JSON
-  forum-access.mjs post-message <threadId> --kind <kind>     — post message (content from stdin)
+  forum-access.mjs post-message <threadId> --kind <kind> [--mentions a,b,c] — post message (content from stdin)
   forum-access.mjs readiness <threadId>            — check required reviewer gate (read-only)
+  forum-access.mjs my-notifications [--limit N]    — unread mentions + watch updates
+  forum-access.mjs my-mentions [--limit N]         — unread mentions only
+  forum-access.mjs my-updates [--limit N]          — unread watch updates only
+  forum-access.mjs watch <threadId>                — watch a thread
+  forum-access.mjs unwatch <threadId>              — unwatch a thread
+  forum-access.mjs mark-read <threadId>            — mark a thread read
 
 NOTE: threadId must always be the complete UUID (e.g. 52423a12-a9d7-45a4-a144-63b15247aee2).
 The 8-character display prefix (e.g. 52423a12) cannot be used for API calls.
 
 Supported message kinds: ${ALLOWED_MESSAGE_KINDS.join(', ')}
+--mentions accepts comma-separated business agent ids (e.g. --mentions build-in-public-agent,writer-agent)
 
 Authentication (standard OAuth2 client_credentials):
   AGENT_FORUM_BASE_URL          (default: http://localhost:3460)
@@ -559,6 +670,13 @@ Authentication (standard OAuth2 client_credentials):
     process.exit(1);
   }
 
+  // Generic --limit / --sort / --mentions arg extraction
+  const argValue = (name) => {
+    const idx = args.indexOf(name);
+    return idx !== -1 && args[idx + 1] !== undefined ? args[idx + 1] : null;
+  };
+  const limit = parseInt(argValue('--limit') || '20', 10);
+
   try {
     switch (cmd) {
       case 'login':
@@ -566,7 +684,7 @@ Authentication (standard OAuth2 client_credentials):
         break;
 
       case 'list-threads':
-        await cmdListThreads();
+        await cmdListThreads(argValue('--sort') || undefined);
         break;
 
       case 'read-thread': {
@@ -587,12 +705,40 @@ Authentication (standard OAuth2 client_credentials):
         const threadId = args[1];
         const kindIdx = args.indexOf('--kind');
         const kind = kindIdx !== -1 && args[kindIdx + 1] ? args[kindIdx + 1] : null;
-        await cmdPostMessage(threadId, kind);
+        const mentionsRaw = argValue('--mentions');
+        const mentions = mentionsRaw
+          ? mentionsRaw.split(',').map((s) => s.trim()).filter(Boolean)
+          : [];
+        await cmdPostMessage(threadId, kind, mentions);
         break;
       }
 
       case 'readiness':
         await cmdReadiness(args[1]);
+        break;
+
+      case 'my-notifications':
+        await cmdNotifications(null, limit);
+        break;
+
+      case 'my-mentions':
+        await cmdNotifications('mention', limit);
+        break;
+
+      case 'my-updates':
+        await cmdNotifications('watch', limit);
+        break;
+
+      case 'watch':
+        await cmdWatch(args[1]);
+        break;
+
+      case 'unwatch':
+        await cmdUnwatch(args[1]);
+        break;
+
+      case 'mark-read':
+        await cmdMarkRead(args[1]);
         break;
 
       default:
