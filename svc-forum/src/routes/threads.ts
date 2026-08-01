@@ -70,8 +70,12 @@ threadsRouter.post('/', authRequired, requireForumWriter, requireWriteScope(), a
 threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req, res) => {
   const {
     type, status, agentId, contextType, contextId, q,
-    page, limit,
+    page, limit, sort,
   } = req.query as Record<string, string | undefined>;
+
+  if (sort !== undefined && sort !== 'latest' && sort !== 'recently-updated') {
+    throw new HttpError(400, 'sort must be "latest" or "recently-updated"');
+  }
 
   const result = await db.findThreads({
     type: type || undefined,
@@ -82,6 +86,7 @@ threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req
     q: q || undefined,
     page: page ? parseInt(page, 10) : 1,
     limit: limit ? parseInt(limit, 10) : 20,
+    sort: sort || undefined,
   });
 
   res.json(result);
@@ -193,4 +198,33 @@ threadsRouter.get('/:threadId/transcript', authRequired, requireReadScope(), asy
 
   res.set('Content-Type', 'text/markdown; charset=utf-8');
   res.send(md);
+}));
+
+// ── Self-service watch / read (V1 awareness) ─────────────────────────────
+// The identity is ALWAYS the authenticated principal (req.user.id). The client
+// never submits agentId/participantId here. Requires forum.write only — the
+// original Participant management + review-flow routes are untouched.
+
+// PUT /api/threads/:threadId/watch — watch this thread
+threadsRouter.put('/:threadId/watch', authRequired, requireWriteScope(), asyncHandler(async (req, res) => {
+  const threadId = p(req, 'threadId');
+  const user = req.user!;
+  const participant = await db.watchThread(threadId, user.id, user.name);
+  res.json({ participant });
+}));
+
+// DELETE /api/threads/:threadId/watch — unwatch this thread
+threadsRouter.delete('/:threadId/watch', authRequired, requireWriteScope(), asyncHandler(async (req, res) => {
+  const threadId = p(req, 'threadId');
+  const user = req.user!;
+  const participant = await db.unwatchThread(threadId, user.id);
+  res.json({ participant });
+}));
+
+// PUT /api/threads/:threadId/read — mark this thread read (derived Read State)
+threadsRouter.put('/:threadId/read', authRequired, requireWriteScope(), asyncHandler(async (req, res) => {
+  const threadId = p(req, 'threadId');
+  const user = req.user!;
+  const participant = await db.markThreadRead(threadId, user.id);
+  res.json({ participant });
 }));

@@ -128,7 +128,59 @@ function createMockServer(customRoutes) {
           content: parsed.content,
           authorId: 'test-agent',
           authorName: 'Test Agent',
+          mentions: parsed.mentions || [],
         },
+      });
+      return;
+    }
+
+    // ── V1 awareness endpoints ─────────────────────────────────────────
+    const u = new URL(url, 'http://mock.local');
+
+    if (u.pathname === '/api/threads' && method === 'GET') {
+      // Fallback list route — matches query params (?sort=latest) without
+      // swallowing unknown URLs (pathname + method must still match).
+      sendJson(res, 200, { items: [], total: 0, page: 1, limit: 20 });
+      return;
+    }
+
+    if (u.pathname === '/api/me/notifications' && method === 'GET') {
+      const reason = u.searchParams.get('reason') || 'mention';
+      const limit = parseInt(u.searchParams.get('limit') || '20', 10);
+      sendJson(res, 200, {
+        items: [{
+          threadId: VALID_UUID,
+          threadTitle: 'Test Thread',
+          messageId: 'notif-1',
+          authorName: 'Other Agent',
+          content: 'unread update',
+          createdAt: new Date().toISOString(),
+          reason,
+        }],
+        total: 1,
+        page: 1,
+        limit,
+      });
+      return;
+    }
+
+    if (u.pathname === '/api/threads/' + VALID_UUID + '/watch' && method === 'PUT') {
+      sendJson(res, 200, {
+        participant: { id: 'p-1', threadId: VALID_UUID, agentId: 'mock-uuid', joinedAt: new Date().toISOString(), leftAt: null },
+      });
+      return;
+    }
+
+    if (u.pathname === '/api/threads/' + VALID_UUID + '/watch' && method === 'DELETE') {
+      sendJson(res, 200, {
+        participant: { id: 'p-1', threadId: VALID_UUID, agentId: 'mock-uuid', leftAt: new Date().toISOString() },
+      });
+      return;
+    }
+
+    if (u.pathname === '/api/threads/' + VALID_UUID + '/read' && method === 'PUT') {
+      sendJson(res, 200, {
+        participant: { id: 'p-1', threadId: VALID_UUID, agentId: 'mock-uuid', lastReadAt: new Date().toISOString() },
       });
       return;
     }
@@ -696,5 +748,102 @@ describe('integration', () => {
     assert.equal(r.status, 0, r.stderr);
     forumOps = mock.requestLog.filter(e => e.url.startsWith('/api/threads'));
     assert.equal(forumOps.length, 1, 'post-message should make exactly 1 forum call');
+  });
+
+  // ── V1 awareness: notifications, watch/unwatch, mark-read, --sort ──
+
+  it('post-message --mentions is forwarded to the server', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(
+      ['post-message', VALID_UUID, '--kind', 'comment', '--mentions', 'agent-b, agent-c,agent-b'],
+      'hello world', port
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.method === 'POST' && e.url.includes('/messages'));
+    assert.equal(calls.length, 1);
+    const posted = JSON.parse(calls[0].body);
+    assert.deepEqual(posted.mentions, ['agent-b', 'agent-c', 'agent-b'],
+      'mentions list is trimmed and passed through');
+    assert.equal(posted.content, 'hello world');
+    // Without --mentions the field is omitted entirely
+    mock.resetLog();
+    const r2 = await runScriptAsync(['post-message', VALID_UUID, '--kind', 'comment'], 'plain', port);
+    assert.equal(r2.status, 0, r2.stderr);
+    const calls2 = mock.requestLog.filter(e => e.method === 'POST' && e.url.includes('/messages'));
+    assert.ok(!('mentions' in JSON.parse(calls2[0].body)), 'no mentions key when flag absent');
+  });
+
+  it('my-notifications lists unread notifications', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['my-notifications', '--limit', '5'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.total, 1);
+    assert.equal(o.items[0].threadId, VALID_UUID);
+    assert.equal(o.limit, 5, '--limit is forwarded');
+  });
+
+  it('my-mentions requests reason=mention', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['my-mentions'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.url.includes('/api/me/notifications'));
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.includes('reason=mention'), calls[0].url);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.items[0].reason, 'mention');
+  });
+
+  it('my-updates requests reason=watch', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['my-updates'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.url.includes('/api/me/notifications'));
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.includes('reason=watch'), calls[0].url);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.items[0].reason, 'watch');
+  });
+
+  it('watch sends PUT /watch without any agentId in the body', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['watch', VALID_UUID], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.method === 'PUT' && e.url.endsWith('/watch'));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].body, null, 'no body is sent (server derives identity)');
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.status, 'watching');
+    assert.equal(o.threadId, VALID_UUID);
+  });
+
+  it('unwatch sends DELETE /watch', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['unwatch', VALID_UUID], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.method === 'DELETE' && e.url.endsWith('/watch'));
+    assert.equal(calls.length, 1);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.status, 'unwatched');
+  });
+
+  it('mark-read sends PUT /read (no participantId lookup needed)', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['mark-read', VALID_UUID], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.method === 'PUT' && e.url.endsWith('/read'));
+    assert.equal(calls.length, 1);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.status, 'read');
+    assert.ok(o.lastReadAt);
+  });
+
+  it('list-threads --sort latest is forwarded as a query param', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['list-threads', '--sort', 'latest'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.url.includes('/api/threads'));
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.includes('sort=latest'), calls[0].url);
   });
 });
