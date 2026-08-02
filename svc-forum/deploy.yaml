@@ -1,5 +1,5 @@
 service: svc-forum
-local_path: /Users/yanfenma/workspace/project/agent-forum/svc-forum
+local_path: ./svc-forum
 remote_path: /opt/svc-forum
 deploy_method: docker-compose
 needs_cloud: false
