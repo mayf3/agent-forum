@@ -169,6 +169,8 @@ function mockStore(store: Map<string, any>, name: string) {
         createdByType: 'agent',
         tags: [],
         mentions: [],
+        pinned: false,
+        featured: false,
       };
       const doc = { ...defaults, ...data, id: data.id || mockUuid() };
       if (!doc.createdAt) doc.createdAt = new Date();
