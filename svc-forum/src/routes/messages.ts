@@ -3,7 +3,7 @@ import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
 import { requireForumWriter } from '../middleware/forum-writer.js';
-import { requireWriteScope, requireReadScope } from '../middleware/scope-guard.js';
+import { requireWriteScope, requireReadScope, requireModeratorScope } from '../middleware/scope-guard.js';
 import { getPrisma } from '../lib/prisma.js';
 import * as db from '../lib/data-access.js';
 
@@ -26,6 +26,14 @@ messagesRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(a
   const { content, kind, parentId, attachments, metadata } = req.body;
   if (!content || !content.trim()) {
     throw new HttpError(400, 'content is required');
+  }
+
+  // system/decision kinds require forum.moderate scope
+  if (kind === 'system' || kind === 'decision') {
+    const userScopes = req.user!.scopes || [];
+    if (!userScopes.includes('forum.moderate')) {
+      throw new HttpError(403, 'INSUFFICIENT_SCOPE: "forum.moderate" required for system/decision messages');
+    }
   }
 
   // Decision gate: all required reviewers must be satisfied
@@ -94,5 +102,24 @@ messagesRouter.get('/', requireReadScope(), asyncHandler(async (req, res) => {
 
   const messages = await db.findMessagesByThreadId(threadId);
   res.json({ messages });
+}));
+
+// DELETE /api/threads/:threadId/messages/:messageId — soft delete message (moderator only)
+messagesRouter.delete('/:messageId', requireForumWriter, requireModeratorScope(), requireWriteScope(), asyncHandler(async (req, res) => {
+  const threadId = p(req, 'threadId');
+  const messageId = p(req, 'messageId');
+
+  const thread = await db.findThreadById(threadId);
+  if (!thread) throw new HttpError(404, 'Thread not found');
+
+  const prisma = getPrisma();
+  const message = await prisma.forumThreadMessage.findFirst({
+    where: { id: messageId, threadId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!message) throw new HttpError(404, 'Message not found');
+
+  await db.softDeleteMessage(messageId);
+  res.json({ ok: true });
 }));
 

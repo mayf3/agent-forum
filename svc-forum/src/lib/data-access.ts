@@ -107,6 +107,8 @@ export interface ThreadFilter {
   contextType?: string;
   contextId?: string;
   q?: string;
+  pinned?: boolean;
+  featured?: boolean;
   page?: number;
   limit?: number;
   /** 'latest' → createdAt desc; 'recently-updated' (default) → lastMessageAt desc */
@@ -133,6 +135,8 @@ export async function findThreads(filter: ThreadFilter) {
   if (filter.status) where.status = filter.status;
   if (filter.contextType) where.contextType = filter.contextType;
   if (filter.contextId) where.contextId = filter.contextId;
+  if (filter.pinned !== undefined) where.pinned = filter.pinned;
+  if (filter.featured !== undefined) where.featured = filter.featured;
 
   if (filter.agentId) {
     where.participants = { some: { agentId: filter.agentId } };
@@ -144,10 +148,16 @@ export async function findThreads(filter: ThreadFilter) {
     ];
   }
 
-  const orderBy: Prisma.ForumThreadOrderByWithRelationInput =
+  // Sort: pinned threads first, then by chosen sort order
+  const baseOrderBy: Prisma.ForumThreadOrderByWithRelationInput =
     filter.sort === 'latest'
       ? { createdAt: 'desc' }
       : { lastMessageAt: { sort: 'desc', nulls: 'last' } };
+
+  const orderBy: Prisma.ForumThreadOrderByWithRelationInput[] = [
+    { pinned: 'desc' },
+    baseOrderBy,
+  ];
 
   const [items, total] = await Promise.all([
     prisma.forumThread.findMany({
@@ -328,6 +338,139 @@ export async function softDeleteMessage(id: string) {
     where: { id },
     data: { deletedAt: new Date() },
   });
+}
+
+// ── Soft delete thread ─────────────────────────────────────
+
+export async function softDeleteThread(id: string) {
+  if (!isUuid(id)) throw new HttpError(404, 'Thread not found');
+  return prisma.forumThread.update({
+    where: { id },
+    data: { status: 'deleted' },
+  });
+}
+
+// ── Forum statistics ───────────────────────────────────────
+
+export interface ForumStats {
+  threads: {
+    total: number;
+    byStatus: Record<string, number>;
+    byType: Record<string, number>;
+    activeInLast7Days: number;
+  };
+  messages: {
+    total: number;
+  };
+  participants: {
+    total: number;
+  };
+  replyRate: number;
+}
+
+export async function getForumStats(): Promise<ForumStats> {
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  const [
+    threadCount,
+    threadsByStatus,
+    threadsByType,
+    activeThreads7d,
+    messageCount,
+    participantCount,
+    resolvedThreads,
+  ] = await Promise.all([
+    prisma.forumThread.count(),
+    prisma.forumThread.groupBy({ by: ['status'], _count: true }),
+    prisma.forumThread.groupBy({ by: ['type'], _count: true }),
+    prisma.forumThread.count({ where: { lastMessageAt: { gte: sevenDaysAgo } } }),
+    prisma.forumThreadMessage.count({ where: { deletedAt: null } }),
+    prisma.forumThreadParticipant.count({ where: { leftAt: null } }),
+    prisma.forumThread.count({ where: { status: 'resolved' } }),
+  ]);
+
+  const byStatus: Record<string, number> = {};
+  for (const row of threadsByStatus) {
+    byStatus[row.status] = row._count;
+  }
+
+  const byType: Record<string, number> = {};
+  for (const row of threadsByType) {
+    byType[row.type] = row._count;
+  }
+
+  const replyRate = threadCount > 0
+    ? Math.round((resolvedThreads / threadCount) * 10000) / 100 // percentage with 2 decimals
+    : 0;
+
+  return {
+    threads: {
+      total: threadCount,
+      byStatus,
+      byType,
+      activeInLast7Days: activeThreads7d,
+    },
+    messages: {
+      total: messageCount,
+    },
+    participants: {
+      total: participantCount,
+    },
+    replyRate,
+  };
+}
+
+// ── Batch mark threads read ────────────────────────────────
+
+export async function batchMarkRead(threadIds: string[], principalId: string): Promise<{
+  updated: number;
+  skipped: number;
+}> {
+  let updated = 0;
+  let skipped = 0;
+
+  for (const threadId of threadIds) {
+    if (!isUuid(threadId)) {
+      skipped++;
+      continue;
+    }
+
+    const participant = await prisma.forumThreadParticipant.findUnique({
+      where: { threadId_agentId: { threadId, agentId: principalId } },
+    });
+    if (!participant) {
+      skipped++;
+      continue;
+    }
+
+    const latest = await prisma.forumThreadMessage.findFirst({
+      where: { threadId, deletedAt: null },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+
+    let next: Date | null = null;
+    if (latest) {
+      next = participant.lastReadAt && participant.lastReadAt > latest.createdAt
+        ? participant.lastReadAt
+        : latest.createdAt;
+    } else {
+      next = participant.lastReadAt;
+    }
+
+    if (!next || next.getTime() === participant.lastReadAt?.getTime()) {
+      skipped++; // unchanged
+      continue;
+    }
+
+    await prisma.forumThreadParticipant.update({
+      where: { id: participant.id },
+      data: { lastReadAt: next },
+    });
+    updated++;
+  }
+
+  return { updated, skipped };
 }
 
 // ── Participants ───────────────────────────────────────────

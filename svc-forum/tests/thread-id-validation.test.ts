@@ -198,7 +198,7 @@ void describe('Guarded data-access functions', async () => {
         return items.length;
       },
       create: async ({ data }: any) => {
-        const defaults: Record<string, any> = { status: 'open', messageCount: 0, type: 'discussion', createdByType: 'agent', tags: [], mentions: [] };
+        const defaults: Record<string, any> = { status: 'open', messageCount: 0, type: 'discussion', createdByType: 'agent', tags: [], mentions: [], pinned: false, featured: false };
         const doc = { ...defaults, ...data, id: data.id || mockUuid() };
         if (!doc.createdAt) doc.createdAt = new Date();
         if (!doc.updatedAt) doc.updatedAt = new Date();
@@ -464,7 +464,7 @@ void describe('Route-level non-UUID threadId', async () => {
         return items.length;
       },
       create: async ({ data }: any) => {
-        const defaults: Record<string, any> = { status: 'open', messageCount: 0, type: 'discussion', createdByType: 'agent', tags: [], mentions: [] };
+        const defaults: Record<string, any> = { status: 'open', messageCount: 0, type: 'discussion', createdByType: 'agent', tags: [], mentions: [], pinned: false, featured: false };
         const doc = { ...defaults, ...data, id: data.id || mockUuid() };
         if (!doc.createdAt) doc.createdAt = new Date();
         if (!doc.updatedAt) doc.updatedAt = new Date();

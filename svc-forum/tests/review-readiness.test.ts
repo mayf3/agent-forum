@@ -328,7 +328,7 @@ async function signToken(userId: string, _userName: string) {
     sub: userId,
     agent_id: userId,
     client_id: 'mc_test_client',
-    scope: 'forum.read forum.write',
+    scope: 'forum.read forum.write forum.moderate',
   });
 }
 

@@ -67,4 +67,14 @@ export function requireWriteScope() {
   return requireScope('forum.write');
 }
 
+/**
+ * Moderator scope guard — requires forum.moderate.
+ * Use on endpoints that perform moderation actions (pin/feature threads,
+ * delete threads/messages, post system/decision messages).
+ * Fails 403 INSUFFICIENT_SCOPE if forum.moderate is absent.
+ */
+export function requireModeratorScope() {
+  return requireScope('forum.moderate');
+}
+
 
