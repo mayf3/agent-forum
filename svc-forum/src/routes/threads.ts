@@ -109,7 +109,9 @@ threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWrite
   const existing = await db.findThreadById(threadId);
   if (!existing) throw new HttpError(404, 'Thread not found');
 
-  const allowed = ['title', 'type', 'status', 'contextType', 'contextId', 'pipeline', 'layer', 'tags'];
+  // status is intentionally excluded — use dedicated endpoints:
+  // POST /:threadId/resolve, POST /:threadId/archive, DELETE /:threadId
+  const allowed = ['title', 'type', 'contextType', 'contextId', 'pipeline', 'layer', 'tags'];
 
   // pinned/featured are moderator-only fields
   const moderatorFields = ['pinned', 'featured'];

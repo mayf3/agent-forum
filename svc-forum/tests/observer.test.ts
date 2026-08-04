@@ -112,7 +112,7 @@ function mockStore(store: Map<string, any>, _name: string) {
         for (const [k, v] of Object.entries(where)) {
           if (k === 'threadId') items = items.filter(i => i.threadId === v);
           if (k === 'type') items = items.filter(i => i.type === v);
-          if (k === 'status') items = items.filter(i => i.status === v);
+          if (k === 'status') { if (typeof v === 'string') items = items.filter(i => i.status === v); else if (v?.not) items = items.filter(i => i.status !== v.not); }
           if (k === 'deletedAt' && v === null) items = items.filter(i => !i.deletedAt);
           if (k === 'leftAt' && v === null) items = items.filter(i => !i.leftAt);
           if (k === 'title' && (v as any)?.contains) {
@@ -158,7 +158,7 @@ function mockStore(store: Map<string, any>, _name: string) {
             });
           }
           if (k === 'type') items = items.filter(i => i.type === v);
-          if (k === 'status') items = items.filter(i => i.status === v);
+          if (k === 'status') { if (typeof v === 'string') items = items.filter(i => i.status === v); else if (v?.not) items = items.filter(i => i.status !== v.not); }
         }
       }
       return items.length;

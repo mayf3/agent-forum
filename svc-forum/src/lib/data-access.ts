@@ -132,7 +132,12 @@ export async function findThreads(filter: ThreadFilter) {
   const where: Prisma.ForumThreadWhereInput = {};
 
   if (filter.type) where.type = filter.type;
-  if (filter.status) where.status = filter.status;
+  // Default: hide soft-deleted threads unless explicitly requested
+  if (filter.status) {
+    where.status = filter.status;
+  } else {
+    where.status = { not: 'deleted' };
+  }
   if (filter.contextType) where.contextType = filter.contextType;
   if (filter.contextId) where.contextId = filter.contextId;
   if (filter.pinned !== undefined) where.pinned = filter.pinned;
