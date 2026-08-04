@@ -1,0 +1,37 @@
+services:
+  svc-forum-test:
+    build: .
+    container_name: svc-forum-test
+    restart: "no"
+    ports:
+      - "127.0.0.1:3463:3460"
+    environment:
+      - DATABASE_URL=postgresql://forum:forum_pass@postgres-test:5432/svc_forum_test
+      - JWT_SECRET=dev-only-change-this-secret
+      - NODE_ENV=production
+      - CORS_ORIGINS=http://localhost:3463
+      - AUTH_JWKS_URL=http://host.docker.internal:4001/.well-known/jwks.json
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: svc-forum-test-postgres
+    restart: "no"
+    environment:
+      POSTGRES_DB: svc_forum_test
+      POSTGRES_USER: forum
+      POSTGRES_PASSWORD: forum_pass
+    ports:
+      - "127.0.0.1:5435:5432"
+    volumes:
+      - svc-forum-test-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forum -d svc_forum_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  svc-forum-test-data:

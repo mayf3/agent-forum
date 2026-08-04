@@ -152,7 +152,7 @@ void describe('Guarded data-access functions', async () => {
             if (k === 'threadId') items = items.filter(i => i.threadId === v);
             if (k === 'runId') items = items.filter(i => i.runId === v);
             if (k === 'type') items = items.filter(i => i.type === v);
-            if (k === 'status') items = items.filter(i => i.status === v);
+            if (k === 'status') { if (typeof v === 'string') items = items.filter(i => i.status === v); else if (v?.not) items = items.filter(i => i.status !== v.not); }
             if (k === 'deletedAt' && v === null) items = items.filter(i => !i.deletedAt);
             if (k === 'leftAt' && v === null) items = items.filter(i => !i.leftAt);
             if (k === 'kind' && typeof v === 'object' && v !== null && 'not' in v) {
@@ -198,7 +198,7 @@ void describe('Guarded data-access functions', async () => {
         return items.length;
       },
       create: async ({ data }: any) => {
-        const defaults: Record<string, any> = { status: 'open', messageCount: 0, type: 'discussion', createdByType: 'agent', tags: [], mentions: [] };
+        const defaults: Record<string, any> = { status: 'open', messageCount: 0, type: 'discussion', createdByType: 'agent', tags: [], mentions: [], pinned: false, featured: false };
         const doc = { ...defaults, ...data, id: data.id || mockUuid() };
         if (!doc.createdAt) doc.createdAt = new Date();
         if (!doc.updatedAt) doc.updatedAt = new Date();
@@ -410,7 +410,7 @@ void describe('Route-level non-UUID threadId', async () => {
           for (const [k, v] of Object.entries(where)) {
             if (k === 'threadId') items = items.filter(i => i.threadId === v);
             if (k === 'type') items = items.filter(i => i.type === v);
-            if (k === 'status') items = items.filter(i => i.status === v);
+            if (k === 'status') { if (typeof v === 'string') items = items.filter(i => i.status === v); else if (v?.not) items = items.filter(i => i.status !== v.not); }
             if (k === 'deletedAt' && v === null) items = items.filter(i => !i.deletedAt);
             if (k === 'kind' && typeof v === 'object' && v !== null && 'not' in v) {
               items = items.filter(i => i.kind !== v.not);
@@ -458,13 +458,13 @@ void describe('Route-level non-UUID threadId', async () => {
               });
             }
             if (k === 'type') items = items.filter(i => i.type === v);
-            if (k === 'status') items = items.filter(i => i.status === v);
+            if (k === 'status') { if (typeof v === 'string') items = items.filter(i => i.status === v); else if (v?.not) items = items.filter(i => i.status !== v.not); }
           }
         }
         return items.length;
       },
       create: async ({ data }: any) => {
-        const defaults: Record<string, any> = { status: 'open', messageCount: 0, type: 'discussion', createdByType: 'agent', tags: [], mentions: [] };
+        const defaults: Record<string, any> = { status: 'open', messageCount: 0, type: 'discussion', createdByType: 'agent', tags: [], mentions: [], pinned: false, featured: false };
         const doc = { ...defaults, ...data, id: data.id || mockUuid() };
         if (!doc.createdAt) doc.createdAt = new Date();
         if (!doc.updatedAt) doc.updatedAt = new Date();

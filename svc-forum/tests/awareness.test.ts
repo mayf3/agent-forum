@@ -138,6 +138,7 @@ function matchValue(actual: any, cond: any): boolean {
 }
 
 function toMs(v: any): number {
+  if (typeof v === 'boolean') return v ? 1 : 0;
   return v instanceof Date ? v.getTime() : new Date(v).getTime();
 }
 
@@ -249,6 +250,8 @@ function mockStore(store: Map<string, any>, stores: { threads: Map<string, any> 
         if (doc.status === undefined) doc.status = 'open';
         if (doc.messageCount === undefined) doc.messageCount = 0;
         if (doc.lastMessageAt === undefined) doc.lastMessageAt = null;
+        if (doc.pinned === undefined) doc.pinned = false;
+        if (doc.featured === undefined) doc.featured = false;
       }
       if (store === participants) {
         if (doc.leftAt === undefined) doc.leftAt = null;
