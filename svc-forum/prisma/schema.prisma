@@ -17,6 +17,8 @@ model ForumThread {
   pipeline       String?
   layer          String?
   tags           String[]  @default([])
+  pinned         Boolean   @default(false)
+  featured       Boolean   @default(false)
   messageCount   Int       @default(0)
   lastMessageAt  DateTime?
   createdById    String
@@ -38,6 +40,8 @@ model ForumThread {
   @@index([contextType, contextId])
   @@index([pipeline])
   @@index([lastMessageAt])
+  @@index([pinned])
+  @@index([featured])
   @@map("forum_threads")
 }
 
