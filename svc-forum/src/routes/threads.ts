@@ -78,6 +78,25 @@ threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req
     throw new HttpError(400, 'sort must be "latest" or "recently-updated"');
   }
 
+  // Tag filtering: repeated tag=N params = AND (thread must contain all);
+  // comma-separated tag=A,B = OR (thread must contain at least one).
+  // Express gives repeated query keys as an array.
+  const rawTags = req.query.tag;
+  const tagValues: string[] = Array.isArray(rawTags)
+    ? rawTags.filter((v): v is string => typeof v === 'string')
+    : typeof rawTags === 'string'
+      ? [rawTags]
+      : [];
+  const tagsAnd: string[] = [];
+  const tagsOr: string[] = [];
+  for (const tv of tagValues) {
+    if (tv.includes(',')) {
+      tagsOr.push(...tv.split(',').map(s => s.trim()).filter(Boolean));
+    } else if (tv.trim()) {
+      tagsAnd.push(tv.trim());
+    }
+  }
+
   const result = await db.findThreads({
     type: type || undefined,
     status: status || undefined,
@@ -90,6 +109,8 @@ threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req
     page: page ? parseInt(page, 10) : 1,
     limit: limit ? parseInt(limit, 10) : 20,
     sort: sort || undefined,
+    tagsAnd: tagsAnd.length ? tagsAnd : undefined,
+    tagsOr: tagsOr.length ? tagsOr : undefined,
   });
 
   res.json(result);
