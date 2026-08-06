@@ -1,0 +1,23 @@
+{
+  "_comment": "svc-forum main 分支保护规则（L0 平台层门禁）。本文件是配置文档/声明，实际生效需 repo admin 在 GitHub Settings > Branches 中按此配置（或通过 gh api 应用）。",
+  "requiredStatusChecks": [
+    {
+      "context": "Workflow Gate (L0) / Validate workflow instance ID",
+      "_comment": "PR 描述必带合法工作流实例 ID，校验失败 status check = fail"
+    },
+    {
+      "context": "Arch Health Check (L0) / Arch health check",
+      "_comment": "arch-health-check.sh 体检，exit code 非 0 = 红灯 = fail"
+    }
+  ],
+  "enforceAdmins": true,
+  "requiredPullRequestReviews": {
+    "requiredApprovingReviewCount": 1,
+    "dismissStaleReviews": true,
+    "requireCodeOwnerReviews": false
+  },
+  "restrictions": null,
+  "allowForcePushes": false,
+  "allowDeletions": false,
+  "_apply_hint": "gh api -X PUT repos/mayf3/agent-forum/branches/main/protection --input .github/branch-protection.json  (需 admin 权限；restrictions 需先建 team)"
+}

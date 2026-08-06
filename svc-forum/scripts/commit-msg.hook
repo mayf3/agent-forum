@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# commit-msg hook（L1 本地防线）— 强制 commit message 带 workflow: <uuid>
+#
+# 安装方式（由 scripts/install-hooks.sh 自动安装，见 docs/ci-gate-guide.md）：
+#   ln -sf ../../scripts/commit-msg.hook .git/hooks/commit-msg
+#   或手动复制本文件到 .git/hooks/commit-msg 并 chmod +x
+#
+# 校验规则：message 中必须包含 workflow: <uuid>（大小写不敏感，冒号后可有空格）
+# 缺失 → 拒绝 commit（exit 1），并提示正确格式。
+# 允许跳过：--no-verify（仅紧急情况，L0 平台层仍会拦截绕过）。
+
+COMMIT_MSG_FILE="$1"
+# ERE 语法（配合 grep -E）：workflow: <uuid>，冒号支持中英文，前后允许空白
+UUID_RE='workflow[[:space:]]*[:：][[:space:]]*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+
+if ! grep -qiE "$UUID_RE" "$COMMIT_MSG_FILE"; then
+  echo ""
+  echo "❌ commit 被拒绝：commit message 缺少工作流实例 ID（L1 门禁）" >&2
+  echo "   请在 commit message 中按格式注明：workflow: <36位UUID>" >&2
+  echo "   示例：" >&2
+  echo "     feat: 实现 XXX" >&2
+  echo "     workflow: 8265a467-f983-44af-bf56-fcef60a75996" >&2
+  echo "   获取方式：svc-workflow 创建实例后复制其 ID。" >&2
+  echo "   紧急情况可 --no-verify 跳过（但 L0 CI 门禁仍会拦截，绕过将触发 postmortem）。" >&2
+  exit 1
+fi
+
+exit 0
