@@ -1,0 +1,58 @@
+name: Arch Health Check (L0)
+
+# 门禁 2（L0 平台层）：PR 自动运行 arch-health-check.sh 体检。
+# exit code 非 0（体检红灯）→ status check = fail → merge 被禁止。
+# 体检工具脚本来自需求 95265979（scripts/arch-health-check.sh，纳入版本管理）。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  checks: write
+  statuses: write
+
+jobs:
+  arch-health-check:
+    name: Arch health check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies (typecheck needed by circular-deps check)
+        working-directory: svc-forum
+        run: npm ci --no-audit --no-fund
+
+      - name: Generate Prisma client
+        working-directory: svc-forum
+        run: npx prisma generate
+
+      - name: Run arch health check
+        id: health
+        working-directory: .
+        run: |
+          set +e
+          bash scripts/arch-health-check.sh svc-forum > /tmp/health-report.json 2>&1
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          cat /tmp/health-report.json
+          if [ "$code" -ne 0 ]; then
+            echo "::error::架构体检红灯（exit code=$code）。请修复红线问题后再合并。"
+          fi
+          exit $code
+
+      - name: Upload health report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch-health-report
+          path: /tmp/health-report.json

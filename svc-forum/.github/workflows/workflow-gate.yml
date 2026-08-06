@@ -1,0 +1,50 @@
+name: Workflow Gate (L0)
+
+# 门禁 1（L0 平台层）：main 分支 push 必须经 PR，且 PR 描述必带合法工作流实例 ID。
+# 校验失败 → status check = fail → GitHub branch protection 禁用 merge 按钮。
+# 不依赖 SKILL.md 文本约束——branch protection + status check 是 GitHub 原生能力。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+  statuses: write
+
+jobs:
+  validate-workflow-ref:
+    name: Validate workflow instance ID
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate workflow ref in PR body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          WF_API_BASE: ${{ secrets.WF_API_BASE }}
+          WF_TOKEN: ${{ secrets.WF_TOKEN }}
+        run: |
+          if [ -z "$WF_API_BASE" ]; then
+            echo "::error::缺少 secrets.WF_API_BASE（svc-workflow API 地址）"
+            exit 1
+          fi
+          if [ -z "$WF_TOKEN" ]; then
+            echo "::error::缺少 secrets.WF_TOKEN（svc-workflow 只读 token）"
+            exit 1
+          fi
+          node scripts/validate-workflow-ref.mjs \
+            --pr-body "$PR_BODY" \
+            --api-base "$WF_API_BASE" \
+            --token "$WF_TOKEN"
+
+      - name: Report failure with guidance
+        if: failure()
+        run: |
+          echo "::error::PR 必须包含合法的工作流实例 ID（Workflow: <uuid>）。"
+          echo "::error::1) 从 svc-workflow 创建实例并复制其 ID；2) 在 PR 描述中按格式注明；3) 重新触发校验。"
+          exit 1
