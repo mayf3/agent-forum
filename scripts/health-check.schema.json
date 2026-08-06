@@ -1,0 +1,127 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "arch-health-check output schema",
+  "description": "svc-forum 架构体检工具输出契约。变更需走 PR 评审。",
+  "type": "object",
+  "required": ["tool", "version", "timestamp", "checks", "overall", "exitCode"],
+  "properties": {
+    "tool": {
+      "type": "string",
+      "const": "arch-health-check",
+      "description": "工具名称，固定值"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "语义化版本号"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC ISO 8601 时间戳"
+    },
+    "checks": {
+      "type": "object",
+      "required": ["lineCount", "circularDeps", "magicValues", "routesPurity"],
+      "properties": {
+        "lineCount": {
+          "type": "object",
+          "required": ["top10", "violations", "limit", "passed"],
+          "properties": {
+            "top10": {
+              "type": "array",
+              "description": "行数 TOP10 文件列表",
+              "items": {
+                "type": "object",
+                "required": ["file", "lines"],
+                "properties": {
+                  "file": { "type": "string", "description": "相对路径" },
+                  "lines": { "type": "integer", "minimum": 0 }
+                }
+              }
+            },
+            "violations": {
+              "type": "array",
+              "description": "超限文件列表（排除 grandfather 豁免）",
+              "items": {
+                "type": "object",
+                "required": ["file", "lines", "limit"],
+                "properties": {
+                  "file": { "type": "string" },
+                  "lines": { "type": "integer" },
+                  "limit": { "type": "integer", "const": 500 }
+                }
+              }
+            },
+            "limit": { "type": "integer", "const": 500, "description": "单文件行数红线" },
+            "passed": { "type": "boolean", "description": "true = 无超限违规" }
+          }
+        },
+        "circularDeps": {
+          "type": "object",
+          "required": ["circularDeps", "passed"],
+          "properties": {
+            "circularDeps": {
+              "type": "array",
+              "description": "循环依赖错误列表",
+              "items": { "type": "string" }
+            },
+            "passed": { "type": "boolean" }
+          }
+        },
+        "magicValues": {
+          "type": "object",
+          "required": ["magicValues", "note", "passed"],
+          "properties": {
+            "magicValues": {
+              "type": "array",
+              "description": "魔法值疑似列表（上限 50 条）",
+              "items": {
+                "type": "object",
+                "required": ["file", "line", "snippet"],
+                "properties": {
+                  "file": { "type": "string" },
+                  "line": { "type": "integer" },
+                  "snippet": { "type": "string" }
+                }
+              }
+            },
+            "note": { "type": "string" },
+            "passed": { "type": "boolean" }
+          }
+        },
+        "routesPurity": {
+          "type": "object",
+          "required": ["routesPurity", "rule", "passed"],
+          "properties": {
+            "routesPurity": {
+              "type": "array",
+              "description": "routes 不纯违规列表",
+              "items": {
+                "type": "object",
+                "required": ["file", "line"],
+                "properties": {
+                  "file": { "type": "string" },
+                  "line": { "type": "string" }
+                }
+              }
+            },
+            "rule": { "type": "string" },
+            "passed": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "overall": {
+      "type": "string",
+      "enum": ["PASS", "FAIL"],
+      "description": "PASS = 全部检查通过，FAIL = 至少一项不通过"
+    },
+    "exitCode": {
+      "type": "integer",
+      "description": "0=PASS，非0=FAIL（bit-1=行数, bit-2=循环依赖, bit-3=魔法值, bit-4=routes）",
+      "minimum": 0,
+      "maximum": 15
+    }
+  }
+}
