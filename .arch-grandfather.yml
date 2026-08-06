@@ -1,0 +1,13 @@
+# .arch-grandfather.yml
+# 架构体检 grandfather 清单——存量超限文件豁免登记
+# 增/删由 arch-reviewer 审核留痕
+# 每个条目需带复审期限（expiry），过期自动失效
+
+grandfather:
+  - pattern: "src/lib/data-access.ts"
+    lines: 1004
+    reason: "历史最大文件，已有拆分需求 fdbff530 处理"
+    reviewer: "arch-reviewer"
+    date: "2026-08-05"
+    expiry: "2026-08-31"
+    # 拆分需求完成后此条目自动失效（expiry 到期或 pattern 不再匹配）
