@@ -102,16 +102,16 @@ check_magic_values() {
   while IFS= read -r f; do
     local rel="${f#$ROOT_DIR/}"
     is_grandfathered "$rel" && continue
+    # 性能：单次 grep -nE 批量匹配候选行（原实现逐行 fork grep，实测 71s → 修复后 <10s）
+    # 过滤逻辑与原实现一致：排除常量定义行、import/export/type/interface 声明行
     while IFS=: read -r lineno content; do
       [[ -z "$lineno" ]] && continue
-      echo "$content" | grep -qE '(const|enum|static|readonly).*=' && continue
-      echo "$content" | grep -qE '^\s*(import|export|type|interface)\s' && continue
-      local nums; nums=$(echo "$content" | grep -oE '\b[3-9][0-9]{1,}\b' 2>/dev/null || true)
-      if [[ -n "$nums" ]]; then
-        local trimmed; trimmed=$(echo "$content" | sed 's/"/\\"/g; s/^[[:space:]]*//')
-        violations+=("{\"file\":\"$rel\",\"line\":$lineno,\"snippet\":\"$trimmed\"}")
-      fi
-    done < <(grep -n '' "$f" 2>/dev/null || true)
+      local trimmed; trimmed=$(echo "$content" | sed 's/"/\\"/g; s/^[[:space:]]*//')
+      violations+=("{\"file\":\"$rel\",\"line\":$lineno,\"snippet\":\"$trimmed\"}")
+    done < <(grep -nE '\b[3-9][0-9]{1,}\b' "$f" 2>/dev/null \
+      | grep -vE '(const|enum|static|readonly).*=' \
+      | grep -vE '^[0-9]+:[[:space:]]*(import|export|type|interface)[[:space:]]' \
+      || true)
   done < <(find "$SRC_DIR" -name '*.ts' -not -path '*/node_modules/*' -not -path '*/dist/*' -not -name '*.test.ts' -not -name '*.schema.ts' -not -name '*.d.ts' | sort)
 
   local violations_json
