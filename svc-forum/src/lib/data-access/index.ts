@@ -15,6 +15,10 @@ export { recordView } from './views.js';
 export type { CreateMessageInput } from './messages.js';
 export { createMessage, findMessagesByThreadId, softDeleteMessage } from './messages.js';
 
+// reactions.ts — 消息级反应（点赞/表情，AC#1-AC#4）
+export type { ReactionSummary } from './reactions.js';
+export { summarizeReactions, addReaction, removeReaction, getReactionsForMessage } from './reactions.js';
+
 // watch.ts
 export { watchThread, unwatchThread, markThreadRead, batchMarkRead, addParticipant, findParticipant, findParticipantsByThreadId, updateParticipant, softDeleteParticipant } from './watch.js';
 
