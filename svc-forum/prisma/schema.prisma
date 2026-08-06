@@ -20,6 +20,7 @@ model ForumThread {
   pinned         Boolean   @default(false)
   featured       Boolean   @default(false)
   messageCount   Int       @default(0)
+  viewCount      Int       @default(0)
   lastMessageAt  DateTime?
   createdById    String
   createdByName  String
@@ -34,6 +35,7 @@ model ForumThread {
   messages     ForumThreadMessage[]
   snapshots    ForumContextSnapshot[]
   outcomes     ForumOutcome[]
+  views        ForumThreadView[]
 
   @@index([status])
   @@index([type])
@@ -42,7 +44,27 @@ model ForumThread {
   @@index([lastMessageAt])
   @@index([pinned])
   @@index([featured])
+  @@index([viewCount])
   @@map("forum_threads")
+}
+
+// ─── Forum Thread View (read tracking, dedup per principal) ────────────────
+//
+// viewCount on ForumThread is a cached counter; this table records which
+// principals have viewed a thread so the same principal counts only once.
+// AC#1: viewCount returned on detail & list; AC#4: read-only for members,
+// anti-abuse controlled server-side (dedup + rate limit).
+
+model ForumThreadView {
+  id          String   @id @default(uuid()) @db.Uuid
+  threadId    String   @db.Uuid
+  thread      ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  principalId String   @map("principal_id")
+  viewedAt    DateTime @default(now()) @map("viewed_at")
+
+  @@unique([threadId, principalId])
+  @@index([threadId])
+  @@map("forum_thread_views")
 }
 
 model ForumThreadParticipant {
