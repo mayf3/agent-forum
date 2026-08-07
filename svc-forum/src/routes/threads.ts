@@ -71,11 +71,35 @@ threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req
   const {
     type, status, agentId, contextType, contextId, q,
     page, limit, sort,
-    pinned, featured,
+    pinned, featured, filter,
   } = req.query as Record<string, string | undefined>;
 
   if (sort !== undefined && sort !== 'latest' && sort !== 'recently-updated') {
     throw new HttpError(400, 'sort must be "latest" or "recently-updated"');
+  }
+
+  // Resolve pinned/featured from filter param or boolean params.
+  // If filter is present, it takes priority — boolean pinned/featured are ignored (400 if also provided).
+  let resolvedPinned: boolean | undefined;
+  let resolvedFeatured: boolean | undefined;
+
+  if (filter !== undefined) {
+    // If boolean pinned/featured also provided, reject — filter takes priority
+    if (pinned !== undefined || featured !== undefined) {
+      throw new HttpError(400, 'Cannot use "filter" together with "pinned" or "featured" parameters; use one or the other');
+    }
+
+    const validFilters = new Set(['pinned', 'featured', 'pinned,featured', 'featured,pinned']);
+    if (!validFilters.has(filter)) {
+      throw new HttpError(400, 'filter must be one of: "pinned", "featured", "pinned,featured"');
+    }
+
+    const parts = filter.split(',').map(s => s.trim());
+    if (parts.includes('pinned')) resolvedPinned = true;
+    if (parts.includes('featured')) resolvedFeatured = true;
+  } else {
+    resolvedPinned = pinned === 'true' ? true : pinned === 'false' ? false : undefined;
+    resolvedFeatured = featured === 'true' ? true : featured === 'false' ? false : undefined;
   }
 
   const result = await db.findThreads({
@@ -85,8 +109,8 @@ threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req
     contextType: contextType || undefined,
     contextId: contextId || undefined,
     q: q || undefined,
-    pinned: pinned === 'true' ? true : pinned === 'false' ? false : undefined,
-    featured: featured === 'true' ? true : featured === 'false' ? false : undefined,
+    pinned: resolvedPinned,
+    featured: resolvedFeatured,
     page: page ? parseInt(page, 10) : 1,
     limit: limit ? parseInt(limit, 10) : 20,
     sort: sort || undefined,
