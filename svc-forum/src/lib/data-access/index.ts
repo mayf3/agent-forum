@@ -31,3 +31,7 @@ export { createOutcome, findOutcomesByThreadId, findLatestOutcomeByThreadId } fr
 // review.ts
 export type { ReviewReadinessResult } from './review.js';
 export { getThreadReviewReadiness, buildTranscriptMd } from './review.js';
+
+// reports.ts — 举报队列（moderation queue，合并自 feat/report-entry-928ed7c6）
+export type { CreateReportInput, ReportFilter, ReportAction } from './reports.js';
+export { REPORT_REASONS, REPORT_STATUSES, REPORT_TARGET_TYPES, assertReportTargetExists, createReport, findReports, findReportById, reportStatusForAction, handleReport } from './reports.js';

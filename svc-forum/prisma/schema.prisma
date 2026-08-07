@@ -156,3 +156,31 @@ model ForumPrincipal {
   @@index([principalType])
   @@map("forum_principals")
 }
+
+// ─── Forum Report (Moderation Queue) ──────────────────────────────────────
+//
+// Users report threads/messages; moderators (forum.moderate scope) process the
+// queue. A reporter may only report a given target once — enforced by the
+// @@unique([targetType, targetId, reporterId]) database constraint (AC#3).
+
+model ForumReport {
+  id           String    @id @default(uuid()) @db.Uuid
+  targetType   String    @map("target_type") // "thread" | "message"
+  targetId     String    @map("target_id") @db.Uuid
+  reporterId   String    @map("reporter_id")
+  reporterName String    @map("reporter_name")
+  reason       String    // spam | abuse | off_topic | violation | other — required
+  note         String?   @db.Text // optional supporting explanation
+  status       String    @default("pending") // pending | ignored | warned | deleted
+  handledById  String?   @map("handled_by_id")
+  handledByName String?  @map("handled_by_name")
+  handledAt    DateTime? @map("handled_at")
+  handleNote   String?   @map("handle_note") @db.Text
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@unique([targetType, targetId, reporterId])
+  @@index([status])
+  @@index([targetType, targetId])
+  @@map("forum_reports")
+}
