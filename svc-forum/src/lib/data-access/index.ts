@@ -6,6 +6,10 @@ export { normalizeMentions, findPrincipalsByAgentIds } from './shared.js';
 // threads.ts
 export type { CreateThreadInput, ThreadFilter } from './threads.js';
 export { createThread, findThreadById, findThreads, updateThread, softDeleteThread, createContextSnapshot, findSnapshotsByThreadId } from './threads.js';
+export { heatScore, HOT_WEIGHT_VIEW, HOT_WEIGHT_MSG, HOT_WEIGHT_RECENCY, HOT_DECAY_PER_DAY, HOT_CANDIDATE_POOL } from './threads.js';
+
+// views.ts — 阅读量追踪（AC#1: viewCount 按 principal 去重计次）
+export { recordView } from './views.js';
 
 // messages.ts
 export type { CreateMessageInput } from './messages.js';

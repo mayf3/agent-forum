@@ -28,12 +28,36 @@ export interface ThreadFilter {
   featured?: boolean;
   page?: number;
   limit?: number;
-  /** 'latest' → createdAt desc; 'recently-updated' (default) → lastMessageAt desc */
-  sort?: 'latest' | 'recently-updated';
+  /** 'latest' → createdAt desc; 'recently-updated' (default) → lastMessageAt desc; 'hot' → weighted heat score */
+  sort?: 'latest' | 'recently-updated' | 'hot';
   /** AND semantics: thread must contain ALL of these tags (case-insensitive) */
   tagsAnd?: string[];
   /** OR semantics: thread must contain AT LEAST ONE of these tags (case-insensitive) */
   tagsOr?: string[];
+}
+
+// ── Hot ranking weights (server-side config, AC#3) ─────────────────────────
+// score = viewCount*W_VIEW + messageCount*W_MSG + recencyBonus
+// recencyBonus = max(0, W_RECENCY - daysSinceLastActivity * W_DECAY)
+// Configurable via env: HOT_WEIGHT_VIEW / HOT_WEIGHT_MSG / HOT_WEIGHT_RECENCY / HOT_DECAY_PER_DAY
+export const HOT_WEIGHT_VIEW = Number(process.env.HOT_WEIGHT_VIEW ?? 1);
+export const HOT_WEIGHT_MSG = Number(process.env.HOT_WEIGHT_MSG ?? 3);
+export const HOT_WEIGHT_RECENCY = Number(process.env.HOT_WEIGHT_RECENCY ?? 10);
+export const HOT_DECAY_PER_DAY = Number(process.env.HOT_DECAY_PER_DAY ?? 0.5);
+export const HOT_CANDIDATE_POOL = Number(process.env.HOT_CANDIDATE_POOL ?? 200);
+
+/** Heat score for a thread (hot sort). Exported for tests. */
+export function heatScore(thread: {
+  viewCount?: number | null;
+  messageCount?: number | null;
+  lastMessageAt?: Date | null;
+}): number {
+  const views = thread.viewCount ?? 0;
+  const msgs = thread.messageCount ?? 0;
+  const lastActive = thread.lastMessageAt ?? new Date(0);
+  const daysSince = Math.max(0, (Date.now() - lastActive.getTime()) / 86_400_000);
+  const recency = Math.max(0, HOT_WEIGHT_RECENCY - daysSince * HOT_DECAY_PER_DAY);
+  return views * HOT_WEIGHT_VIEW + msgs * HOT_WEIGHT_MSG + recency;
 }
 
 export async function createThread(data: CreateThreadInput) {
@@ -100,6 +124,22 @@ export async function findThreads(filter: ThreadFilter) {
     { pinned: 'desc' },
     baseOrderBy,
   ];
+
+  // 'hot' ranks by weighted heat score (viewCount/messageCount/recency) —
+  // computed in the application layer over a candidate pool (AC#2).
+  if (filter.sort === 'hot') {
+    const candidates = await prisma.forumThread.findMany({
+      where,
+      orderBy: { lastMessageAt: { sort: 'desc', nulls: 'last' } },
+      take: HOT_CANDIDATE_POOL,
+    });
+    const scored = candidates
+      .map(t => ({ ...t, _heat: heatScore(t) }))
+      .sort((a, b) => b._heat - a._heat);
+    const items = scored.slice(skip, skip + limit);
+    const total = await prisma.forumThread.count({ where });
+    return { items, total, page, limit };
+  }
 
   const [items, total] = await Promise.all([
     prisma.forumThread.findMany({
