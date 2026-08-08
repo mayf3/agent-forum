@@ -14,6 +14,7 @@ import { reviewReadinessRouter } from './routes/review-readiness.js';
 import { meRouter } from './routes/me.js';
 import { statsRouter } from './routes/stats.js';
 import { reportsRouter } from './routes/reports.js';
+import { tagsRouter } from './routes/tags.js';
 import { observerRouter } from './observer/observer-routes.js';
 
 export const app = express();
@@ -66,6 +67,7 @@ app.use('/api/threads/:threadId/outcomes', outcomesRouter);
 app.use('/api/threads/:threadId/review-readiness', reviewReadinessRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/stats', statsRouter);
+app.use('/api/tags', tagsRouter);
 app.use('/api/me', meRouter);
 app.use('/api/reports', reportsRouter);
 

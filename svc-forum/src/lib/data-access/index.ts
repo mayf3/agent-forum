@@ -19,8 +19,8 @@ export type { NotificationItem, NotificationsResult } from './notifications.js';
 export { findMyNotifications } from './notifications.js';
 
 // stats.ts
-export type { ForumStats } from './stats.js';
-export { getForumStats } from './stats.js';
+export type { ForumStats, TagStat } from './stats.js';
+export { getForumStats, getTagStats } from './stats.js';
 
 // search.ts
 export { searchAll } from './search.js';
