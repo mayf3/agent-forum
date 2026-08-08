@@ -68,3 +68,25 @@ export async function getForumStats(): Promise<ForumStats> {
     replyRate,
   };
 }
+
+// ── Tag statistics ─────────────────────────────────────────
+//
+// Returns [{ tag, count }] for the most-used tags (excludes soft-deleted
+// threads). Uses PostgreSQL unnest + group by on the text[] column.
+
+export interface TagStat {
+  tag: string;
+  count: number;
+}
+
+export async function getTagStats(limit = 20): Promise<TagStat[]> {
+  const rows = await prisma.$queryRaw<Array<{ tag: string; count: bigint }>>`
+    SELECT unnest(tags) AS tag, COUNT(*) AS count
+    FROM forum_threads
+    WHERE status <> 'deleted'
+    GROUP BY tag
+    ORDER BY count DESC, tag ASC
+    LIMIT ${limit}
+  `;
+  return rows.map(r => ({ tag: r.tag, count: Number(r.count) }));
+}
