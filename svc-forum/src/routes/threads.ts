@@ -74,8 +74,8 @@ threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req
     pinned, featured, filter,
   } = req.query as Record<string, string | undefined>;
 
-  if (sort !== undefined && sort !== 'latest' && sort !== 'recently-updated') {
-    throw new HttpError(400, 'sort must be "latest" or "recently-updated"');
+  if (sort !== undefined && sort !== 'latest' && sort !== 'recently-updated' && sort !== 'hot') {
+    throw new HttpError(400, 'sort must be "latest", "recently-updated" or "hot"');
   }
 
   // Resolve pinned/featured from filter param or boolean params.
@@ -141,10 +141,16 @@ threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req
 }));
 
 // GET /api/threads/:threadId — get single thread
+// Records a view (dedup per principal) on read; view recording is best-effort
+// and never fails the response (AC#1/AC#4).
 threadsRouter.get('/:threadId', authRequired, requireReadScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
+
+  const user = req.user!;
+  void db.recordView(threadId, user.id).catch(() => {});
+
   res.json({ thread });
 }));
 

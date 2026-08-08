@@ -33,6 +33,15 @@ export const env = z
       .string()
       .url()
       .default('http://localhost:4001/.well-known/jwks.json'),
+
+    // ── Hot ranking weights (AC#3: server-side configurable) ────────────────
+    // score = viewCount*HOT_WEIGHT_VIEW + messageCount*HOT_WEIGHT_MSG + recency
+    // recency = max(0, HOT_WEIGHT_RECENCY - daysSinceLastActivity*HOT_DECAY_PER_DAY)
+    HOT_WEIGHT_VIEW: z.coerce.number().default(1),
+    HOT_WEIGHT_MSG: z.coerce.number().default(3),
+    HOT_WEIGHT_RECENCY: z.coerce.number().default(10),
+    HOT_DECAY_PER_DAY: z.coerce.number().default(0.5),
+    HOT_CANDIDATE_POOL: z.coerce.number().default(200),
   })
   .parse(process.env);
 
