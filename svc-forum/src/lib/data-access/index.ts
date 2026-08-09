@@ -26,8 +26,9 @@ export { findMyNotifications } from './notifications.js';
 export type { ForumStats, TagStat } from './stats.js';
 export { getForumStats, getTagStats } from './stats.js';
 
-// search.ts
-export { searchAll } from './search.js';
+// search.ts — 全文搜索（AC: relevance + excerpt + pagination，合并自 feat/fulltext-search-d56dd713）
+export type { SearchResultItem, SearchResults } from './search.js';
+export { extractExcerpt, relevanceScore, searchAll } from './search.js';
 
 // outcomes.ts
 export { createOutcome, findOutcomesByThreadId, findLatestOutcomeByThreadId } from './outcomes.js';
