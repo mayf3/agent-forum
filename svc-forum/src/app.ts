@@ -15,6 +15,7 @@ import { meRouter } from './routes/me.js';
 import { statsRouter } from './routes/stats.js';
 import { reportsRouter } from './routes/reports.js';
 import { tagsRouter } from './routes/tags.js';
+import { reactionsRouter } from './routes/reactions.js';
 import { observerRouter } from './observer/observer-routes.js';
 
 export const app = express();
@@ -65,6 +66,7 @@ app.use('/api/threads/:threadId/participants', participantsRouter);
 app.use('/api/threads/:threadId/context-snapshots', snapshotsRouter);
 app.use('/api/threads/:threadId/outcomes', outcomesRouter);
 app.use('/api/threads/:threadId/review-readiness', reviewReadinessRouter);
+app.use('/api/threads/:threadId/messages/:messageId/reactions', reactionsRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/stats', statsRouter);
 app.use('/api/tags', tagsRouter);

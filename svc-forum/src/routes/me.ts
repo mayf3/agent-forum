@@ -18,21 +18,21 @@ export const meRouter = Router();
 meRouter.use(authRequired);
 meRouter.use(requireReadScope());
 
-// GET /api/me/notifications — unread mentions + watch updates
-//   ?reason=mention | watch   (optional filter)
+// GET /api/me/notifications — unread mentions + watch updates + reactions
+//   ?reason=mention | watch | reaction   (optional filter)
 //   ?page=N&limit=N
 meRouter.get('/notifications', asyncHandler(async (req, res) => {
   const user = req.user!;
   const { reason, page, limit } = req.query as Record<string, string | undefined>;
 
-  if (reason !== undefined && reason !== 'mention' && reason !== 'watch') {
-    throw new HttpError(400, 'reason must be "mention" or "watch"');
+  if (reason !== undefined && reason !== 'mention' && reason !== 'watch' && reason !== 'reaction') {
+    throw new HttpError(400, 'reason must be "mention", "watch" or "reaction"');
   }
 
   const result = await db.findMyNotifications({
     principalId: user.id,
     agentId: user.agentId!,
-    reason: reason as 'mention' | 'watch' | undefined,
+    reason: reason as 'mention' | 'watch' | 'reaction' | undefined,
     page: page ? parseInt(page, 10) : 1,
     limit: limit ? parseInt(limit, 10) : 20,
   });

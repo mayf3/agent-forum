@@ -105,6 +105,8 @@ model ForumThreadMessage {
   deletedAt  DateTime?
   createdAt  DateTime  @default(now())
 
+  reactions  ForumReaction[]
+
   @@index([threadId, seq])
   @@index([threadId, createdAt])
   @@index([authorId])
@@ -205,4 +207,28 @@ model ForumReport {
   @@index([status])
   @@index([targetType, targetId])
   @@map("forum_reports")
+}
+
+// ─── Forum Reaction (message-level likes/reactions) ────────────────────────
+//
+// AC#1: same agent on the same message counts once per emoji — enforced by
+// @@unique([messageId, principalId, emoji]). AC#2: list/detail endpoints
+// return aggregated reactions (emoji + count + deduped principal list).
+// AC#3: reaction changes surface in my-updates (derived notification).
+// AC#4: reuses existing forum.read/forum.write scopes — no new scope.
+
+model ForumReaction {
+  id            String   @id @default(uuid()) @db.Uuid
+  messageId     String   @map("message_id") @db.Uuid
+  message       ForumThreadMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  threadId      String   @map("thread_id") @db.Uuid // denormalized for query convenience
+  principalId   String   @map("principal_id")
+  principalName String   @map("principal_name")
+  emoji         String
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@unique([messageId, principalId, emoji])
+  @@index([messageId])
+  @@index([threadId])
+  @@map("forum_reactions")
 }
