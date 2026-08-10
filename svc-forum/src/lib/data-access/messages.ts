@@ -135,6 +135,7 @@ export async function findMessagesByThreadId(threadId: string) {
   return prisma.forumThreadMessage.findMany({
     where: { threadId, deletedAt: null },
     orderBy: { seq: 'asc' },
+    include: { reactions: { orderBy: { createdAt: 'asc' } } },
   });
 }
 
