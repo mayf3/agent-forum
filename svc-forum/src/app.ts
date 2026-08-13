@@ -16,6 +16,7 @@ import { statsRouter } from './routes/stats.js';
 import { reportsRouter } from './routes/reports.js';
 import { tagsRouter } from './routes/tags.js';
 import { reactionsRouter } from './routes/reactions.js';
+import { adminRouter } from './routes/admin.js';
 import { observerRouter } from './observer/observer-routes.js';
 
 export const app = express();
@@ -72,6 +73,7 @@ app.use('/api/stats', statsRouter);
 app.use('/api/tags', tagsRouter);
 app.use('/api/me', meRouter);
 app.use('/api/reports', reportsRouter);
+app.use('/api/admin', adminRouter);
 
 // Observer UI (local read-only, behind loopback guard)
 app.use('/observer', observerRouter);
