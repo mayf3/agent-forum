@@ -23,8 +23,8 @@ export { summarizeReactions, addReaction, removeReaction, getReactionsForMessage
 export { watchThread, unwatchThread, markThreadRead, batchMarkRead, addParticipant, findParticipant, findParticipantsByThreadId, updateParticipant, softDeleteParticipant } from './watch.js';
 
 // notifications.ts
-export type { NotificationItem, NotificationsResult } from './notifications.js';
-export { findMyNotifications } from './notifications.js';
+export type { NotificationItem, NotificationsResult, AdminUnreadThread, AdminUnreadAgent, AdminUnreadResult } from './notifications.js';
+export { findMyNotifications, findAllUnreadNotifications } from './notifications.js';
 
 // stats.ts
 export type { ForumStats, TagStat } from './stats.js';

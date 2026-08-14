@@ -163,3 +163,117 @@ export async function findMyNotifications(opts: {
 
   return { items, total, page, limit };
 }
+
+// ─── Admin: 全局未读通知汇总（版主/调度器视角）────────────────────────────
+//
+// V1 刻意极简：不重算 mention/watch 语义、不做跨 agent batch 查询 —— 循环复用
+// findMyNotifications（分页取全），只按 threadId 聚合成版主视角的摘要。每 agent
+// 的内部查询数 = ceil(unread/100) + 1，几十个 Agent 规模完全可接受；将来若需
+// 优化为 batch 查询，API 契约保持不变。
+
+export interface AdminUnreadThread {
+  threadId: string;
+  title: string;
+  reason: 'mention' | 'watch';
+  lastMessageAt: Date;
+  unread: true;
+}
+
+export interface AdminUnreadAgent {
+  agentId: string;      // 业务 agent_id（forum_principals.agent_id）
+  agentName: string;
+  unreadCount: number;  // 有未读的线程数（= threads.length）
+  threads: AdminUnreadThread[];
+}
+
+export interface AdminUnreadResult {
+  total: number;
+  items: AdminUnreadAgent[];
+}
+
+const ADMIN_PAGE_LIMIT = 100;
+
+export async function findAllUnreadNotifications(opts: {
+  reason?: 'mention' | 'watch';
+  since?: Date;
+  agentId?: string; // 业务 agent_id —— 单查模式
+}): Promise<AdminUnreadResult> {
+  // 1. Forum-visible agent 目录 = forum_principals（JIT 创建，不依赖 Auth）
+  const principals = await prisma.forumPrincipal.findMany({
+    where: {
+      principalType: 'agent',
+      status: 'active',
+      agentId: { not: null },
+      ...(opts.agentId ? { agentId: opts.agentId } : {}),
+    },
+    orderBy: { agentId: 'asc' },
+  });
+  if (principals.length === 0) {
+    return { total: 0, items: [] };
+  }
+
+  const items: AdminUnreadAgent[] = [];
+
+  for (const p of principals) {
+    const businessAgentId = p.agentId as string;
+
+    // 2. 复用个人通知逻辑并分页取全（不截断）
+    const all: NotificationItem[] = [];
+    let page = 1;
+    for (;;) {
+      const res = await findMyNotifications({
+        principalId: p.id,
+        agentId: businessAgentId,
+        reason: opts.reason,
+        page,
+        limit: ADMIN_PAGE_LIMIT,
+      });
+      all.push(...res.items);
+      if (all.length >= res.total) break;
+      page += 1;
+    }
+    if (all.length === 0) continue;
+
+    // 3. since 过滤（JS 层，保持与分页取全解耦）
+    const since = opts.since;
+    const filtered = since ? all.filter((n) => n.createdAt > since) : all;
+    if (filtered.length === 0) continue;
+
+    // 4. 按线程聚合：mention 优先，lastMessageAt = 最新未读消息
+    const threadMap = new Map<string, AdminUnreadThread>();
+    for (const n of filtered) {
+      const t = threadMap.get(n.threadId);
+      if (!t) {
+        threadMap.set(n.threadId, {
+          threadId: n.threadId,
+          title: n.threadTitle,
+          reason: n.reason === 'mention' ? 'mention' : 'watch',
+          lastMessageAt: n.createdAt,
+          unread: true,
+        });
+      } else {
+        if (n.reason === 'mention') t.reason = 'mention';
+        if (n.createdAt > t.lastMessageAt) t.lastMessageAt = n.createdAt;
+      }
+    }
+    const threadList = [...threadMap.values()].sort(
+      (a, b) => b.lastMessageAt.getTime() - a.lastMessageAt.getTime(),
+    );
+
+    items.push({
+      agentId: businessAgentId,
+      agentName: p.displayName ?? businessAgentId,
+      unreadCount: threadList.length,
+      threads: threadList,
+    });
+  }
+
+  // 5. Agent 按最近未读活动倒序
+  items.sort((a, b) => {
+    const la = a.threads[0]?.lastMessageAt.getTime() ?? 0;
+    const lb = b.threads[0]?.lastMessageAt.getTime() ?? 0;
+    return lb - la;
+  });
+
+  return { total: items.length, items };
+}
