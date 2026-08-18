@@ -4,6 +4,15 @@
 
 它在合入 `main` 后成为仓库级开发规则。它不是 Forum 产品 Spec，也不替代具体产品或架构 Spec。
 
+```text
+ENFORCEMENT_STATUS = MANUAL_POLICY
+DETERMINISTIC_SPEC_VERIFIER = NOT_IMPLEMENTED
+BASE_BRANCH_SPEC_GATE = NOT_IMPLEMENTED
+REQUIRED_BRANCH_PROTECTION = NOT_CONFIGURED
+```
+
+V0 的规则具有规范性，但目前依赖作者、Reviewer 和 Maintainer 人工执行。不得把本文、Skill 或 PR 模板的存在描述成已经生效的机器门禁。
+
 ## 1. North Star
 
 这套体系最终服务的不是文档数量、模板完整度或治理形式本身。
@@ -40,7 +49,7 @@ V0 继承两类已验证的思路，但不原样复制其目录和生命周期�
 
 本仓库有意不照抄 DeepSeek Harness 的 lifecycle-directory 模型。Agent Forum 的 governing Spec 必须先被接受并进入 implementation branch 的 base，之后才能实现，因此 Spec 的规范状态与代码的实现状态必须分离。
 
-## 3. 整体架构
+## 3. 整体架构与目录职责
 
 ```text
 AGENTS.md
@@ -66,16 +75,96 @@ Implementation State, Raw Evidence and Provenance
 | 层 | 负责 | 不负责 |
 |---|---|---|
 | `AGENTS.md` | 告诉进入仓库的 Agent 必须先读什么、不可绕过什么 | 复制完整 Spec 规则 |
-| `.agents/README.md` | 开发语法、Spec authority、生命周期和治理规则 | 具体 Forum 产品决定 |
-| `.agents/skills/` | 可重复执行的 Agent 工作流 | 代替产品 Owner 或独立 Reviewer 作最终判断 |
+| `.agents/README.md` | 开发语法、authority、生命周期和治理规则 | 具体 Forum 产品决定 |
+| `.agents/skills/` | 可重复执行的 Agent 工作流 | 代替 Product Owner 或独立 Reviewer 作最终判断 |
 | `docs/product/` | 高层产品方向和边界 | 每次实现的完整可验收 Contract |
 | `docs/specs/` | governing Specs、产品/架构/迁移/安全 Contract | 当前代码事实和运行结果 |
-| 代码与配置 | 当前实现 State | 自动证明自己符合 Spec |
+| 代码与配置 | 当前实现材料 | 自动证明自己符合 Spec |
 | 测试、运行结果、日志、PR | Verification Evidence 与 provenance | 自动成为产品 authority |
 
-`docs/product/agent-forum-product-direction-v1.md` 继续作为当前高层产品边界。新的 Spec 可以细化它，但只有显式 supersession 才能改变其已冻结边界。
+`.agents/` 保存稳定 Grammar 和 Skills；真实 governing Specs 固定放在 `docs/specs/`；当前实现事实和运行证据留在代码、测试、PR、日志和原始系统中。
 
-## 4. Development Grammar：六个一级原语
+## 4. Authority Model 与优先级
+
+### 4.1 仓库内 authority 层级
+
+Agent Forum V0 明确区分以下层级：
+
+```text
+Product Direction
+        ↓ may be refined by
+Accepted lower-level Specs
+        ↓ must be implemented by
+Code / Configuration / Schema / Deployment
+        ↓ evaluated through
+Tests / Runtime Evidence / Compliance Records
+```
+
+其中：
+
+1. **Product Direction 是具名的更高层产品 authority。** 当前 authority 是 `docs/product/agent-forum-product-direction-v1.md`。
+2. **Accepted Spec 是下级 authority。** 它可以把 Product Direction 细化成可实施、可验收的 Decision 和 Contract。
+3. **下级 Spec 不得 supersede、削弱、改写或绕过 Product Direction。** 若产品方向需要改变，必须通过同层级的新 Product Direction authority 完成，而不是由 `docs/specs/` 中的实现级 Spec 完成。
+4. **代码、测试和当前部署不是规范 authority。** 它们只能表达实现材料、Observation、Evidence 和 conformance。
+
+当下级 Spec 与 Product Direction 冲突时：
+
+```text
+AUTHORITY_CONFLICT = YES
+SPEC_READY_FOR_ACCEPTANCE = NO
+IMPLEMENTATION_ALLOWED = NO
+```
+
+不能以“代码已经如此”或“下级 Spec 更具体”为理由覆盖 Product Direction。
+
+### 4.2 V0 禁止 partial supersession
+
+V0 的 `supersedes` 只表示**完整 authority supersession**。
+
+禁止：
+
+- 只 supersede 一份 Spec 的某个章节；
+- 只 supersede 某个 Decision 或 Contract；
+- 同一份旧 Spec 在没有机器可读映射时一部分仍有效、一部分失效；
+- 使用自然语言范围声明模拟 partial supersession。
+
+若 accepted Spec 的任何既有规范含义需要改变，V0 要求创建一份完整的新 Spec，重新陈述其完整 authority，并完整 supersede 旧 Spec。
+
+只有先通过独立治理变更引入显式、机器可读的 per-authority / per-Contract ownership 与 supersession model，未来版本才可以允许 partial supersession。
+
+### 4.3 External governing dependencies
+
+本仓库可以引用其他仓库拥有的 governing authority，例如 auth-service 的 accepted Spec、协议或安全 Contract。
+
+外部 authority 引用必须固定：
+
+```text
+repository
+stable authority or spec ID
+immutable revision: commit / tag / release
+relevant scope when needed
+```
+
+可在 Spec frontmatter 中使用：
+
+```yaml
+external_authorities:
+  - repository: mayf3/auth-service
+    authority_id: AUTH_SERVICE_EXAMPLE_V1
+    revision: <immutable commit>
+```
+
+规则：
+
+- 外部 authority 的所有权仍属于其原仓库；
+- 本仓库只能声明 dependency、alignment 或 conflict；
+- 本仓库的 `supersedes` / `superseded_by` 不得指向外部仓库；
+- 本仓库不得修改、接受、拒绝或 supersede 外部 authority；
+- 出现跨仓库冲突时，必须阻塞本地接受或实现，并在 authority owner 所在仓库完成协调。
+
+External reference 不是跨仓库治理权的转移。
+
+## 5. Development Grammar：六个一级原语
 
 V0 只定义六个一级原语：
 
@@ -90,7 +179,7 @@ Contract
 
 只有真实开发材料无法自然表达时，才考虑增加新的一级原语。
 
-### 4.1 Goal
+### 5.1 Goal
 
 Goal 回答：
 
@@ -110,13 +199,15 @@ Goal 可以包含 Metric、Target 和 Constraint，但不能退化成文件或 A
 “只有满足 Required Review 的讨论才能形成正式结果”可以是 Goal Condition。
 ```
 
-### 4.2 State
+### 5.2 State
 
 State 回答：
 
-> 当前系统客观上是什么？
+> 在一个明确版本、环境和时间点上，我们对当前系统形成了什么投影？
 
-State 应尽可能固定到可复现的版本：
+Current State 是一个**有版本的 projection**，不是无需来源的事实 authority。
+
+它应尽可能固定：
 
 ```text
 repository
@@ -124,14 +215,22 @@ branch / commit
 schema
 configuration
 runtime mode
+environment
+observation time
 API response
 current tests
 production evidence when available
 ```
 
-State 描述当前实现事实，不表示这些事实正确，也不表示未来必须继续如此。
+每个 load-bearing State 陈述必须：
 
-### 4.3 Observation
+- 由一个或多个带 provenance 的 Observation 支撑；或
+- 明确标记为由 Observation 推导出的 Claim / inference；或
+- 标记为尚未验证的 assumption。
+
+State 可以压缩和组织 Observations 与 Claims，方便恢复当前系统视图，但不能把未引用的叙述升级成事实，也不能反过来充当自己的 Evidence。
+
+### 5.3 Observation
 
 Observation 回答：
 
@@ -151,11 +250,11 @@ Observation 必须带 provenance，例如：
 - 测试命令和结果；
 - API 请求与响应；
 - 数据库查询；
-- 日志或部署环境。
+- 日志、环境和观察时间。
 
 Observation 不负责解释原因。
 
-### 4.4 Claim
+### 5.4 Claim
 
 Claim 回答：
 
@@ -177,9 +276,17 @@ Claim 可以是：
 - 兼容性判断；
 - 对某个修改效果的预测。
 
-Claim 不是规范要求，后续证据可以推翻它。
+Claim 永远不是“已被证明为不可推翻的事实”。在 Spec 中使用：
 
-### 4.5 Decision
+```text
+SUPPORTED CLAIM
+INFERRED CLAIM
+UNVERIFIED ASSUMPTION
+```
+
+不得使用 `VERIFIED CLAIM`。Claim 即使得到强证据支持，仍然是可被后续 Observation 削弱或推翻的命题。
+
+### 5.5 Decision
 
 Decision 回答：
 
@@ -199,7 +306,7 @@ Required Review Requirement 与 Watch Subscription 在领域语义和持久化�
 - 为什么没有选择；
 - 什么新条件会触发重新考虑。
 
-### 4.6 Contract
+### 5.6 Contract
 
 Contract 回答：
 
@@ -233,7 +340,7 @@ Operations
 
 Contract 必须描述可观察或可验证的义务，不应只写实现意图。
 
-## 5. Evidence Link 不是新的一级原语
+## 6. Evidence Link 不是新的一级原语
 
 原始材料本身不自动等于 Evidence。
 
@@ -247,7 +354,7 @@ PR ≠ Evidence
 
 Evidence 是带 provenance 的关系。
 
-### 5.1 Reasoning Evidence
+### 6.1 Reasoning Evidence
 
 ```text
 Observation
@@ -267,7 +374,7 @@ Discriminative Power: LOW | MEDIUM | HIGH
 
 不要制造 `0.73` 一类没有校准依据的假精确数字。
 
-### 5.2 Conformance Evidence
+### 6.2 Conformance Evidence
 
 ```text
 Test / Runtime Observation
@@ -278,13 +385,17 @@ Test / Runtime Observation
 
 “存在一个测试”不证明 Contract 已满足。有效的 Conformance Evidence 至少需要说明：
 
-- 测试或验证针对哪个 Contract；
+- 针对哪个 Contract；
 - 是否通过真实入口；
-- 在什么 commit 和环境运行；
-- 运行结果是什么；
-- 已知覆盖缺口是什么。
+- Spec revision commit；
+- implementation commit；
+- environment；
+- evaluation time；
+- 运行结果；
+- evidence reference；
+- 已知覆盖缺口。
 
-## 6. Activity Plane
+## 7. Activity Plane
 
 Activity 描述人与 Agent 当前正在为了改变开发 State 做什么。它不属于“系统已经是什么”或“我们已经知道什么”。
 
@@ -297,32 +408,29 @@ IMPLEMENT
 VERIFY
 ```
 
-### INVESTIGATE
-
-目的：建立可靠 State 和 Observation，提出或削弱 Claim。
-
-### SPECIFY
-
-目的：冻结 Decision 和 Contract，形成可独立实施的 governing Spec。
-
-### IMPLEMENT
-
-目的：按照 accepted Spec 改变代码、配置、schema 或部署 State。
-
-### VERIFY
-
-目的：获得能够验证或违反 Contract 的 Conformance Evidence。
+- `INVESTIGATE`：建立可靠 Observation，形成 Current State projection，提出或削弱 Claim。
+- `SPECIFY`：冻结 Decision 和 Contract，形成可独立实施的 governing Spec。
+- `IMPLEMENT`：按照 accepted Spec 改变代码、配置、schema 或部署 State。
+- `VERIFY`：获得能够验证或违反 Contract 的 qualified Conformance Evidence。
 
 Issue、PR、工作流任务和测试运行都是 Activity 的容器或方法，不是新的知识原语。
 
-## 7. 最重要的类型规则
+## 8. 最重要的类型规则
 
 V0 至少强制以下语义分离。
 
 ```text
+State ≠ Observation
+
+当前系统的版本化投影
+≠
+直接读取、复现或测量到的原始事实
+```
+
+```text
 State ≠ Contract
 
-代码现在是什么
+代码当前是什么
 ≠
 系统应该是什么
 ```
@@ -366,7 +474,7 @@ Test ≠ Evidence
 
 存在或编写了什么测试
 ≠
-测试运行结果对某个 Contract 证明了什么
+某次执行结果对某个 Contract 证明了什么
 ```
 
 ```text
@@ -378,6 +486,14 @@ Accepted Spec ≠ Implemented State
 ```
 
 ```text
+VERIFIED Conformance ≠ Permanent Spec Property
+
+某次有完整限定条件的评估通过
+≠
+该 Spec 永久、无条件地被实现
+```
+
+```text
 Activity ≠ Knowledge
 
 Agent 正在做什么
@@ -385,7 +501,7 @@ Agent 正在做什么
 仓库已经知道或承诺什么
 ```
 
-## 8. Spec 是组合型治理文档
+## 9. Spec 是组合型治理文档
 
 Spec 不是新的一级原语。
 
@@ -393,7 +509,7 @@ Spec 不是新的一级原语。
 Spec
 =
 Goal
-+ Relevant State
++ Current State projection
 + Observations
 + Claims / Assumptions
 + Decisions
@@ -406,16 +522,15 @@ Goal
 
 ```text
 为什么要改？
-当前真实情况是什么？
-哪些事实已被验证？
-哪些解释仍是假设？
+当前投影基于哪些真实 Observation？
+哪些解释是 SUPPORTED、INFERRED 或 UNVERIFIED？
 产品和架构最终选择了什么？
 系统必须满足哪些 Contract？
-什么证据足以证明已经完成？
+什么 qualified Evidence 足以证明已经完成？
 哪些诱人的方案已被拒绝，为什么？
 ```
 
-## 9. Spec 存放位置与稳定路径
+## 10. Spec 存放位置与稳定路径
 
 真实 governing Specs 固定存放在：
 
@@ -440,7 +555,7 @@ docs/specs/AGENT_FORUM_CORE_INVARIANTS_V1.md
 
 被完整拒绝且从未成为 authority 的 proposed Spec 通常不进入 `main`。其中具有长期价值的拒绝理由应被吸收到最终 governing Spec 的 `Alternatives considered` 中，而不是建立一个无人读取的 rejected 目录。
 
-## 10. Spec 机器可读头部
+## 11. Spec 机器可读头部
 
 每份 Spec 的开头必须使用以下最小 YAML frontmatter：
 
@@ -451,6 +566,7 @@ status: proposed
 scope:
   - svc-forum
 supersedes: []
+external_authorities: []
 ---
 ```
 
@@ -473,12 +589,15 @@ superseded_by: NEW_SPEC_ID
 - `spec_id`：仓库内唯一、稳定、不随标题变化的标识；
 - `status`：Spec 的规范生命周期；
 - `scope`：该 Spec 直接治理的服务、目录、协议或产品面；
-- `supersedes`：本 Spec 完整取代的旧 Spec；
-- `superseded_by`：当前 Spec 已被哪份新 Spec 完整取代。
+- `supersedes`：本 Spec 完整取代的本仓库同层级旧 Spec；
+- `superseded_by`：当前 Spec 已被哪份本仓库同层级新 Spec 完整取代；
+- `external_authorities`：只读引用的外部 governing dependencies。
 
-Git 历史负责记录作者、日期、review 和接受过程，V0 不复制这些信息到更多元数据字段。
+`supersedes` 与 `superseded_by` 不得用于 Product Direction 或外部仓库 authority。
 
-## 11. Spec 最小正文骨架
+Git 历史提供 commit provenance，但**不能单独代替 Review Binding**。Review Binding 由第 16 节规定的人工治理记录保存。
+
+## 12. Spec 最小正文骨架
 
 所有 Spec 必须从以下骨架开始。领域特有章节可以插入，但不能删除必需章节。
 
@@ -508,35 +627,31 @@ Git 历史负责记录作者、日期、review 和接受过程，V0 不复制这
 ## Implementation sequencing
 ```
 
-### 11.1 Goal
+### 12.1 Current state
 
-描述最终改善目标、Metric、Target 和 Constraint，不写任务清单。
+固定 commit、environment 和 observation time。每项重要 State 陈述应引用 Observation，或明确标为 Claim / assumption。不得用理想状态冒充当前状态，也不得把 Current State 当作无需来源的 authority。
 
-### 11.2 Current state
+### 12.2 Observations
 
-固定 commit 和当前实现事实。不得用理想状态冒充当前状态。
+保存直接事实及 provenance。推测必须移动到 `Claims and assumptions`。
 
-### 11.3 Observations
-
-保存已验证事实及 provenance。推测必须移动到 `Claims and assumptions`。
-
-### 11.4 Claims and assumptions
+### 12.3 Claims and assumptions
 
 明确区分：
 
 ```text
-VERIFIED CLAIM
+SUPPORTED CLAIM
 INFERRED CLAIM
 UNVERIFIED ASSUMPTION
 ```
 
 影响实现方向的 assumption 在 Spec 被接受前必须解决，或者被明确转换为 Contract 允许的行为范围。
 
-### 11.5 Decision
+### 12.4 Decision
 
 冻结产品和架构选择。Implementation Agent 不应再被要求在多个产品选项中自行选择。
 
-### 11.6 Contracts
+### 12.5 Contracts 与稳定 ID
 
 每个 Contract 必须有仓库内唯一 ID：
 
@@ -552,9 +667,14 @@ CTR-REVIEW-003
 CTR-DELETE-002
 ```
 
-Contract ID 一经被 accepted Spec 使用，不因措辞优化而改变。
+Contract ID 一旦进入 accepted Spec，就永久绑定其当时的规范含义：
 
-Observation、Claim 和 Decision 在小型 Spec 中可以不编号；当它们存在多条 Evidence Link、跨章节引用或跨 Spec 引用时，必须使用稳定 ID：
+- 不得改变含义；
+- 不得用于不同 Contract；
+- 不得在删除、supersession 或历史清理后重新分配；
+- 规范含义变化必须使用新 Spec ID 和新 Contract ID。
+
+Observation、Claim 和 Decision 在小型 Spec 中可以不编号；当它们存在 Evidence Link、跨章节引用或跨 Spec 引用时，使用稳定 ID：
 
 ```text
 OBS-<DOMAIN>-<NNN>
@@ -562,7 +682,9 @@ CLM-<DOMAIN>-<NNN>
 DEC-<DOMAIN>-<NNN>
 ```
 
-### 11.7 Acceptance
+一旦编号的 Decision 进入 accepted Spec，其 ID 同样不得承载不同规范含义。
+
+### 12.6 Acceptance
 
 每个验收场景必须显式引用一个或多个 Contract ID。
 
@@ -578,7 +700,7 @@ Then ...
 
 Acceptance 必须能区分正确和错误实现，不能只写“测试通过”或“接口可用”。
 
-### 11.8 Alternatives considered
+### 12.7 Alternatives considered
 
 每个真实、重要且未来可能再次被提出的替代方案必须记录：
 
@@ -592,7 +714,7 @@ Reopen when:
 
 不得为了模板完整而虚构没有认真考虑过的替代方案。
 
-### 11.9 Risks and unresolved questions
+### 12.8 Risks and unresolved questions
 
 `proposed` 阶段可以有 unresolved questions。
 
@@ -602,11 +724,11 @@ Reopen when:
 - 不再包含 `TBD`、`TODO` 或“实现时再决定”的关键选择；
 - 只允许留下明确标注为 non-blocking 的后续问题。
 
-### 11.10 Implementation sequencing
+### 12.9 Implementation sequencing
 
 只冻结依赖顺序、迁移门槛和安全 rollout 边界。不要把 Spec 写成逐文件施工清单。
 
-## 12. Spec 生命周期与代码一致性状态分离
+## 13. Spec 生命周期与 Accepted-Spec immutability
 
 Spec 生命周期只有：
 
@@ -616,7 +738,59 @@ accepted
 superseded
 ```
 
-代码对 Spec 的 Conformance State 单独表达：
+### 13.1 proposed
+
+- 由 Spec Author 起草；
+- 可以存在明确的 evidence gap 和 blocking question；
+- 不允许授权 Implementation 开工；
+- 作者不得自行把自己的 Spec 宣布为 accepted。
+
+### 13.2 accepted
+
+必须同时满足：
+
+- 已完成独立 Spec Review；
+- 所有 blocking product/architecture questions 已冻结；
+- Contracts 和 Acceptance 足以让无历史团队实施；
+- Product Owner 或被授权 Reviewer 明确接受；
+- final accepted head 已完成独立 recheck；
+- accepted 文件已经进入 Implementation branch 的 base branch。
+
+只有最后一条满足后，Implementation 才能开始。
+
+一旦某一 Spec revision 被接受：
+
+- 该 revision 中既有 Decision 和 Contract 的规范含义不可在同一稳定 ID 下改变；
+- `status: accepted` 不授权作者根据代码现状改写规范；
+- 旧 revision 的历史含义必须能通过 Git 及 Review Binding 恢复。
+
+### 13.3 Post-acceptance AMEND
+
+accepted Spec 在同一 `spec_id` 下只允许两类 AMEND：
+
+1. **Editorial-only**：拼写、链接、格式或不改变任何规范含义的澄清。
+2. **Strictly additive**：新增独立 Decision / Contract / Acceptance，使用新稳定 ID，且不缩小、扩大、冲突、废弃或重新解释任何既有规范义务。
+
+每次 post-acceptance AMEND 都形成新的 Spec revision commit，必须重新经过独立 Review Binding。
+
+若变更会影响既有 Decision 或 Contract 的含义，即使只改变一句话、一个边界或一个例外，也不是 AMEND，必须 `SUPERSEDE`。
+
+### 13.4 superseded
+
+- 只用于整份 accepted Spec 的 authority 被完整新 Spec 取代；
+- 旧 Spec 保留原有规范内容，只允许增加 supersession 元数据和链接；
+- 新 Spec 必须重新陈述完整 authority；
+- 新旧 Spec 必须双向引用；
+- V0 不支持 partial supersession；
+- superseding Spec 使用新的 `spec_id` 和新的 Contract IDs；旧 ID 永久保留且不得复用。
+
+下级 Spec 不得 supersede Product Direction，任何本地 Spec 不得 supersede 外部 authority。
+
+## 14. 代码一致性状态与 qualified conformance
+
+代码对 Spec 的一致性不是 Spec 的 lifecycle，也不是永久属性。
+
+V0 使用以下结果词：
 
 ```text
 UNKNOWN
@@ -626,98 +800,150 @@ VERIFIED
 DRIFTED
 ```
 
-示例：
+每一条 Conformance Record 必须绑定：
 
 ```text
-Spec: accepted
-Conformance: VERIFIED at commit abc123
+spec_id
+spec_revision_commit
+implementation_commit
+environment
+evaluated_at
+evidence_refs
+result
+coverage_gaps
 ```
 
-后续代码回归时：
+形式上：
 
 ```text
-Spec: accepted
-Conformance: DRIFTED at commit def456
+Conformance(
+  spec revision,
+  implementation commit,
+  environment,
+  evaluation time,
+  evidence set
+) = result
 ```
 
-代码出现 bug 不会自动使 Spec 失效。只有产品或架构 Decision 真正改变时，才创建新 Spec 并 supersede 旧 Spec。
+因此禁止无条件陈述：
 
-Spec 不使用 `implemented` 状态，因为“规范是什么”和“代码是否做到”是两个不同维度。
+```text
+“这个 Spec 已经 VERIFIED”
+“系统永久符合 CTR-X”
+```
 
-## 13. proposed、accepted 与 superseded
+允许陈述：
 
-### proposed
+```text
+Conformance for SPEC_X @ <spec commit>
+against implementation @ <implementation commit>
+in <environment>
+at <time>
+with <evidence refs>
+= VERIFIED
+```
 
-- 由 Spec Author 起草；
-- 可以存在明确的 evidence gap 和 blocking question；
-- 不允许授权 Implementation 开工；
-- 作者不得自行把自己的 Spec 宣布为 accepted。
+`VERIFIED` 只表示在该限定关系和 evidence scope 内，所有 in-scope Contract 已被验证。后续代码、环境、依赖、数据或证据变化后，必须产生新的 Conformance Record；旧记录仍是历史证据，但不能自动推广。
 
-### accepted
+代码出现 bug 不会自动使 Spec 失效。只有规范 Decision 真正改变时，才完整 supersede 旧 Spec。
 
-必须同时满足：
+## 15. 开工前必须分类：REUSE / AMEND / SUPERSEDE / NEW
 
-- 已完成独立 Spec Review；
-- 所有 blocking product/architecture questions 已冻结；
-- Contracts 和 Acceptance 足以让无历史团队实施；
-- Owner 或被授权 Reviewer 明确接受；
-- accepted 文件已经进入 Implementation branch 的 base branch。
-
-只有最后一条满足后，Implementation 才能开始。
-
-### superseded
-
-- 只用于核心 Decision、Contract authority 或产品语义已经被新 Spec 取代；
-- 旧 Spec 保留历史，不改写成相反的决定；
-- 新旧 Spec 必须双向引用；
-- partial supersession 不得把旧 Spec 整体标为 superseded，应保留两个 authority 并明确各自治理范围。
-
-## 14. 开工前必须分类：REUSE / AMEND / SUPERSEDE / NEW
-
-每次非机械性工作开始前，必须先查找现有 product docs 和 Specs，并选择一种 disposition。
+每次非机械性工作开始前，必须先查找 Product Direction、现有 Specs 和外部 governing dependencies，并选择一种 disposition。
 
 ### REUSE
 
-已有 accepted Spec 已完整覆盖变更。
+已有 accepted Spec revision 已完整覆盖变更。
 
 ```text
 不新增 Spec。
-Implementation PR 引用已有 spec_id 和相关 Contract IDs。
+Implementation PR 引用 spec_id、spec revision commit 和相关 Contract IDs。
 ```
 
 ### AMEND
 
-仍然是同一个 Goal、authority 和核心 Decision，只是补齐遗漏 Contract、修复歧义或改变仍属于同一决策的边界。
+对 proposed Spec，可在同一 `spec_id` 下继续修改。
+
+对 accepted Spec，只允许第 13.3 节定义的 editorial-only 或 strictly additive AMEND。任何既有规范含义变化都不得使用 AMEND。
 
 ```text
 先提交独立 Spec amendment PR。
-重新 Review 和接受。
-进入 base 后再实现。
+重新 Review Binding 和接受。
+新 revision 进入 base 后再实现。
 ```
 
 ### SUPERSEDE
 
-核心 Decision、产品语义、兼容承诺或 authority 已改变。
+既有 accepted Decision、Contract、兼容承诺、authority 或产品语义需要改变。
 
 ```text
-创建新 Spec。
-旧 Spec 标为 superseded。
+创建完整新 Spec。
+使用新 spec_id 和新 Contract IDs。
+完整 supersede 旧 Spec。
 双向链接。
 新 Spec accepted 后再实现。
 ```
 
+V0 不允许 partial supersession。
+
 ### NEW
 
-这是一个独立的新 Goal、Contract 集合或产品/架构问题。
+这是一个独立的新 Goal、Contract 集合或产品/架构问题，不改变既有 authority 的含义。
 
-选择 disposition 时，不允许为了省事把实际 supersession 伪装成 amendment，也不允许为同一个 Decision 创建重复 Spec。
+选择 disposition 时，不允许为了省事把 normative change 伪装成 AMEND，也不允许为同一个 Decision 创建重复 authority。
 
-## 15. Spec-first Merge Gate
+## 16. Review Binding
+
+每次 `REVIEW` 必须针对精确 commit，而不是针对文件名、PR 标题或“最新版本”。
+
+初次 Review 记录至少包含：
+
+```text
+REVIEW_BASE_COMMIT = <exact base sha>
+REVIEWED_SPEC_COMMIT = <exact head sha containing reviewed Spec>
+REVIEWER_IDENTITY = <platform-bound identity, e.g. github:login>
+SPEC_REVIEW = ACCEPT | REVISE
+REVIEWED_AT = <timestamp>
+```
+
+规则：
+
+- reviewer identity 优先使用 GitHub 等平台绑定身份；
+- Spec Author 不得作为独立 Reviewer；
+- Review 只绑定 `REVIEWED_SPEC_COMMIT`；
+- Review 后任何 Decision、Contract、Acceptance、authority、risk disposition 或其他语义变化都会立即使该 Review 失效；
+- 语义变化后必须对新的 exact commit 完整重跑 REVIEW；
+- 仅 status flip、review metadata 或已确认不改变规范含义的机械编辑可以进入 final recheck，而不能自动继承接受结论。
+
+在最终接受前，必须对 PR 的 final accepted head 独立 recheck，并记录：
+
+```text
+FINAL_ACCEPTED_HEAD = <exact final head sha>
+FINAL_RECHECK_REVIEWER_IDENTITY = <independent platform-bound identity>
+FINAL_RECHECK_RESULT = PASS | FAIL
+SEMANTIC_CHANGE_SINCE_ACCEPTED_REVIEW = NONE | <description>
+REVIEW_BINDING = VALID | INVALID
+FINAL_RECHECKED_AT = <timestamp>
+```
+
+`FINAL_RECHECK_REVIEWER_IDENTITY` 必须独立于 Spec Author；可以是原独立 Reviewer，也可以是另一名独立 Reviewer。
+
+只有同时满足以下条件时，Review Binding 才有效：
+
+- initial ACCEPT review 的 exact base/head/identity 已记录；
+- final accepted head 已记录；
+- final head 完成独立 recheck；
+- reviewed commit 之后不存在未经重新 REVIEW 的语义变化；
+- `REVIEW_BINDING = VALID`。
+
+V0 的 Review Binding 记录保存在 GitHub PR review / conversation 中。由于把最终 commit SHA 写入该 commit 自身会形成自引用，V0 不要求 Spec 文件内嵌 final head。未来可以通过独立 sidecar 或 repository gate 机械化，但不能用普通 Git 历史替代上述绑定。
+
+## 17. Spec-first base-branch rule
 
 每个非机械性 Implementation PR 必须满足：
 
 ```text
-governing accepted Spec
+governing accepted Spec revision
 已经存在于该 PR 的 base branch
 ```
 
@@ -729,23 +955,32 @@ governing accepted Spec
 实现该 Spec
 ```
 
-原因：
+Implementation PR 必须引用：
 
-- Reviewer 无法区分规范讨论与实现细节；
-- Implementation 会反向塑造 Spec；
-- scope expansion 更难被发现；
-- 合并后无法证明实现是基于已接受 authority 开始的。
-
-Implementation PR 可以同步更新 README、API 文档、JSDoc 和 conformance evidence，但不得在同一 PR 修改 governing Decision 或 Contract。
+```text
+spec_id
+accepted spec revision commit
+Contract IDs
+```
 
 实现过程中发现 Spec 缺陷时：
 
 1. 停止扩大实现范围；
-2. 报告 Spec-Code conflict 或 missing decision；
-3. 单独提交 amendment 或 superseding Spec；
-4. 新 Spec accepted 并进入 base 后再继续实现。
+2. 报告 authority conflict、conformance drift 或 missing decision；
+3. 单独提交允许的 AMEND 或完整 SUPERSEDE；
+4. 新 accepted revision 进入 base 后再继续实现。
 
-## 16. Mechanical Change 豁免
+当前该规则仅由人工 PREFLIGHT、REVIEW、COMPLIANCE 和 Maintainer 执行：
+
+```text
+ENFORCEMENT = MANUAL_POLICY
+AUTOMATIC_BASE_BRANCH_GATE = NO
+REQUIRED_BRANCH_PROTECTION = NO
+```
+
+因此 `IMPLEMENTATION_ALLOWED = YES` 只是治理判断，不表示 GitHub 已技术阻止违规 merge。
+
+## 18. Mechanical Change 豁免
 
 只有不改变以下任何内容的纯机械或局部编辑，才可以不引用新 Spec：
 
@@ -778,17 +1013,18 @@ MECHANICAL_REASON = <why>
 
 “改动很小”本身不是豁免理由。
 
-## 17. Skill 与 deterministic gate 的职责分工
+## 19. Skill 与 deterministic gate 的职责分工
 
 ### Skill 负责语义工作
 
 `.agents/skills/spec-governance/SKILL.md` 负责：
 
-- preflight 与 disposition；
-- 调查 State 和 Observation；
+- PREFLIGHT 与 disposition；
+- authority resolution；
+- 调查 Observation 并形成 Current State projection；
 - 区分 Claim、Decision 和 Contract；
 - Spec authoring；
-- 独立 Spec Review；
+- exact-commit Review Binding；
 - Implementation compliance review；
 - 判断 alternatives、scope、risk 和 evidence 是否充分。
 
@@ -801,13 +1037,17 @@ Skill 是工作流和语义判断，不是 parser。
 - `spec_id` 唯一；
 - frontmatter 字段和 status 合法；
 - 必需章节存在；
-- Contract ID 唯一；
+- Contract ID 唯一且不被复用；
 - Acceptance 引用存在的 Contract；
-- supersession 指向真实 Spec 且双向一致；
+- supersession 只在本仓库同层级 Spec 间发生；
+- partial supersession 被拒绝；
+- external authority reference 固定 immutable revision；
 - accepted Spec 不含 blocking `TBD` / `TODO`；
 - Markdown 链接有效；
-- Implementation PR 引用的 accepted Spec 已存在于 base branch；
-- 同一 PR 没有同时新建 governing Spec 并实现它。
+- Implementation PR 引用的 accepted Spec revision 已存在于 base branch；
+- 同一 PR 没有同时新建 governing Spec 并实现它；
+- Review Binding 覆盖 final accepted head；
+- branch protection 要求该 gate。
 
 Parser 不应尝试判断：
 
@@ -816,63 +1056,73 @@ Parser 不应尝试判断：
 - Contract 是否完整；
 - Acceptance 是否具有足够区分力；
 - Alternative 是否诚实；
+- AMEND 是否真的没有改变语义；
 - 实现是否在语义上符合 Spec。
 
 这些必须由 Skill 和独立 Reviewer 完成。
 
-V0 bootstrap 先冻结 Grammar 与 Skill。deterministic verifier 和 CI 接线作为后续独立治理实现完成，不能用“已有 Skill”冒充机器门禁已经存在。
+V0 bootstrap 只冻结 Grammar、authority、Review Binding 与 Skill。deterministic verifier、base-branch gate 和 required branch protection 作为后续独立治理实现完成。
 
-## 18. 标准开发流程
+## 20. 标准开发流程
 
 ```text
 1. PRECHECK
-   读取 AGENTS、Development Grammar、产品方向、现有 Specs、当前代码
+   读取 AGENTS、Development Grammar、Product Direction、现有 Specs、外部 authority、当前代码
 
-2. DISPOSITION
-   REUSE / AMEND / SUPERSEDE / NEW
+2. AUTHORITY + DISPOSITION
+   解析 authority precedence；选择 REUSE / AMEND / SUPERSEDE / NEW
 
 3. INVESTIGATE
-   固定 commit，记录 State、Observation、Claim 和 evidence gap
+   固定 commit/environment/time；记录 Observations、Claims 和 Current State projection
 
 4. SPECIFY
    冻结 Decision、Contracts、Acceptance、Alternatives 和 Non-goals
 
 5. INDEPENDENT SPEC REVIEW
-   ACCEPT 或 REVISE
+   记录 exact base、reviewed commit、reviewer identity；ACCEPT 或 REVISE
 
-6. ACCEPT AND MERGE SPEC
-   accepted Spec 进入 implementation branch 的 base
+6. FINAL ACCEPTED HEAD RECHECK
+   语义变化则完整重跑 REVIEW；否则独立确认 final head 并形成 VALID Review Binding
 
-7. IMPLEMENT
+7. ACCEPT AND MERGE SPEC
+   accepted Spec revision 进入 implementation branch 的 base
+
+8. IMPLEMENT
    只按 Contract 改变 State，不扩大产品 scope
 
-8. VERIFY
-   通过真实入口收集逐 Contract Conformance Evidence
+9. VERIFY
+   收集绑定 spec revision、implementation commit、environment、time、evidence 的 Conformance Record
 
-9. COMPLIANCE REVIEW
-   VERIFIED / PARTIAL / DRIFTED
+10. COMPLIANCE REVIEW
+   输出 qualified VERIFIED / PARTIAL / DRIFTED
 ```
 
-不得跳过 5 和 6，直接把 proposed Spec 当作 implementation authority。
+不得跳过 5、6 和 7，直接把 proposed Spec 或未绑定的 review 当作 implementation authority。
 
-## 19. Spec Review 的最低问题集
+## 21. Spec Review 的最低问题集
 
 独立 Reviewer 至少必须回答：
 
-1. Goal 是否是用户/系统结果，而不是实现清单？
-2. Current State 是否固定到真实 commit，且没有把理想状态写成事实？
-3. Observation、Claim、Decision、Contract 是否分离？
-4. Evidence 是否有 provenance，是否足以支持关键 Claim？
-5. 是否仍有关键产品选择留给 Implementation Agent？
-6. Contract 是否覆盖正常路径、权限、失败、生命周期、事务、迁移和兼容性？
-7. Acceptance 是否逐条验证 Contract，并能让错误实现失败？
-8. Non-goals 是否阻止 scope expansion？
-9. Rejected alternatives 是否保留理由和 reopen condition？
-10. 是否与已有 product direction 或 accepted Spec 冲突？
-11. 是 AMEND 还是 SUPERSEDE，判断是否诚实？
-12. 一个没有历史上下文的团队是否可以据此实施？
+1. Product Direction 是否被明确识别为更高 authority？
+2. 下级 Spec 是否只 refine，而没有 supersede Product Direction？
+3. 是否存在被伪装成自然语言范围的 partial supersession？
+4. External authority 是否只读引用且固定 immutable revision？
+5. Goal 是否是用户/系统结果，而不是实现清单？
+6. Current State 是否固定 commit/environment/time，并由 Observation 和 Claim 支撑？
+7. Observation、Claim、Decision、Contract 是否分离？
+8. Claim 是否使用 SUPPORTED 而不是 VERIFIED？
+9. Evidence 是否有 provenance，是否足以支持关键 Claim？
+10. 是否仍有关键产品选择留给 Implementation Agent？
+11. Contract 是否覆盖正常路径、权限、失败、生命周期、事务、迁移和兼容性？
+12. Acceptance 是否逐条验证 Contract，并能让错误实现失败？
+13. post-acceptance AMEND 是否真的只 editorial 或 strictly additive？
+14. 规范含义变化是否完整 SUPERSEDE，并使用新 ID？
+15. Non-goals 是否阻止 scope expansion？
+16. Rejected alternatives 是否保留理由和 reopen condition？
+17. 一个没有历史上下文的团队是否可以据此实施？
+18. Review 是否绑定 exact base/head/identity，final accepted head 是否被独立 recheck？
 
-## 20. Implementation Compliance Review
+## 22. Implementation Compliance Review
 
 Implementation Reviewer 必须建立：
 
@@ -887,17 +1137,23 @@ Contract ID
 
 ```text
 SPEC_ID = ...
-SPEC_STATUS_IN_BASE = accepted | missing | wrong_status
+SPEC_REVISION_COMMIT = ...
+SPEC_STATUS_IN_BASE = accepted | missing | wrong_status | superseded
+IMPLEMENTATION_COMMIT = ...
+ENVIRONMENT = ...
+EVALUATED_AT = ...
+EVIDENCE_REFS = ...
 CONFORMANCE = VERIFIED | PARTIAL | DRIFTED
 UNVERIFIED_CONTRACTS = ...
+COVERAGE_GAPS = ...
 SCOPE_EXPANSION = NONE | ...
 REJECTED_ALTERNATIVE_REINTRODUCED = NO | ...
 IMPLEMENTATION_READY_TO_MERGE = YES | NO
 ```
 
-绿色测试只能作为 Evidence 的一部分，不能替代逐 Contract mapping。
+绿色测试只能作为 Evidence 的一部分，不能替代逐 Contract mapping。`CONFORMANCE = VERIFIED` 只能在上述字段全部限定的记录中使用。
 
-## 21. 目录布局
+## 23. 目录布局
 
 V0 采用：
 
@@ -918,9 +1174,9 @@ docs/
     └── <SPEC_ID>.md
 ```
 
-未来可以新增 deterministic verifier 和模板，但不在 `.agents/` 中堆放当前实现事实、运行日志、聊天记录或所有 PR 报告。
+未来可以新增 deterministic verifier、Review Binding sidecar 和模板，但不在 `.agents/` 中堆放当前实现事实、运行日志、聊天记录或所有 PR 报告。
 
-## 22. 有意拒绝的替代方案
+## 24. 有意拒绝的替代方案
 
 ### 原样复制 DeepSeek Harness 的 proposed/implemented/rejected 目录
 
@@ -952,6 +1208,36 @@ Reopen when:
 
 仓库拥有可靠的稳定 ID resolver 和自动链接重写，且真实规模证明状态目录比稳定路径更易用。
 
+### Partial supersession 只用自然语言声明
+
+Rejected because:
+
+没有 per-authority / per-Contract ownership model 时，读者和 verifier 无法稳定判断哪个 authority 仍生效，会制造无法机械解析的重叠规范。
+
+Reopen when:
+
+仓库先接受并实现显式、机器可读的 authority ownership 与 partial supersession model。
+
+### accepted Spec 在同一 ID 下修改既有规范含义
+
+Rejected because:
+
+这会破坏历史 review、Contract mapping、conformance evidence 和新 Agent 对稳定 authority 的恢复。
+
+Reopen when:
+
+不适用。规范含义变化必须 SUPERSEDE；稳定 ID 不得复用。
+
+### 仅依靠 Git 历史推断 Review Binding
+
+Rejected because:
+
+Git 只记录 commit 关系，不记录 Reviewer 对哪个 exact base/head 作了什么语义判断，也不能证明 final accepted head 未发生语义变化。
+
+Reopen when:
+
+存在等价或更强、可机械验证的 review attestation 系统。
+
 ### 所有 Spec 使用完全刚性的超长模板
 
 Rejected because:
@@ -970,7 +1256,7 @@ Agent 语义审查不应承担唯一 ID、必需章节、链接和 base-branch �
 
 Reopen when:
 
-不适用。Skill-only 只允许作为 bootstrap 过渡状态。
+不适用。Skill-only 只允许作为明确标记的 `MANUAL_POLICY` bootstrap 过渡状态。
 
 ### 让 parser 判断 Spec 是否正确
 
@@ -1002,7 +1288,7 @@ Reopen when:
 
 多个仓库持续使用 Grammar，且已经出现明确的跨 Spec 查询、conformance 聚合和 evidence retrieval 需求。
 
-## 23. Agent Forum Pilot 顺序
+## 25. Agent Forum Pilot 顺序
 
 本治理 PR 合入后，Agent Forum 的第一轮 Pilot 应按以下顺序进行：
 
@@ -1014,24 +1300,27 @@ Phase 2
 独立 Spec Review，解决所有 blocking product decisions
 
 Phase 3
-将 Spec 标记 accepted 并先合入 main
+独立 recheck final accepted head，形成 VALID Review Binding
 
 Phase 4
-从最新 main 创建 Implementation branch
+将 accepted Spec revision 先合入 main
 
 Phase 5
-逐 Contract 修复 identity、authorization、review gate、state machine、delete semantics 和 finalization
+从最新 main 创建 Implementation branch
 
 Phase 6
-独立 compliance review 与真实入口验证
+逐 Contract 修复 identity、authorization、review gate、state machine、delete semantics 和 finalization
 
 Phase 7
-实现 deterministic spec verifier 和不可绕过的 repository gate
+独立 compliance review 与真实入口验证，产生 qualified Conformance Record
+
+Phase 8
+实现 deterministic spec verifier、base-branch gate 和 required branch protection
 ```
 
 Phase 1 不得顺手修改 Forum 产品代码。
 
-## 24. V0 成功标准
+## 26. V0 成功标准
 
 V0 是否成功，不看：
 
@@ -1042,15 +1331,17 @@ V0 是否成功，不看：
 
 重点看：
 
-- Agent 能否区分 State、Observation、Claim、Decision 和 Contract；
-- 非机械性实现是否都能找到 base 中的 accepted governing Spec；
-- Spec Review 是否能提前发现未冻结的产品选择；
-- Implementation PR 是否能逐 Contract 给出 Evidence；
+- Agent 能否区分 State projection、Observation、Claim、Decision 和 Contract；
+- Product Direction 是否始终保持上级 authority；
+- 非机械性实现是否都能找到 base 中的 accepted governing Spec revision；
+- accepted Decision 与 Contract ID 是否保持语义不可变；
+- Spec Review 是否绑定 exact commits 和 reviewer identity；
+- Implementation PR 是否能逐 Contract 给出 qualified Evidence；
 - Spec 与代码冲突是否被报告为 drift，而不是被静默改写；
 - 被拒绝方案是否不再被无意重复引入；
 - 新 Agent 能否在没有聊天历史的情况下恢复当前 authority 和理由。
 
-## 25. V0 明确不做
+## 27. V0 明确不做
 
 第一阶段不做：
 
@@ -1059,10 +1350,12 @@ V0 是否成功，不看：
 - 不要求每个小改动新建 Spec；
 - 不让 Agent 自行接受自己的 Spec；
 - 不把测试绿色等同于实现合规；
-- 不自动改变 product direction；
+- 不允许下级 Spec 改变 Product Direction；
+- 不支持 partial supersession；
 - 不把 Forum 扩展成 Workflow、Scheduler、Task Inbox 或 Agent Runtime；
-- 不用复杂 confidence 数学模型替代工程判断。
+- 不用复杂 confidence 数学模型替代工程判断；
+- 不宣称 deterministic verifier、base-branch gate 或 branch protection 已存在。
 
 V0 首先建立：
 
-> Grammar + governing Spec authority + reusable Skill + 后续 deterministic gate 的清晰边界。
+> Grammar + authority precedence + accepted-Spec immutability + Review Binding + qualified conformance + reusable Skill；当前 enforcement 明确为 MANUAL_POLICY。
