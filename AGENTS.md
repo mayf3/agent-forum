@@ -1,31 +1,24 @@
-# AGENTS.md
+# Agent Forum agent entrypoint
 
-Agent Forum uses a spec-first development workflow for every non-mechanical change.
+Agent Forum uses a commit-pinned, locally accepted copy of the shared Development Grammar and Spec-governance protocol.
+
+Before non-mechanical work:
+
+1. read `.agents/README.md` for the vendored shared grammar;
+2. read `.agents/local/README.md` for Agent Forum authority, actors, and local constraints;
+3. read the relevant Product Direction, Architecture/invariant authorities, and accepted governing Specs;
+4. read `.agents/skills/spec-governance/SKILL.md` and only the selected mode file.
+
+Do not implement non-mechanical behavior unless an accepted implementation-authorizing Spec is already present in the implementation PR base and covers the requested work.
+
+The actual adoption state is recorded in `.agents/governance.lock.json`. A proposed or unmerged snapshot is review material, not active repository authority.
+
+Do not treat code, tests, runtime, chat history, or the newest document as higher authority than accepted local authorities. Report drift instead of rewriting accepted authority to match implementation.
 
 ```text
-ENFORCEMENT_STATUS = MANUAL_POLICY
+ENFORCEMENT_LEVEL = MANUAL_POLICY
+DISTRIBUTION_INTEGRITY_CHECK = AVAILABLE
+SPEC_SYNTAX_GATE = NOT_IMPLEMENTED
+BASE_BRANCH_GATE = NOT_IMPLEMENTED
+REQUIRED_BRANCH_PROTECTION = NOT_CONFIGURED
 ```
-
-The deterministic Spec verifier, automatic base-branch gate, and required branch protection do not yet exist. Follow the policy manually and never describe it as technically enforced.
-
-Before changing behavior, architecture, persistence, authentication, authorization, protocols, deployment, testing policy, or repository process:
-
-1. Read [`.agents/README.md`](.agents/README.md).
-2. Read the named Product Direction under `docs/product/`; it is higher-level authority.
-3. Find the governing Spec under `docs/specs/` and verify that an accepted revision with valid Review Binding already exists in the implementation branch's base.
-4. Resolve any external governing dependency at an immutable revision without claiming authority over its repository.
-5. Use [`.agents/skills/spec-governance/SKILL.md`](.agents/skills/spec-governance/SKILL.md) for PREFLIGHT, AUTHOR, REVIEW, or COMPLIANCE work.
-6. Read current code and tests as implementation material, Observations, and Evidence; do not treat them as a substitute for governing authority.
-
-Standing rules:
-
-- Product Direction is the named higher-level authority. Lower-level Specs may refine it but may not supersede, weaken, reinterpret, or bypass it.
-- V0 permits only complete local Spec-to-Spec supersession. Partial supersession is forbidden until an explicit machine-readable per-authority/per-Contract model exists.
-- External governing dependencies may be referenced, but only their owner repository may govern, amend, accept, reject, or supersede them.
-- An accepted Spec expresses intended behavior. Current State is a versioned projection backed by Observations and Claims. Code expresses current implementation material. A conflict is conformance drift and must be reported explicitly.
-- Accepted Decision and Contract meaning may not change under the same stable ID. Post-acceptance AMEND is editorial-only or strictly additive; normative meaning changes require complete SUPERSEDE. Contract IDs are never repurposed.
-- Every REVIEW binds exact base commit, reviewed Spec commit, reviewer identity, and final accepted head. Semantic change invalidates the review; the final accepted head requires independent recheck.
-- Conformance is qualified by Spec revision, implementation commit, environment, evaluation time, and evidence. `VERIFIED` is never an unqualified permanent Spec property.
-- Do not create a governing Spec and implement it in the same pull request.
-- If implementation reveals a Spec defect or unresolved product choice, stop expanding implementation scope and amend additively or supersede completely before continuing.
-- Purely mechanical or local edits may be exempt, but the pull request must state why no behavior, Contract, authority, architecture, process, or durable rationale changes.
