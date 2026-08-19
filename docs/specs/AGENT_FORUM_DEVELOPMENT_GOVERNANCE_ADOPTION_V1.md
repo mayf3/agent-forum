@@ -73,7 +73,7 @@ This adoption is a top-level repository-governance authority, not a product auth
 - Environment: GitHub repository, `main`, and Draft PR #4
 - Observed at: `2026-08-19T14:32:45Z`
 - Projection: `main` contains the Product Direction but no active shared-governance adoption or accepted governing Spec under `docs/specs/`; PR #4 held a four-file custom governance candidate; branch protection was not configured.
-- Basis: `OBS-ADOPT-002`, `OBS-ADOPT-004`, `EVD-ADOPT-002`
+- Basis: `OBS-ADOPT-002`, `OBS-ADOPT-004`
 
 ### STATE-ADOPT-002 — Proposed shared-governance candidate
 
@@ -82,7 +82,7 @@ This adoption is a top-level repository-governance authority, not a product auth
 - Environment: uncommitted Git tree prepared through GitHub's Git Data API
 - Observed at: `2026-08-19T14:32:45Z`
 - Projection: 17 manifest-governed files match the source Git blob identities and sizes; local files remain separately owned; adoption metadata remains proposed.
-- Basis: `OBS-ADOPT-001`, `OBS-ADOPT-003`, `EVD-ADOPT-001`
+- Basis: `OBS-ADOPT-001`, `OBS-ADOPT-003`, `CLM-ADOPT-001`
 
 ## 5. Observations
 
@@ -158,7 +158,7 @@ This adoption is a top-level repository-governance authority, not a product auth
 ### EVD-ADOPT-001 — Source and target identities support exact vendoring
 
 - Source observations: `OBS-ADOPT-001`, `OBS-ADOPT-003`
-- Target: `CLM-ADOPT-001`, `STATE-ADOPT-002`
+- Target: `CLM-ADOPT-001`
 - Relation: SUPPORTS
 - Bound coordinates: source `46f78c3f00d768d99a4c8c2da975b124bce042f9`, target tree `0e106c190c96e8067ebc0cf848a701ac029134c7`, observed `2026-08-19T14:32:45Z`
 - Strength/sufficiency: sufficient for exact-byte, file-set, mode, and lock identity
@@ -168,7 +168,7 @@ This adoption is a top-level repository-governance authority, not a product auth
 ### EVD-ADOPT-002 — The unmerged custom candidate supports replacement rather than supersession
 
 - Source observations: `OBS-ADOPT-002`
-- Target: `CLM-ADOPT-002`, `STATE-ADOPT-001`
+- Target: `CLM-ADOPT-002`
 - Relation: SUPPORTS
 - Bound coordinates: Forum base `502cfca5a180d6c49fe75dfc270fd117f279ccfb`, previous candidate `060e0fe231707687dabbf6d4ec84940cecd635fb`
 - Strength/sufficiency: sufficient to show the old text never became repository authority and may be replaced inside the same Draft PR
