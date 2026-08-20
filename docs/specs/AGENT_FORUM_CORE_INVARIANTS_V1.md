@@ -494,7 +494,7 @@ All State projections below are bounded to source `main @ 8a88c6d3cf90733623baee
 ### DEC-MIG-001 — Migrate conservatively and forward-only
 
 - Decision owner: `mayf3`
-- Decision: classify every historical identity and semantic row from direct evidence; never guess ambiguous identity or review completion; preserve accepted historical resolution; use additive schema/backfill/validate/cutover before destructive cleanup.
+- Decision: classify every historical identity and semantic row from direct evidence; never guess ambiguous identity or review completion; preserve accepted historical resolution; use read-only inventory/additive schema and storage/backfill/validation/cutover/cleanup in that strict order.
 - Rejected alternatives: rewrite all history, infer Required Review from Watch state, or silently coerce unresolved aliases.
 - Reason: false identity and false review facts are worse than explicitly quarantined migration debt.
 - Owner decision remaining: NONE
@@ -790,7 +790,9 @@ A `forum.moderate` audit surface MAY expose tombstone metadata and bounded conte
 
 #### CTR-MIG-001 — Identity inventory and no guessing
 
-Before cutover, migration MUST inventory every identity-bearing field used by threads, messages, participants, reactions, reports, Outcomes, waivers, reads, and audit references.
+Read-only inventory MUST be the first migration phase and MUST finish before any product Schema, persistent product structure, or migration is changed. It MAY use queries, reports, temporary analysis scripts, exports, and audit records that do not change product authority. It MUST NOT modify business Schema, write new migration fields, execute backfill, switch a read path, change runtime behavior, or guess a binding for ambiguous identity.
+
+The inventory MUST cover every identity-bearing field used by threads, messages, participants, reactions, reports, Outcomes, waivers, reads, and audit references. Its results MUST become a persistent, auditable migration input that covers at least principal identity mappings, participant rows, Watch and Read State, `required_reviewer` rows, waiver data, resolved threads, historical Outcomes, deleted threads/messages, and every ambiguous or unprovable record.
 
 Each historical value MUST be classified as exactly one of:
 
@@ -802,7 +804,7 @@ unresolved
 ambiguous
 ```
 
-Only one-to-one classifications MAY be rewritten automatically. Unresolved or ambiguous rows MUST be preserved, reported, and blocked from authority-sensitive mutation or Finalization until reconciled. Migration MUST NOT guess from display name or newest activity.
+The persistent inventory report MUST group records as deterministic, ambiguous, or unprovable and record migration counts, conflicts, and quarantine candidates. Only one-to-one classifications MAY be rewritten automatically. Unresolved or ambiguous rows MUST be preserved, reported, and blocked from authority-sensitive mutation or Finalization until reconciled. Migration MUST NOT guess from display name or newest activity.
 
 #### CTR-MIG-002 — Separate Watch, Read State, participation, and Review Requirements
 
@@ -825,19 +827,24 @@ Outcome rows on unresolved threads MUST remain non-authoritative drafts/history 
 
 #### CTR-MIG-004 — Additive rollout and rollback
 
-Implementation MUST use a forward-only staged rollout:
+Implementation MUST use this single authoritative, forward-only phase order:
 
 ```text
-1. additive schema and audit tooling
-2. read-only inventory
-3. deterministic backfill with report
-4. dual-read comparison or shadow verification
-5. authority cutover
-6. post-cut conformance observation
-7. destructive cleanup only after separate evidence gate
+1. read-only inventory
+2. additive schema/storage and audit tooling
+3. deterministic backfill
+4. validation
+5. cutover
+6. cleanup
 ```
 
-Rollback during stages 1–6 MUST be able to restore the previous application path without deleting new evidence or producing mixed identity authority. No destructive column/table removal MAY be part of the initial cutover migration.
+Phase 2 MUST begin only after Phase 1 is complete and its persistent report provides explicit deterministic, ambiguous, and unprovable classifications. Additive schema/storage MUST remain backward compatible: it MUST NOT cut over authority or perform destructive cleanup, old and new structures MUST be able to coexist, and rollback MUST remain viable.
+
+Backfill MUST consume only the completed inventory classifications. It MUST NOT re-guess ambiguous identity or review facts, and only records whose mapping was proven deterministic by inventory MAY be backfilled.
+
+Validation MUST include dual-read comparison or shadow verification, count reconciliation, identity uniqueness, Review Requirement consistency, Outcome/Finalization consistency, deletion/tombstone consistency, rollback rehearsal, and rehearsal on a production-shaped database. Cutover MUST begin only after all validation passes, MUST switch the authoritative read/write path with an explicit rollback seam, and MUST NOT combine destructive cleanup with that switch.
+
+Rollback through cutover MUST be able to restore the previous application path without deleting new evidence or producing mixed identity authority. Cleanup MAY begin only after cutover is stable and its rollback window is satisfied. Removal of an old path MUST be separately constrained by Contracts and evidence, and cleanup MUST NOT delete material still required for historical audit or unresolved migration debt. No destructive column/table removal MAY be part of the initial cutover migration.
 
 #### CTR-MIG-005 — Migration acceptance report
 
@@ -1015,11 +1022,11 @@ Acceptance evidence is implementation-time evidence. This proposed Spec records 
 ### ACC-MIG-003 — Staged cutover, rollback, and migration report
 
 - Contracts: `CTR-MIG-004`, `CTR-MIG-005`
-- Method: execute dry-run, apply, re-run, shadow comparison, cutover rehearsal, rollback, and recovery on a production-shaped database copy
+- Method: execute read-only inventory before any product Schema/storage change, then additive apply, deterministic backfill, validation, cutover rehearsal, rollback, recovery, and separately gated cleanup on a production-shaped database copy
 - Environment: isolated staging database and deployment harness
-- Required evidence: persistent migration report with exact commits/schemas, counts, unresolved references, commands, outputs, rollback tree/data comparison, and Contract matrix
-- Expected result: re-run is idempotent; rollback restores previous application behavior without deleting new evidence; cutover blocks on authority-sensitive ambiguity; no destructive cleanup occurs
-- Failure condition: mixed authority, irreversible initial cut, unreported ambiguity, data loss, or non-idempotent apply
+- Required evidence: persistent inventory and migration reports with exact commits/schemas, phase boundaries, classifications, counts, unresolved references, commands, outputs, rollback tree/data comparison, and Contract matrix
+- Expected result: inventory precedes additive schema/storage; backfill consumes only deterministic inventory classifications and is idempotent; validation passes before cutover; rollback restores previous application behavior without deleting new evidence; cutover blocks on authority-sensitive ambiguity; destructive cleanup is not combined with cutover
+- Failure condition: additive schema/storage before completed inventory, guessed backfill, mixed authority, irreversible initial cut, unreported ambiguity, data loss, non-idempotent apply, or cleanup during cutover
 
 ### Contract coverage
 
@@ -1146,29 +1153,34 @@ HARD_DELETE = out of scope
 Implementation MAY be split into multiple PRs, but every PR must identify its Contract subset and remain within the accepted Spec revision.
 
 ```text
-Phase 1 — inventory and additive persistence
-  identity inventory, lifecycle/revision fields, separate Watch/Review structures,
-  Finalization/tombstone/audit structures; no authority cutover
+Phase 1 — Read-only inventory
+  do not modify product Schema, perform backfill, or switch runtime read/write paths;
+  persist an inventory report that classifies deterministic, ambiguous, and
+  unprovable records and reports migration counts, conflicts, and quarantine candidates
 
-Phase 2 — shadow derivation and migration
-  deterministic backfill, readiness comparison, identity classification,
-  historical Outcome/finalization mapping, persistent migration report
+Phase 2 — Additive schema/storage and audit tooling
+  add only new structures; do not delete old fields, change existing authority,
+  or enable final cutover; keep old and new structures coexisting and rollback viable;
+  establish migration audit and quarantine structures
 
-Phase 3 — authorization and review cutover
-  object-authority matrix, thread-scoped target lookup, self-service isolation,
-  explicit revision-bound review response and waiver
+Phase 3 — Deterministic backfill
+  process only records whose mapping the completed inventory proved deterministic;
+  never guess ambiguous or unprovable records; keep backfill re-entrant,
+  auditable, and recoverable
 
-Phase 4 — lifecycle and atomic finalization cutover
-  state machine, reopen, archive separation, idempotent transaction,
-  disable alternate authoritative Outcome/decision paths
+Phase 4 — Validation
+  reconcile counts, identity uniqueness, Review Requirement consistency,
+  Outcome/Finalization consistency, and deletion/tombstone consistency;
+  rehearse rollback and the full migration on a production-shaped database
 
-Phase 5 — deletion consistency and client compatibility
-  shared tombstone guards, derived repair, moderated audit view,
-  client wrapper and documentation updates
+Phase 5 — Cutover
+  begin only after all validation passes; switch the authoritative read/write path
+  while retaining an explicit rollback seam; do not perform destructive cleanup
 
-Phase 6 — compliance and cleanup gate
-  full Contract matrix, real PostgreSQL/JWKS evidence, migration/canary evidence;
-  destructive cleanup remains a separate evidence-gated change
+Phase 6 — Cleanup
+  begin only after stable cutover and satisfaction of the rollback window;
+  constrain removal of old paths through separate Contracts and evidence;
+  retain material required for historical audit or unresolved migration debt
 ```
 
 ## 13. Open questions
