@@ -1,6 +1,6 @@
 ---
 spec_id: AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1
-status: proposed
+status: accepted
 spec_kind: invariant
 authority_level: governing_spec
 implementation_authority: none
@@ -374,7 +374,7 @@ OPEN_OWNER_DECISIONS = NONE
 NORMATIVE_TBD = NONE
 UNRESOLVED_AUTHORITY_CONFLICT = NONE
 PARTIAL_SUPERSESSION = NONE
-READY_TO_MARK_ACCEPTED = NO
+READY_TO_MARK_ACCEPTED = YES
 ```
 
-Independent review of the exact candidate, owner acceptance metadata, and final-head recheck remain required before this proposed adoption may become active on `main`.
+Independent review has completed and owner acceptance metadata is prepared in this exact candidate. An independent final-head recheck and merge into `main` remain required before the accepted candidate becomes active repository authority.
