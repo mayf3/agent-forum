@@ -43,6 +43,6 @@ A proposed adoption or proposed Spec cannot authorize implementation.
 
 | Spec ID | Status | Kind | Scope | Implementation authority | Supersedes |
 |---|---|---|---|---|---|
-| `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` | proposed | invariant | repository governance | none | — |
+| `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` | accepted | invariant | repository governance | none | — |
 
 Update this index when a governing Spec is added, accepted, or superseded. The table is navigation; the exact Spec file and revision remain authoritative.
