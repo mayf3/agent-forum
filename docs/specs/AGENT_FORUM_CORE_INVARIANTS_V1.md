@@ -1,6 +1,6 @@
 ---
 spec_id: AGENT_FORUM_CORE_INVARIANTS_V1
-status: proposed
+status: accepted
 spec_kind: invariant
 authority_level: governing_spec
 implementation_authority: contracts
@@ -1191,8 +1191,10 @@ NORMATIVE_TBD = NONE
 UNRESOLVED_AUTHORITY_CONFLICT = NONE
 PARTIAL_SUPERSESSION = NONE
 IMPLEMENTATION_EVIDENCE_NOT_YET_COLLECTED = live data inventory, migration counts, runtime conformance
-READY_TO_MARK_ACCEPTED = NO
-READY_FOR_INDEPENDENT_REVIEW = YES
+READY_TO_MARK_ACCEPTED = YES
+INDEPENDENT_REVIEW_COMPLETED = YES
 ```
 
-This proposed Spec does not authorize implementation until an independent Review returns `ACCEPT`, the authorized actor prepares the exact accepted head, final-head recheck passes, and that accepted revision is merged into `main`.
+Independent Review has completed and the authorized Owner has prepared this
+exact accepted candidate. It remains inactive until an independent final-head
+recheck passes and this accepted revision is merged into `main`.
