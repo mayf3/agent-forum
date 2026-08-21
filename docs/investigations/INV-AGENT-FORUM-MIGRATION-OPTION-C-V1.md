@@ -11,7 +11,8 @@ SUBJECT = conservative migration policy for ambiguous local legacy Forum data
 OPENED_AT = 2026-08-20T23:56:45Z
 CLOSED_AT = 2026-08-21T15:44:14Z
 OWNER = mayf3
-DISPOSITION = owner_policy_selected
+DISPOSITION = adopted
+INVESTIGATION_DISPOSITION_DETAIL = owner_policy_selected
 ```
 
 ## Goal and authority context
@@ -50,13 +51,27 @@ QUARANTINE_CANDIDATES = 185
 
 The first inventory observed the current local Docker volume. The second read-only round rechecked that same volume and deterministically bound the local image to its deployed commit; it was not an independent target dataset.
 
+```text
+REPORT_RELATION = supplemental_refinement
+REPORT_1_DEPLOYMENT_BINDING = UNPROVEN_AT_THAT_INVESTIGATION
+REPORT_2_DEPLOYMENT_BINDING = DETERMINISTIC_FOR_LOCAL_DEPLOYMENT
+REPORT_2_REPLACES_REPORT_1 = NO
+REPORT_2_REFINES_REPORT_1 = YES
+```
+
+Both rounds queried the same local volume. The second round was not an independent production reproduction: it supplemented the first round by binding the local deployment to an exact commit and image digest. The first report remains unchanged as the result at its investigation time, including its then-current finding that deployment commit binding was insufficient. Neither report proves the production data shape.
+
 Provenance and method:
 
 ```text
-SOURCE_REPORT_1 = DSH session session-587c6b19-9725-4a2d-b5c4-9ad9d5664f43 (盘点 调查)
+SOURCE_REPORT_1_ID = RPT-AGENT-FORUM-INVENTORY-V1
+SOURCE_REPORT_1_PATH = docs/investigations/reports/RPT-AGENT-FORUM-INVENTORY-V1.md
+SOURCE_REPORT_1_SESSION_ID = session-587c6b19-9725-4a2d-b5c4-9ad9d5664f43
 SOURCE_REPORT_1_WINDOW = 2026-08-20T23:56:45Z .. 2026-08-21T00:04:55Z
 SOURCE_REPORT_1_FINAL_SNAPSHOT = 2026-08-21T00:04:55.711466Z
-SOURCE_REPORT_2 = DSH session session-f90d1be4-453a-49bb-ab59-c79ae758efa0 (补证 调查)
+SOURCE_REPORT_2_ID = RPT-AGENT-FORUM-SUPPLEMENTAL-EVIDENCE-V1
+SOURCE_REPORT_2_PATH = docs/investigations/reports/RPT-AGENT-FORUM-SUPPLEMENTAL-EVIDENCE-V1.md
+SOURCE_REPORT_2_SESSION_ID = session-f90d1be4-453a-49bb-ab59-c79ae758efa0
 SOURCE_REPORT_2_SNAPSHOT = 2026-08-21T14:28:57.377760Z
 READ_ONLY_METHOD = PostgreSQL REPEATABLE READ READ ONLY transaction followed by ROLLBACK
 READ_ONLY_GUARD_OBSERVED = transaction_read_only=on
@@ -77,8 +92,9 @@ Evidence limits:
 
 ### EVD-INV-001 — Two read-only rounds support a conservative policy
 
-- Source observations: the `盘点 调查` report and the `补证 调查` report.
-- Target: this record's local-dataset policy.
+- Source observations: `OBS-INV-001`.
+- Target type: Claim.
+- Target ID: `CLM-INV-001`.
 - Relation: SUPPORTS.
 - Coordinates: source main `1cccdd54554c0bde13572273401f19f294334e46`; local snapshot `2026-08-21T14:28:57.377760Z`; dataset `084dbc8cd4e180dbd984a389c5cf28d6`.
 - Strength: repeated classification of the same local volume plus deterministic deployed-image binding.
@@ -248,6 +264,7 @@ CURRENT_ENVIRONMENT = local-only
 LOCAL_DATASET_POLICY_DEFINED = YES
 PRODUCTION_DATASET_INVENTORIED = NO
 PRODUCTION_CUTOVER_ALLOWED = NO
+ADDITIVE_SCHEMA_STORAGE_STARTED = NO
 ADDITIVE_SCHEMA_STORAGE_DESIGN_ALLOWED_AFTER_POLICY_AUDIT = YES
 PRODUCTION_SHAPED_REHEARSAL_REQUIRED_BEFORE_CUTOVER = YES
 ```
@@ -382,7 +399,8 @@ A future dry-run must emit, at minimum:
 ### Disposition
 
 ```text
-INVESTIGATION_DISPOSITION = owner_policy_selected
+DISPOSITION = adopted
+INVESTIGATION_DISPOSITION_DETAIL = owner_policy_selected
 OWNER_DECISIONS_REQUIRED_FOR_CURRENT_POLICY = 0
 IMPLEMENTATION_STATE = NOT_STARTED
 DATABASE_WRITES = 0
@@ -403,6 +421,11 @@ The policy decision does not mean migration occurred. Quarantine candidates have
 
 ## Stable links
 
+- Investigation PR: [mayf3/agent-forum#6](https://github.com/mayf3/agent-forum/pull/6)
 - Governing Spec: [`AGENT_FORUM_CORE_INVARIANTS_V1`](../specs/AGENT_FORUM_CORE_INVARIANTS_V1.md)
 - Product Direction: [`AGENT_FORUM_PRODUCT_DIRECTION_V1`](../product/agent-forum-product-direction-v1.md)
-- Investigation PR: to be bound by the Draft PR containing this record.
+- Investigation index: [`docs/investigations/README.md`](README.md)
+- [盘点调查完整报告](reports/RPT-AGENT-FORUM-INVENTORY-V1.md)
+- [补证调查完整报告](reports/RPT-AGENT-FORUM-SUPPLEMENTAL-EVIDENCE-V1.md)
+- Supplemental DSH coordinate: `session-587c6b19-9725-4a2d-b5c4-9ad9d5664f43`
+- Supplemental DSH coordinate: `session-f90d1be4-453a-49bb-ab59-c79ae758efa0`
