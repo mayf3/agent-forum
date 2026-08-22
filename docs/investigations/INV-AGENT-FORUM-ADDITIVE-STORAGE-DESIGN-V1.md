@@ -546,6 +546,82 @@ Waiver 映射：
 - pre-finalization message deletion 使 response resolution `invalidatedAt` 非空，并把 Requirement 恢复 pending；
 - post-finalization 删除不改写 Finalization snapshot。
 
+##### E/F.1 Staged tombstone FK（B-FK-001 冻结）
+
+`invalidated_by_message_tombstone_id` 是跨 workstream 依赖列，必须分两阶段落地：
+
+**评审 执行阶段**（本表创建时）：
+
+```text
+- 仅创建 scalar 列 invalidated_by_message_tombstone_id uuid NULL；
+- Prisma 不为该列建 relation；
+- 不建任何数据库 FK；
+- 初始值全部 NULL；
+- 不启用任何 runtime writer（应用不得写该列）。
+```
+
+**删除 执行阶段**（`forum_message_tombstones` 创建之后）：
+
+```sql
+ALTER TABLE forum_review_resolutions
+ADD CONSTRAINT forum_review_resolutions_invalidated_by_fk
+FOREIGN KEY (invalidated_by_message_tombstone_id)
+REFERENCES forum_message_tombstones(message_id)
+NOT VALID;
+```
+
+随后执行 `VALIDATE CONSTRAINT`（DDL D20；registry SQL-073）。验收：评审 阶段该列存在、无 FK、可空；删除 阶段 FK 存在且 invalidation 负向测试通过（§17.2 评审/删除两行）。
+
+##### E/F.2 Waiver 幂等（B-RW-001；CTR-REVIEW-006）
+
+waiver 提交必须在同一事务内按固定顺序执行：
+
+```text
+FOR UPDATE Requirement
+→ 查询当前 effective Resolution
+→ 若存在且为同义 waiver（same reviewer + same normalized reason
+  + same semantic request）→ 直接返回该 Resolution，不再 INSERT
+→ 若存在且不同义（任何 response，或不同 reviewer/reason 的 waiver）→ 409
+→ 若不存在 → INSERT waiver Resolution
+```
+
+同义判定使用 btrim + Unicode NFC 归一化后的 reason 比较。数据库层不承担幂等返回；`forum_review_resolution_guard` 第 5 步仅拒绝 INSERT（幂等返回在应用层于同一 `FOR UPDATE` 锁内完成，见 §9.1）。
+
+##### E/F.3 Invalidation 一致性与授权（B-RW-001）
+
+- 一致性 CHECK（并入 §9.1 shape CHECK）：
+
+```text
+(invalidated_at IS NULL) = (invalidated_by_message_tombstone_id IS NULL)
+```
+
+不允许只设置其中一个字段。
+
+- 授权边界：effective response → invalidated response 的转换**只允许由 Message 删除事务**执行，机制为四层：
+  1. equality CHECK 阻止无 tombstone 的单字段失效；
+  2. staged FK（E/F.1）要求 tombstone 行真实存在；
+  3. `forum_review_resolutions_invalidation_guard`（BEFORE UPDATE trigger，registry SQL-058/059）拒绝应用 role 直接 UPDATE invalidation 两列；
+  4. 唯一合法路径是 SECURITY DEFINER 函数 `forum_invalidate_response(resolution_id, tombstone_id)`（registry SQL-074），由删除事务调用，校验 tombstone 与 response 的 message 一致后成对更新，并写 `ForumAuditEvent`。
+- 负向测试：无 tombstone 的 invalidation UPDATE 拒绝；普通 UPDATE 路径设置 `invalidated_at` 拒绝；经 `forum_invalidate_response` 的成对更新成功且只成功一次。
+
+##### E/F.4 semantic_key 定义（B-RW-001）
+
+`semantic_key text NULL` 保留，定义为**应用级可选去重键**：
+
+```text
+组成 = reviewer principal id + requirement id + kind
+       + SHA-256(normalized request payload) 前 16 hex
+用途 = 应用幂等重放检测与日志追踪；不参与任何数据库唯一约束，
+       不参与 waiver 同义判定（同义判定见 E/F.2）；
+nullable = YES；不 backfill。
+```
+
+不得将其解释为数据库幂等键或权限凭据。
+
+##### E/F.5 并发单胜（B-RW-001）
+
+concurrent response + waiver 最多一个成为 effective Resolution，由四层机制共同保证：`FOR UPDATE Requirement` 串行化、`forum_review_resolutions_one_effective_uq` partial unique 兜底、cross-row guard 拒绝第二个 effective INSERT、deferred consistency trigger 保证 Requirement state 与 effective Resolution 最终一致（同一事务 commit 前完成）。负向测试：并发 response+waiver 单胜（§17.2 评审行）。
+
 #### G. `ForumReviewRequirement` → `forum_review_requirements`
 
 ```text
@@ -604,13 +680,65 @@ FOR UPDATE;
 -- verify expected revision, visibility=active, current revision resolved
 INSERT INTO forum_thread_revisions(..., revision = old + 1, discussion_state='open');
 
+-- carry-forward / replace pending Requirements（引用新 revision）
+INSERT INTO forum_review_requirements(..., revision = old + 1, state='pending');
+
 UPDATE forum_threads
 SET current_revision = old + 1
 WHERE id=$thread AND current_revision=old;
 COMMIT;
 ```
 
-数据库 UNIQUE + CAS + defensive monotonic trigger保证精确 `+1`。无需 sequence；不允许跳号、倒退或清空。
+Initial Revision 创建事务（运行时新帖，单事务）：
+
+```sql
+BEGIN;
+INSERT INTO forum_threads(..., current_revision = NULL);
+
+INSERT INTO forum_thread_revisions(
+  thread_id = $t, revision = 1, discussion_state = 'open',
+  opened_by_principal_id = $actor, ...);
+
+UPDATE forum_threads
+SET current_revision = 1
+WHERE id = $t AND current_revision IS NULL;
+COMMIT;
+```
+
+Backfill 场景（Phase 3+，本 Phase 2 不执行）遵循相同顺序：thread 行以 `current_revision=NULL` 插入 → INSERT revision 1 → CAS `NULL→1`。
+
+防护互锁（B-REV-001 冻结）：
+
+1. `UNIQUE(thread_id,revision)` 拒绝重复 revision 行。
+2. `forum_guard_current_revision` trigger **事件绑定固定为 `BEFORE UPDATE ON forum_threads`**：只防护 `forum_threads.current_revision` 的 UPDATE 路径（NULL→1、+1、不变；拒绝倒退/跳号/清空）。
+3. `forum_thread_revisions` 表自身的 INSERT 路径由 **`BEFORE INSERT` guard**（`forum_thread_revisions_insert_guard`，registry SQL-044/045）防护：`new.revision` 必须等于该 thread 当前 `current_revision + 1`（`current_revision IS NULL` 时必须为 1），否则 `23514`。跳号、倒退、前置插入均被数据库拒绝。
+4. 新 Thread INSERT 路径由 composite FK 防护：`forum_threads` 新行若带非 NULL `current_revision`，因 `(id,current_revision)` 无对应 revision 行而违反 FK。
+5. Composite FK 完整 DDL（DDL D19；registry SQL-046）：
+
+```sql
+ALTER TABLE forum_threads
+ADD CONSTRAINT forum_threads_current_revision_fk
+FOREIGN KEY (id, current_revision)
+REFERENCES forum_thread_revisions(thread_id, revision)
+NOT VALID;
+```
+
+Phase 2 建约束时使用 `NOT VALID`（forum_threads 已有 90 行、列全 NULL，NULL 不参与 FK 匹配，但仍避免 scan）；`VALIDATE CONSTRAINT` 在 D17 阶段执行。NULL `current_revision` 行为：composite FK 对任一列为 NULL 的行不强制匹配，历史 thread 全部保持 NULL 不受影响。
+
+Reopen 事务固定顺序（B-REV-001 冻结）：
+
+```text
+FOR UPDATE thread
+→ verify expected revision / resolved / active
+→ INSERT revision old+1
+→ INSERT carried-forward / replaced pending Requirements（引用新 revision）
+→ CAS UPDATE thread pointer（WHERE current_revision=old）
+→ COMMIT
+```
+
+Requirement INSERT 必须位于 revision INSERT 之后、pointer CAS 之前：Requirement 的 composite FK 指向新 revision 行，先有 revision 行才能满足 FK；pointer CAS 最后执行保证失败时整体回滚。
+
+数据库层（UNIQUE + 两个 trigger + composite FK）拒绝：跳号、倒退、清空已存在的 `currentRevision`、指向不存在的 Revision、创建两个相同 `(thread,revision)`。应用事务负责：授权、reviewer carry-forward 策略、expected revision 校验。
 
 #### I. `ForumFinalization` → `forum_finalizations`
 
@@ -622,6 +750,7 @@ thread_id uuid NN
 revision integer NN
 finalizer_principal_id uuid NN
 idempotency_key text NN
+semantic_request_version integer NN
 semantic_request_hash bytea NN
 review_snapshot jsonb NN
 outcome_summary_md text NN
@@ -640,9 +769,73 @@ created_at timestamptz NN default now
 - composite FK `(thread_id,revision)`→Revision
 - finalizer Principal FK
 - summary/idempotency key 非空
+- `semantic_request_hash` 定长 32 字节（CHECK，registry SQL-064）
+- `semantic_request_version` 正整数（CHECK，registry SQL-063）
 - commit 后 immutable
 - review snapshot 必须包含 requirement IDs、state、response/waiver refs
 - Phase 2：0 行
+
+##### I.1 Idempotency 规范（B-IDEMP-001 冻结）
+
+```text
+IDEMPOTENCY_SCOPE =
+(thread_id, idempotency_key)
+
+ACTOR_IN_UNIQUE_SCOPE =
+NO
+
+ACTOR_INCLUDED_IN_SEMANTIC_HASH =
+YES
+```
+
+1. **Key scope**：`(thread_id, idempotency_key)`，client-supplied，非空（btrim 后 length>0）。actor 不参与 unique scope；不同 actor 撞同一 key 时因 hash 输入含 finalizer principal id 而产生不同 semantic hash，按 different-payload 分支返回 409。
+
+2. **Canonicalization**：`semantic_request_version`（int NN，初始值 1）字段化版本。Canonicalization V1 规则：
+
+```text
+- UTF-8 JSON 编码；
+- object keys 字典序（lexicographic）排序；
+- 无非语义空白（紧凑序列化，无缩进/换行）；
+- null 值保留（不删除、不转为字符串）；
+- array 顺序保留；
+- Unicode NFC 归一化后编码；
+- 固定字段集合（见 3），额外字段不进入 hash。
+```
+
+3. **Hash**：`SHA-256`，`semantic_request_hash bytea` 定长 32。输入字段按固定顺序：
+
+```text
+expected revision（integer）
+outcome_summary_md
+outcome_decisions
+outcome_rejected_options
+outcome_open_questions
+outcome_follow_up_md
+authenticated finalizer Principal ID
+```
+
+4. **行为矩阵**：
+
+```text
+same key + same semantic hash
+→ 返回原 Finalization（不产生新行、不产生新 Outcome）
+
+same key + different semantic hash
+→ 409
+
+并发 loser（第二个事务撞 UNIQUE）
+→ 409，且不产生额外 Outcome 行
+
+different actor 重用 same key
+→ hash 不同（finalizer 在输入中）→ 409
+
+stale revision 或 readiness 已变化
+→ 不得通过旧 key 绕过状态重检；
+  finalization 事务在锁内重新校验 expected revision
+  与全部 Requirement readiness，失败即 409/409 语义冲突
+```
+
+5. **负向 Acceptance**（§17.2 定稿行）：empty key；overlong key；same key/different payload；canonical JSON key-order equivalence（顺序不同、语义相同 → 必须返回原行）；Unicode NFC 等价；null/array 差异；different actor；stale revision；changed readiness；hash version mismatch。
 
 选择同表的理由：
 
@@ -727,15 +920,48 @@ environment text NN
 dataset_id text NN
 snapshot_at timestamptz NN
 policy_id text NN
+phase text NN
+run_identity_key text NN
+attempt integer NN
 status text NN
-rerun_key text NN UNIQUE
 started_at timestamptz NN
 finished_at timestamptz NULL
 rollback_reference text NULL
 created_at timestamptz NN default now
+UNIQUE(run_identity_key, attempt)
 ```
 
-status closed set：`planned|running|validated|failed|rolled_back|sealed`。
+status closed set：`planned|running|validated|failed|rolled_back|sealed`（named CHECK：`forum_migration_runs_status_ck`）。
+
+##### L.1 状态机与 sealed guard（B-MODEL-001 冻结）
+
+MigrationRun **不得**放入无条件 `forum_forbid_mutation` 清单。状态推进依赖 UPDATE，由条件化 trigger `forum_migration_runs_sealed_guard`（BEFORE UPDATE OR DELETE；registry SQL-013/014）执行：
+
+```text
+合法转移：
+planned   → running | failed
+running   → validated | failed
+validated → sealed | rolled_back | failed
+sealed / failed / rolled_back = terminal（拒绝一切 UPDATE/DELETE）
+
+字段不可变性：
+status/finished_at/rollback_reference 之外的列一旦建立禁止改写；
+identity、source/target、dataset、policy、phase 建立后不可改。
+```
+
+##### L.2 rerun identity（B-MODEL-001 冻结）
+
+```text
+run_identity_key =
+source_commit | target_commit | dataset_id | policy_id | phase
+（'|' 连接的确定性串联）
+
+attempt = positive integer（CHECK attempt > 0）
+
+UNIQUE(run_identity_key, attempt)
+```
+
+重试语义（固定）：失败 run 的 status 置 `failed` 后成为终态行，**不重开**；重试 = 以同一 `run_identity_key`、`attempt = max(attempt)+1` 创建**新 run 行**。同 run 内 check 结果不可变（append-only）；重验产生新 run。该模型与 append-only 设计一致：历史 attempt 行永久保留作为审计证据。
 
 #### M. `MigrationLegacyEvidence` → `forum_migration_legacy_evidence`
 
@@ -759,7 +985,7 @@ UNIQUE(migration_run_id,source_table,source_row_reference)
 - 保存安全 hash、稳定/脱敏 row reference、allowlisted 必要字段快照；
 - 原 legacy row 保持不变；
 - payload 有大小和字段白名单；
-- classification=`deterministic|ambiguous|unprovable`。
+- classification=`deterministic|ambiguous|unprovable`（named CHECK：`forum_migration_legacy_evidence_classification_ck`，registry SQL-003）。
 
 #### N. `MigrationFieldDecision` → `forum_migration_field_decisions`
 
@@ -778,7 +1004,7 @@ UNIQUE(legacy_evidence_id,field_name)
 
 Option C：
 
-- conflicting field 的 selected value 必须 NULL；
+- conflicting field 的 selected value 必须 NULL（named CHECK：`forum_migration_field_decisions_selected_ck`，registry SQL-005）；
 - `decidedByPolicy=INV-AGENT-FORUM-MIGRATION-OPTION-C-V1`；
 - 不允许 recency/name guess。
 
@@ -808,6 +1034,10 @@ other
 
 `185` 不是约束；未来目标环境数量可以不同。
 
+status closed set：`open|resolved`（named CHECK：`forum_migration_quarantines_status_ck`）。category closed set 见 named CHECK `forum_migration_quarantines_category_ck`（上述 4 值）。
+
+一条 evidence 对应多少 quarantine（B-MODEL-001 冻结）：Option C 的三类本地 category（collision/unresolved/archived_lifecycle_unknown）对同一 source row **互斥**——inventory 分类对每行只产生一种处置，`other` 仅承接未来类别。因此当前冻结为 `UNIQUE(legacy_evidence_id)` 一行一 quarantine。若未来引入可共现的独立问题类别，必须先改键为 `UNIQUE(legacy_evidence_id, category)` 并声明 category 互斥关系变化；该变更属于设计修订，不得在执行中静默发生。
+
 #### P. `MigrationValidationResult` → `forum_migration_validation_results`
 
 ```text
@@ -815,6 +1045,7 @@ id uuid PK
 migration_run_id uuid NN FK RESTRICT
 check_id text NN
 contract_id text NULL
+required boolean NN
 expected jsonb NN
 actual jsonb NN
 result text NN
@@ -823,7 +1054,14 @@ created_at timestamptz NN default now
 UNIQUE(migration_run_id,check_id)
 ```
 
-result=`pass|fail|inconclusive`。Cutover 只能消费 sealed run 的全部 required checks=pass，但该行为属于 Phase 5。
+result closed set：`pass|fail|inconclusive`（named CHECK：`forum_migration_validation_results_result_ck`）。
+
+required/optional 与重验语义（B-MODEL-001 冻结）：
+
+- `required boolean NN` 判别该 check 是否 cutover 前置；required check 清单由 Contract binding（`contract_id`）+ `required=true` 共同表达；
+- 同 run + check ID 唯一；行 insert 后 result 不可变（append-only trigger）；
+- 重验不 UPDATE、不重插：产生**新 run**（attempt+1），旧 run 的 check 结果永久保留；
+- cutover 只能消费 sealed run 中**全部 required checks = pass** 的结果；该消费规则属于 Phase 5 语义，Phase 2 仅落存储载体。
 
 #### Q. Product-direction support models
 
@@ -912,6 +1150,14 @@ ADD CONSTRAINT forum_review_resolutions_shape_ck CHECK (
   )
 );
 
+-- B-RW-001：invalidation 一致性 —— 两字段必须成对出现或成对为空
+ALTER TABLE forum_review_resolutions
+ADD CONSTRAINT forum_review_resolutions_invalidation_pair_ck CHECK (
+  (invalidated_at IS NULL)
+  =
+  (invalidated_by_message_tombstone_id IS NULL)
+);
+
 CREATE UNIQUE INDEX forum_review_resolutions_one_effective_uq
 ON forum_review_resolutions(requirement_id)
 WHERE invalidated_at IS NULL;
@@ -945,7 +1191,7 @@ CHECK(length(btrim(reason)) > 0);
 
 #### Revision monotonicity
 
-主保证是 row lock + CAS + UNIQUE。防御 trigger：
+UPDATE 路径（`forum_threads.current_revision`）主保证是 row lock + CAS + UNIQUE。防御 trigger **事件绑定：`BEFORE UPDATE ON forum_threads`**：
 
 ```sql
 CREATE FUNCTION forum_guard_current_revision()
@@ -965,9 +1211,42 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
+
+CREATE TRIGGER forum_guard_current_revision_tg
+BEFORE UPDATE ON forum_threads
+FOR EACH ROW EXECUTE FUNCTION forum_guard_current_revision();
 ```
 
-Trigger 不负责授权；授权和 reopen reviewer carry-forward 必须在应用事务内完成。
+INSERT 路径（`forum_thread_revisions` 表自身，B-REV-001 新增）：
+
+```sql
+CREATE FUNCTION forum_thread_revisions_insert_guard()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  cur integer;
+BEGIN
+  SELECT current_revision INTO cur
+  FROM forum_threads WHERE id = NEW.thread_id FOR SHARE;
+  IF cur IS NULL THEN
+    IF NEW.revision <> 1 THEN
+      RAISE EXCEPTION 'initial revision must be 1'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSIF NEW.revision <> cur + 1 THEN
+    RAISE EXCEPTION 'revision must be exactly current + 1'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER forum_thread_revisions_insert_guard_tg
+BEFORE INSERT ON forum_thread_revisions
+FOR EACH ROW EXECUTE FUNCTION forum_thread_revisions_insert_guard();
+```
+
+新 Thread 的 INSERT 路径由 composite FK `forum_threads_current_revision_fk`（§8.3 H / DDL D19 / registry SQL-046）防护：新行带非 NULL pointer 时无 revision 行可匹配，违反 FK。
+
+三个 trigger 不负责授权；授权和 reopen reviewer carry-forward 必须在应用事务内完成。
 
 #### Review cross-row guard
 
@@ -982,7 +1261,7 @@ Trigger 不负责授权；授权和 reopen reviewer carry-forward 必须在应�
    - created after requestedAt；
    - 无 MessageTombstone；
 4. waiver 时仅校验结构；creator/moderator authority 仍由应用验证；
-5. effective resolution 已存在时拒绝；
+5. effective resolution 已存在时拒绝 INSERT（waiver 幂等返回在应用层、同一 `FOR UPDATE` 锁内完成：存在同义 waiver 时直接返回原 Resolution，见 §8.3 E/F.2；不同义才由应用返回 409）；
 6. deferred consistency trigger 验证 Requirement state 与 effective resolution 一致。
 
 #### Append-only guard
@@ -1002,10 +1281,94 @@ END $$;
 - `forum_thread_tombstones`
 - `forum_message_tombstones`
 - `forum_audit_events`
-- sealed MigrationRun
 - MigrationLegacyEvidence
 - MigrationFieldDecision
 - MigrationValidationResult
+
+`MigrationRun` **不在**该清单：其状态机依赖 UPDATE，由下方条件化 sealed guard 单独防护（B-MODEL-001）。
+
+#### Migration foundation named CHECKs（B-MODEL-001）
+
+```sql
+ALTER TABLE forum_migration_runs
+ADD CONSTRAINT forum_migration_runs_status_ck CHECK (
+  status IN ('planned','running','validated','failed','rolled_back','sealed')
+),
+ADD CONSTRAINT forum_migration_runs_attempt_pos_ck CHECK (attempt > 0);
+
+ALTER TABLE forum_migration_legacy_evidence
+ADD CONSTRAINT forum_migration_legacy_evidence_classification_ck CHECK (
+  classification IN ('deterministic','ambiguous','unprovable')
+);
+
+ALTER TABLE forum_migration_field_decisions
+ADD CONSTRAINT forum_migration_field_decisions_classification_ck CHECK (
+  classification IN ('deterministic','ambiguous','unprovable')
+),
+ADD CONSTRAINT forum_migration_field_decisions_selected_ck CHECK (
+  classification <> 'deterministic' AND selected_value_safe IS NOT NULL
+  OR classification = 'deterministic'
+);
+
+ALTER TABLE forum_migration_quarantines
+ADD CONSTRAINT forum_migration_quarantines_category_ck CHECK (
+  category IN ('participant_collision','unresolved_participant',
+               'archived_lifecycle_unknown','other')
+),
+ADD CONSTRAINT forum_migration_quarantines_status_ck CHECK (
+  status IN ('open','resolved')
+);
+
+ALTER TABLE forum_migration_validation_results
+ADD CONSTRAINT forum_migration_validation_results_result_ck CHECK (
+  result IN ('pass','fail','inconclusive')
+);
+```
+
+#### MigrationRun sealed guard（B-MODEL-001）
+
+```sql
+CREATE FUNCTION forum_migration_runs_sealed_guard()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' AND OLD.status IN ('sealed','failed','rolled_back') THEN
+    RAISE EXCEPTION 'terminal migration run cannot be deleted'
+      USING ERRCODE = '55000';
+  END IF;
+  IF OLD.status IN ('sealed','failed','rolled_back') THEN
+    RAISE EXCEPTION 'terminal migration run cannot be updated'
+      USING ERRCODE = '55000';
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF NOT (
+      (OLD.status = 'planned'   AND NEW.status IN ('running','failed')) OR
+      (OLD.status = 'running'   AND NEW.status IN ('validated','failed')) OR
+      (OLD.status = 'validated' AND NEW.status IN ('sealed','rolled_back','failed'))
+    ) THEN
+      RAISE EXCEPTION 'illegal migration run status transition % -> %',
+        OLD.status, NEW.status USING ERRCODE = '23514';
+    END IF;
+    IF NEW.source_commit <> OLD.source_commit
+       OR NEW.target_commit <> OLD.target_commit
+       OR NEW.environment <> OLD.environment
+       OR NEW.dataset_id <> OLD.dataset_id
+       OR NEW.snapshot_at <> OLD.snapshot_at
+       OR NEW.policy_id <> OLD.policy_id
+       OR NEW.phase <> OLD.phase
+       OR NEW.run_identity_key <> OLD.run_identity_key
+       OR NEW.attempt <> OLD.attempt
+       OR NEW.started_at <> OLD.started_at THEN
+      RAISE EXCEPTION 'migration run identity fields are immutable'
+        USING ERRCODE = '55000';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER forum_migration_runs_sealed_guard_tg
+BEFORE UPDATE OR DELETE ON forum_migration_runs
+FOR EACH ROW EXECUTE FUNCTION forum_migration_runs_sealed_guard();
+```
 
 Audit table同时：
 
@@ -1036,14 +1399,141 @@ FROM forum_app;
 | existing-table nullable FK | YES，但不可表达 `NOT VALID` | YES | `ADD CONSTRAINT ... NOT VALID` |
 | `CREATE INDEX CONCURRENTLY` | NO | YES | standalone migration SQL |
 
-计数口径：
+计数口径（B-SQL-001 修订后，逐对象可加和，明细见 §9.3 registry）：
 
 ```text
-RAW_SQL_CONSTRAINTS_REQUIRED = 27
-PRISMA_ONLY_CONSTRAINTS = 75
+RAW_SQL_CONSTRAINTS_REQUIRED = 74
+PRISMA_ONLY_CONSTRAINTS = 64
 ```
 
-`75` 为 candidate schema 中 PK、普通 UNIQUE 和 FK 声明总数；普通 non-unique indexes 不计入该数。`27` 为 named CHECK、partial unique、trigger/constraint-trigger 和 `NOT VALID`/concurrent SQL 对象。
+`64` 为 candidate schema 中由 Prisma models/relations 表达的 PK、普通 UNIQUE 和普通 FK 声明总数（新增 17 表逐表可加和：Alias 3、Participation 5、Watch 4、ReadState 4、Resolution 5、Requirement 5、Revision 5、Finalization 2、ThreadTombstone 3、MessageTombstone 3、MigrationRun 1、LegacyEvidence 4、FieldDecision 3、Quarantine 4、ValidationResult 3、Mention 4、NotificationFact 6）；普通 non-unique indexes 不计入。`74` 为 §9.3 registry 逐行登记的 named CHECK、partial unique、named UNIQUE（finalization 两项因验收引用稳定物理名而走 raw）、trigger/constraint-trigger/function、`NOT VALID`/staged FK、CIC 与 grant 对象总数（基座 14、证据 3、身份 11、订阅 12、状态 8、评审 11、定稿 9、删除 6）。
+
+### 9.3 Raw SQL object registry（B-SQL-001）
+
+记号：TX = 进入 migration transaction；standalone = 独立执行、无显式事务。`pg_*` 验证查询均要求返回 1。每行 EVIDENCE_PATH 对应 §17.2 各 workstream 行。
+
+#### 基座 执行（14 objects）
+
+| SQL_OBJECT_ID | STABLE_OBJECT_NAME | OWNING_WORKSTREAM | OBJECT_TYPE | TARGET_TABLE | PURPOSE | EXACT_SQL_OR_EXECUTABLE_PSEUDOSQL | TRANSACTION_MODE | PRISMA_EXPRESSIBLE | CREATION_ORDER | DEPENDENCIES | VALIDATION_QUERY | NEGATIVE_TEST | ROLLBACK_OR_FORWARD_REPAIR | EVIDENCE_PATH |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SQL-001 | forum_migration_runs_status_ck | 基座 | CHECK | forum_migration_runs | status closed set | `ALTER TABLE forum_migration_runs ADD CONSTRAINT forum_migration_runs_status_ck CHECK (status IN ('planned','running','validated','failed','rolled_back','sealed'))` | TX | NO | 1 | 表已建 | `SELECT count(*)=1 FROM pg_constraint WHERE conname='forum_migration_runs_status_ck'` | 非法 status INSERT 拒绝 | 保留（D01/D16；cleanup gate） | `.../base/` |
+| SQL-002 | forum_migration_runs_attempt_pos_ck | 基座 | CHECK | forum_migration_runs | attempt 正整数 | `... ADD CONSTRAINT forum_migration_runs_attempt_pos_ck CHECK (attempt > 0)` | TX | NO | 1 | 表已建 | pg_constraint 同名 | attempt<=0 INSERT 拒绝 | 保留 | `.../base/` |
+| SQL-003 | forum_migration_legacy_evidence_classification_ck | 基座 | CHECK | forum_migration_legacy_evidence | classification closed set | `... CHECK (classification IN ('deterministic','ambiguous','unprovable'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 classification 拒绝 | 保留 | `.../base/` |
+| SQL-004 | forum_migration_field_decisions_classification_ck | 基座 | CHECK | forum_migration_field_decisions | classification closed set | `... CHECK (classification IN ('deterministic','ambiguous','unprovable'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 classification 拒绝 | 保留 | `.../base/` |
+| SQL-005 | forum_migration_field_decisions_selected_ck | 基座 | CHECK | forum_migration_field_decisions | 非 deterministic 时 selected 必须 NULL | `... CHECK (classification <> 'deterministic' AND selected_value_safe IS NOT NULL OR classification = 'deterministic')` | TX | NO | 1 | SQL-004 | pg_constraint | ambiguous+selected 拒绝 | 保留 | `.../base/` |
+| SQL-006 | forum_migration_quarantines_category_ck | 基座 | CHECK | forum_migration_quarantines | category closed set | `... CHECK (category IN ('participant_collision','unresolved_participant','archived_lifecycle_unknown','other'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 category 拒绝 | 保留 | `.../base/` |
+| SQL-007 | forum_migration_quarantines_status_ck | 基座 | CHECK | forum_migration_quarantines | status closed set | `... CHECK (status IN ('open','resolved'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 status 拒绝 | 保留 | `.../base/` |
+| SQL-008 | forum_migration_validation_results_result_ck | 基座 | CHECK | forum_migration_validation_results | result closed set | `... CHECK (result IN ('pass','fail','inconclusive'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 result 拒绝 | 保留 | `.../base/` |
+| SQL-009 | forum_forbid_mutation (function) | 基座（共享） | FUNCTION | — | append-only 拒绝函数 | `CREATE FUNCTION forum_forbid_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE='55000'; END $$` | TX | NO | 2 | — | `SELECT count(*)=1 FROM pg_proc WHERE proname='forum_forbid_mutation'` | 任一绑定表 UPDATE/DELETE 抛 55000 | 保留；trigger 故障时 forward fix（D16） | `.../base/` |
+| SQL-010 | forum_migration_legacy_evidence_append_only_tg | 基座 | TRIGGER | forum_migration_legacy_evidence | append-only | `CREATE TRIGGER forum_migration_legacy_evidence_append_only_tg BEFORE UPDATE OR DELETE ON forum_migration_legacy_evidence FOR EACH ROW EXECUTE FUNCTION forum_forbid_mutation()` | TX | NO | 3 | SQL-009 | `SELECT count(*)=1 FROM pg_trigger WHERE tgname='forum_migration_legacy_evidence_append_only_tg'` | UPDATE/DELETE 拒绝 | 保留 | `.../base/` |
+| SQL-011 | forum_migration_field_decisions_append_only_tg | 基座 | TRIGGER | forum_migration_field_decisions | append-only | 同 SQL-010 形式 | TX | NO | 3 | SQL-009 | pg_trigger 同名 | UPDATE/DELETE 拒绝 | 保留 | `.../base/` |
+| SQL-012 | forum_migration_validation_results_append_only_tg | 基座 | TRIGGER | forum_migration_validation_results | append-only | 同 SQL-010 形式 | TX | NO | 3 | SQL-009 | pg_trigger 同名 | UPDATE/DELETE 拒绝 | 保留 | `.../base/` |
+| SQL-013 | forum_migration_runs_sealed_guard (function) | 基座 | FUNCTION | — | 终态+转移+identity 不可变 | `CREATE FUNCTION forum_migration_runs_sealed_guard() ...`（全文见 §9.1） | TX | NO | 2 | — | pg_proc 同名 | sealed 后 UPDATE/DELETE 拒绝；非法转移拒绝；identity 改写拒绝 | 保留 | `.../base/` |
+| SQL-014 | forum_migration_runs_sealed_guard_tg | 基座 | TRIGGER | forum_migration_runs | sealed guard 绑定 | `CREATE TRIGGER forum_migration_runs_sealed_guard_tg BEFORE UPDATE OR DELETE ON forum_migration_runs FOR EACH ROW EXECUTE FUNCTION forum_migration_runs_sealed_guard()` | TX | NO | 3 | SQL-013 | pg_trigger 同名 | 同 SQL-013 负向 | 保留 | `.../base/` |
+
+#### 证据 执行（3 objects）
+
+| SQL_OBJECT_ID | STABLE_OBJECT_NAME | OWNING_WORKSTREAM | OBJECT_TYPE | TARGET_TABLE | PURPOSE | EXACT_SQL_OR_EXECUTABLE_PSEUDOSQL | TRANSACTION_MODE | PRISMA_EXPRESSIBLE | CREATION_ORDER | DEPENDENCIES | VALIDATION_QUERY | NEGATIVE_TEST | ROLLBACK_OR_FORWARD_REPAIR | EVIDENCE_PATH |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SQL-015 | forum_audit_events_provenance_ck | 证据 | CHECK | forum_audit_events | provenance closed set | `... CHECK (provenance IN ('runtime','migration'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 provenance 拒绝 | 保留 | `.../audit/` |
+| SQL-016 | forum_audit_events_append_only_tg | 证据 | TRIGGER | forum_audit_events | append-only | `CREATE TRIGGER forum_audit_events_append_only_tg BEFORE UPDATE OR DELETE ON forum_audit_events FOR EACH ROW EXECUTE FUNCTION forum_forbid_mutation()` | TX | NO | 2 | SQL-009 | pg_trigger 同名 | UPDATE/DELETE/TRUNCATE 拒绝 | 保留 | `.../audit/` |
+| SQL-017 | revoke-forum-app-audit-mutation | 证据 | GRANT/REVOKE | forum_audit_events | 应用 role 边界 | `REVOKE UPDATE, DELETE, TRUNCATE ON forum_audit_events FROM forum_app` | TX | NO | 3 | 表已建 | `SELECT NOT has_table_privilege('forum_app','forum_audit_events','UPDATE')` | forum_app UPDATE 以权限错误失败 | REVOKE 幂等重放；owner/superuser 例外记录 | `.../audit/` |
+
+#### 身份 执行（11 objects）
+
+| SQL_OBJECT_ID | STABLE_OBJECT_NAME | OWNING_WORKSTREAM | OBJECT_TYPE | TARGET_TABLE | PURPOSE | EXACT_SQL_OR_EXECUTABLE_PSEUDOSQL | TRANSACTION_MODE | PRISMA_EXPRESSIBLE | CREATION_ORDER | DEPENDENCIES | VALIDATION_QUERY | NEGATIVE_TEST | ROLLBACK_OR_FORWARD_REPAIR | EVIDENCE_PATH |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SQL-018 | forum_principal_aliases_namespace_ck | 身份 | CHECK | forum_principal_aliases | namespace closed set | `... CHECK (namespace IN ('auth_subject','agent_id'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 namespace 拒绝 | 保留 | `.../identity/` |
+| SQL-019 | forum_alias_owner_immutable_guard (function) | 身份 | FUNCTION | — | alias owner 不可变 | `CREATE FUNCTION forum_alias_owner_immutable_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.principal_id <> OLD.principal_id OR NEW.namespace <> OLD.namespace OR NEW.value <> OLD.value OR (OLD.retired_at IS NOT NULL AND NEW.retired_at <> OLD.retired_at) THEN RAISE EXCEPTION 'alias identity immutable' USING ERRCODE='55000'; END IF; RETURN NEW; END $$` | TX | NO | 2 | — | pg_proc 同名 | owner/namespace/value 改写拒绝 | 保留 | `.../identity/` |
+| SQL-020 | forum_alias_owner_immutable_guard_tg | 身份 | TRIGGER | forum_principal_aliases | 绑定 immutability | `CREATE TRIGGER forum_alias_owner_immutable_guard_tg BEFORE UPDATE ON forum_principal_aliases FOR EACH ROW EXECUTE FUNCTION forum_alias_owner_immutable_guard()` | TX | NO | 3 | SQL-019 | pg_trigger 同名 | alias 重分配拒绝 | 保留 | `.../identity/` |
+| SQL-021 | forum_threads_creator_principal_fk | 身份 | FK NOT VALID | forum_threads | creator FK | `ALTER TABLE forum_threads ADD CONSTRAINT forum_threads_creator_principal_fk FOREIGN KEY (creator_principal_id) REFERENCES forum_principals(id) NOT VALID` | TX；D17 VALIDATE | 部分（NOT VALID 不可表达） | 4 | 列已加（D04） | pg_constraint 同名 + `convalidated` 翻转 | 非法 principal 引用拒绝（VALIDATE 后） | 保留 FK；DDL 失败由事务回滚（D06） | `.../identity/` |
+| SQL-022 | forum_messages_author_principal_fk | 身份 | FK NOT VALID | forum_messages | author FK | 同 SQL-021 形式，列 `author_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
+| SQL-023 | forum_thread_views_viewer_principal_fk | 身份 | FK NOT VALID | forum_thread_views | viewer FK | 同上，列 `viewer_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
+| SQL-024 | forum_outcomes_created_by_principal_fk | 身份 | FK NOT VALID | forum_outcomes | outcome actor FK | 同上，列 `created_by_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
+| SQL-025 | forum_context_snapshots_taken_by_principal_fk | 身份 | FK NOT VALID | forum_context_snapshots | snapshot actor FK | 同上，列 `taken_by_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
+| SQL-026 | forum_reports_reporter_principal_fk | 身份 | FK NOT VALID | forum_reports | reporter FK | 同上，列 `reporter_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
+| SQL-027 | forum_reports_handled_by_principal_fk | 身份 | FK NOT VALID | forum_reports | moderator FK | 同上，列 `handled_by_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
+| SQL-028 | forum_reactions_actor_principal_fk | 身份 | FK NOT VALID | forum_reactions | reaction actor FK | 同上，列 `actor_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
+
+#### 订阅 执行（12 objects）
+
+| SQL_OBJECT_ID | STABLE_OBJECT_NAME | OWNING_WORKSTREAM | OBJECT_TYPE | TARGET_TABLE | PURPOSE | EXACT_SQL_OR_EXECUTABLE_PSEUDOSQL | TRANSACTION_MODE | PRISMA_EXPRESSIBLE | CREATION_ORDER | DEPENDENCIES | VALIDATION_QUERY | NEGATIVE_TEST | ROLLBACK_OR_FORWARD_REPAIR | EVIDENCE_PATH |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SQL-029 | forum_watch_subscriptions_state_ck | 订阅 | CHECK | forum_watch_subscriptions | state closed set | `... CHECK (state IN ('active','inactive'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 state 拒绝 | 保留 | `.../subscription/` |
+| SQL-030 | forum_watch_subscriptions_source_ck | 订阅 | CHECK | forum_watch_subscriptions | source closed set | `... CHECK (source IN ('explicit','author','mention','migration','unknown'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 source 拒绝 | 保留 | `.../subscription/` |
+| SQL-031 | forum_watch_subscriptions_provenance_ck | 订阅 | CHECK | forum_watch_subscriptions | provenance closed set | `... CHECK (provenance IN ('runtime','migration'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 provenance 拒绝 | 保留 | `.../subscription/` |
+| SQL-032 | forum_watch_subscriptions_shape_ck | 订阅 | CHECK | forum_watch_subscriptions | active/inactive interval 形状 | `... CHECK ((state='active' AND ended_at IS NULL) OR (state='inactive' AND ended_at IS NOT NULL))` | TX | NO | 1 | SQL-029 | pg_constraint | active+ended_at 拒绝 | 保留 | `.../subscription/` |
+| SQL-033 | forum_watch_subscriptions_one_active_uq | 订阅 | PARTIAL UNIQUE INDEX | forum_watch_subscriptions | 每 (thread,principal) 一个 active | `CREATE UNIQUE INDEX forum_watch_subscriptions_one_active_uq ON forum_watch_subscriptions(thread_id,principal_id) WHERE state='active' AND ended_at IS NULL` | TX | NO | 2 | SQL-032 | `SELECT count(*)=1 FROM pg_indexes WHERE indexname='forum_watch_subscriptions_one_active_uq'` | 第二个 active Watch 拒绝 | 保留 | `.../subscription/` |
+| SQL-034 | forum_participations_fact_state_ck | 订阅 | CHECK | forum_participations | fact_state closed set | `... CHECK (fact_state IN ('known','partial','unknown'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 fact_state 拒绝 | 保留 | `.../subscription/` |
+| SQL-035 | forum_participations_provenance_ck | 订阅 | CHECK | forum_participations | provenance closed set | `... CHECK (provenance IN ('runtime','migration'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 provenance 拒绝 | 保留 | `.../subscription/` |
+| SQL-036 | forum_read_states_shape_ck | 订阅 | CHECK | forum_read_states | state closed set + known/unknown 形状（全文见 §9.1） | `ALTER TABLE forum_read_states ADD CONSTRAINT forum_read_states_shape_ck CHECK ((state='unknown' AND last_read_seq IS NULL AND last_read_at IS NULL) OR (state='known' AND last_read_seq=0 AND last_read_at IS NULL) OR (state='known' AND last_read_seq>0 AND last_read_at IS NOT NULL))` | TX | NO | 1 | 表已建 | pg_constraint | unknown+seq 拒绝；known+seq>0 无 time 拒绝 | 保留 | `.../subscription/` |
+| SQL-037 | forum_read_states_provenance_ck | 订阅 | CHECK | forum_read_states | provenance closed set | `... CHECK (provenance IN ('runtime','migration'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 provenance 拒绝 | 保留 | `.../subscription/` |
+| SQL-038 | forum_read_cursor_monotonic_guard (function) | 订阅 | FUNCTION | — | cursor 单调 | `CREATE FUNCTION forum_read_cursor_monotonic_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.last_read_seq IS DISTINCT FROM OLD.last_read_seq AND NEW.last_read_seq < OLD.last_read_seq THEN RAISE EXCEPTION 'read cursor must not regress' USING ERRCODE='23514'; END IF; RETURN NEW; END $$` | TX | NO | 2 | — | pg_proc 同名 | cursor 回退拒绝 | 保留 | `.../subscription/` |
+| SQL-039 | forum_read_cursor_monotonic_guard_tg | 订阅 | TRIGGER | forum_read_states | 绑定 cursor 单调 | `CREATE TRIGGER forum_read_cursor_monotonic_guard_tg BEFORE UPDATE ON forum_read_states FOR EACH ROW EXECUTE FUNCTION forum_read_cursor_monotonic_guard()` | TX | NO | 3 | SQL-038 | pg_trigger 同名 | 同上 | 保留 | `.../subscription/` |
+| SQL-040 | forum_notifications_reason_ck | 订阅 | CHECK | forum_notification_facts | reason closed set | `... CHECK (reason IN ('mention','watch','reaction'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 reason 拒绝 | 保留 | `.../subscription/` |
+
+#### 状态 执行（8 objects）
+
+| SQL_OBJECT_ID | STABLE_OBJECT_NAME | OWNING_WORKSTREAM | OBJECT_TYPE | TARGET_TABLE | PURPOSE | EXACT_SQL_OR_EXECUTABLE_PSEUDOSQL | TRANSACTION_MODE | PRISMA_EXPRESSIBLE | CREATION_ORDER | DEPENDENCIES | VALIDATION_QUERY | NEGATIVE_TEST | ROLLBACK_OR_FORWARD_REPAIR | EVIDENCE_PATH |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SQL-041 | forum_thread_revisions_shape_ck | 状态 | CHECK | forum_thread_revisions | discussion_state closed set + open/resolved 配对 | `... CHECK ((discussion_state='open' AND resolved_at IS NULL AND resolved_by_principal_id IS NULL) OR (discussion_state='resolved' AND resolved_at IS NOT NULL AND resolved_by_principal_id IS NOT NULL))` | TX | NO | 1 | 表已建（D10） | pg_constraint | open+resolved_at 拒绝；非法 state 拒绝 | 保留 | `.../lifecycle/` |
+| SQL-042 | forum_guard_current_revision (function) | 状态 | FUNCTION | — | pointer UPDATE 单调 | `CREATE FUNCTION forum_guard_current_revision() ...`（全文见 §9.1） | TX | NO | 2 | — | pg_proc 同名 | 跳号/倒退/清空 UPDATE 拒绝 | 保留 | `.../lifecycle/` |
+| SQL-043 | forum_guard_current_revision_tg | 状态 | TRIGGER | forum_threads | BEFORE UPDATE 绑定 | `CREATE TRIGGER forum_guard_current_revision_tg BEFORE UPDATE ON forum_threads FOR EACH ROW EXECUTE FUNCTION forum_guard_current_revision()` | TX | NO | 3 | SQL-042 | pg_trigger 同名 | 同上 | 保留 | `.../lifecycle/` |
+| SQL-044 | forum_thread_revisions_insert_guard (function) | 状态 | FUNCTION | — | revisions INSERT 单调 | `CREATE FUNCTION forum_thread_revisions_insert_guard() ...`（全文见 §9.1） | TX | NO | 2 | — | pg_proc 同名 | 跳号/前置 INSERT 拒绝 | 保留 | `.../lifecycle/` |
+| SQL-045 | forum_thread_revisions_insert_guard_tg | 状态 | TRIGGER | forum_thread_revisions | BEFORE INSERT 绑定 | `CREATE TRIGGER forum_thread_revisions_insert_guard_tg BEFORE INSERT ON forum_thread_revisions FOR EACH ROW EXECUTE FUNCTION forum_thread_revisions_insert_guard()` | TX | NO | 3 | SQL-044 | pg_trigger 同名 | revision=3 首插拒绝（当前 NULL→须 1） | 保留 | `.../lifecycle/` |
+| SQL-046 | forum_threads_current_revision_fk | 状态 | COMPOSITE FK NOT VALID | forum_threads | pointer↔revision 互锁 | `ALTER TABLE forum_threads ADD CONSTRAINT forum_threads_current_revision_fk FOREIGN KEY (id,current_revision) REFERENCES forum_thread_revisions(thread_id,revision) NOT VALID` | TX；D17 VALIDATE | 部分 | 4 | D10、SQL-041 | pg_constraint 同名 | 孤儿 pointer（指向不存在 revision）拒绝 | 保留（D19） | `.../lifecycle/` |
+| SQL-047 | forum_threads_visibility_state_cic_idx | 状态 | INDEX (CIC) | forum_threads | 未来 visibility 查询 | `CREATE INDEX CONCURRENTLY forum_threads_visibility_state_cic_idx ON forum_threads(visibility_state) WHERE visibility_state IS NOT NULL` | standalone / no explicit transaction | NO | 5 | D05 | pg_indexes 同名 | invalid index 恢复演练（D18） | 失败仅 forward repair：DROP INDEX CONCURRENTLY 后重建 | `.../lifecycle/` |
+| SQL-048 | forum_thread_messages_discussion_revision_cic_idx | 状态 | INDEX (CIC) | forum_messages | revision 维度查询 | `CREATE INDEX CONCURRENTLY forum_thread_messages_discussion_revision_cic_idx ON forum_thread_messages(thread_id,discussion_revision) WHERE discussion_revision IS NOT NULL` | standalone / no explicit transaction | NO | 5 | D05 | pg_indexes 同名 | 同 D18 | 同 D18 forward repair | `.../lifecycle/` |
+
+#### 评审 执行（11 objects）
+
+| SQL_OBJECT_ID | STABLE_OBJECT_NAME | OWNING_WORKSTREAM | OBJECT_TYPE | TARGET_TABLE | PURPOSE | EXACT_SQL_OR_EXECUTABLE_PSEUDOSQL | TRANSACTION_MODE | PRISMA_EXPRESSIBLE | CREATION_ORDER | DEPENDENCIES | VALIDATION_QUERY | NEGATIVE_TEST | ROLLBACK_OR_FORWARD_REPAIR | EVIDENCE_PATH |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SQL-049 | forum_review_requirements_state_ck | 评审 | CHECK | forum_review_requirements | state closed set | `... CHECK (state IN ('pending','satisfied','waived'))` | TX | NO | 1 | 表已建（D11） | pg_constraint | 非法 state 拒绝 | 保留 | `.../review/` |
+| SQL-050 | forum_review_requirements_revision_fk | 评审 | COMPOSITE FK | forum_review_requirements | 绑定 revision | `ALTER TABLE forum_review_requirements ADD CONSTRAINT forum_review_requirements_revision_fk FOREIGN KEY (thread_id,revision) REFERENCES forum_thread_revisions(thread_id,revision)`（新空表，inline VALID） | TX | 部分 | 2 | D10 | pg_constraint 同名 | 跨 revision 引用拒绝 | 保留 | `.../review/` |
+| SQL-051 | forum_review_resolutions_shape_ck | 评审 | CHECK | forum_review_resolutions | kind closed set + response/waiver 形状（全文见 §9.1） | `ALTER TABLE forum_review_resolutions ADD CONSTRAINT forum_review_resolutions_shape_ck CHECK (...)` | TX | NO | 1 | 表已建 | pg_constraint | response 无 message 拒绝；waiver 空 reason 拒绝 | 保留 | `.../review/` |
+| SQL-052 | forum_review_resolutions_invalidation_pair_ck | 评审 | CHECK | forum_review_resolutions | invalidation 成对 | `... CHECK ((invalidated_at IS NULL) = (invalidated_by_message_tombstone_id IS NULL))` | TX | NO | 1 | 表已建 | pg_constraint | 单字段失效拒绝 | 保留 | `.../review/` |
+| SQL-053 | forum_review_resolutions_one_effective_uq | 评审 | PARTIAL UNIQUE INDEX | forum_review_resolutions | 单 effective | `CREATE UNIQUE INDEX forum_review_resolutions_one_effective_uq ON forum_review_resolutions(requirement_id) WHERE invalidated_at IS NULL` | TX | NO | 2 | SQL-051 | pg_indexes 同名 | 并发 response+waiver 单胜 | 保留 | `.../review/` |
+| SQL-054 | forum_review_resolution_guard (function) | 评审 | FUNCTION | — | cross-row 校验 | `CREATE FUNCTION forum_review_resolution_guard() ...`（按 §9.1 六步） | TX | NO | 3 | SQL-049/050/051 | pg_proc 同名 | reviewer/revision 不匹配拒绝；tombstoned message response 拒绝 | 保留 | `.../review/` |
+| SQL-055 | forum_review_resolution_guard_tg | 评审 | TRIGGER | forum_review_resolutions | insert/effective update 绑定 | `CREATE TRIGGER forum_review_resolution_guard_tg BEFORE INSERT OR UPDATE ON forum_review_resolutions FOR EACH ROW EXECUTE FUNCTION forum_review_resolution_guard()` | TX | NO | 4 | SQL-054 | pg_trigger 同名 | 同上 | 保留 | `.../review/` |
+| SQL-056 | forum_requirement_resolution_consistency (function) | 评审 | FUNCTION | — | state↔effective 一致 | `CREATE FUNCTION forum_requirement_resolution_consistency() RETURNS trigger ... 校验 Requirement.state 与 effective Resolution 匹配` | TX | NO | 3 | SQL-049/053 | pg_proc 同名 | satisfied 无 effective response 拒绝 | 保留 | `.../review/` |
+| SQL-057 | forum_requirement_resolution_consistency_tg | 评审 | CONSTRAINT TRIGGER (DEFERRABLE) | forum_review_requirements / forum_review_resolutions | deferred 一致性 | `CREATE CONSTRAINT TRIGGER forum_requirement_resolution_consistency_tg AFTER INSERT OR UPDATE ON forum_review_resolutions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION forum_requirement_resolution_consistency()` | TX | NO | 5 | SQL-056 | pg_trigger 同名 | commit 时不一致拒绝 | 保留 | `.../review/` |
+| SQL-058 | forum_review_resolutions_invalidation_guard (function) | 评审 | FUNCTION | — | invalidation UPDATE 授权 | `CREATE FUNCTION forum_review_resolutions_invalidation_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF (NEW.invalidated_at IS DISTINCT FROM OLD.invalidated_at OR NEW.invalidated_by_message_tombstone_id IS DISTINCT FROM OLD.invalidated_by_message_tombstone_id) AND current_user = 'forum_app' AND pg_trigger_depth() <= 1 THEN RAISE EXCEPTION 'invalidation only via forum_invalidate_response' USING ERRCODE='42501'; END IF; RETURN NEW; END $$` | TX | NO | 3 | SQL-052 | pg_proc 同名 | forum_app 直接 UPDATE invalidation 列拒绝 | 保留 | `.../review/` |
+| SQL-059 | forum_review_resolutions_invalidation_guard_tg | 评审 | TRIGGER | forum_review_resolutions | 绑定 invalidation 授权 | `CREATE TRIGGER forum_review_resolutions_invalidation_guard_tg BEFORE UPDATE ON forum_review_resolutions FOR EACH ROW EXECUTE FUNCTION forum_review_resolutions_invalidation_guard()` | TX | NO | 4 | SQL-058 | pg_trigger 同名 | 同上 | 保留 | `.../review/` |
+
+#### 定稿 执行（9 objects）
+
+| SQL_OBJECT_ID | STABLE_OBJECT_NAME | OWNING_WORKSTREAM | OBJECT_TYPE | TARGET_TABLE | PURPOSE | EXACT_SQL_OR_EXECUTABLE_PSEUDOSQL | TRANSACTION_MODE | PRISMA_EXPRESSIBLE | CREATION_ORDER | DEPENDENCIES | VALIDATION_QUERY | NEGATIVE_TEST | ROLLBACK_OR_FORWARD_REPAIR | EVIDENCE_PATH |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SQL-060 | forum_finalizations_provenance_ck | 定稿 | CHECK | forum_finalizations | provenance closed set | `... CHECK (provenance IN ('runtime','migration_derived'))` | TX | NO | 1 | 表已建（D12） | pg_constraint | 非法 provenance 拒绝 | 保留 | `.../finalization/` |
+| SQL-061 | forum_finalizations_idempotency_nonempty_ck | 定稿 | CHECK | forum_finalizations | key 非空 | `... CHECK (length(btrim(idempotency_key)) > 0)` | TX | NO | 1 | 表已建 | pg_constraint | empty/whitespace key 拒绝 | 保留 | `.../finalization/` |
+| SQL-062 | forum_finalizations_summary_nonempty_ck | 定稿 | CHECK | forum_finalizations | summary 非空 | `... CHECK (length(btrim(outcome_summary_md)) > 0)` | TX | NO | 1 | 表已建 | pg_constraint | empty summary 拒绝 | 保留 | `.../finalization/` |
+| SQL-063 | forum_finalizations_semantic_request_version_ck | 定稿 | CHECK | forum_finalizations | version 正整数 | `... CHECK (semantic_request_version > 0)` | TX | NO | 1 | 表已建 | pg_constraint | version<=0 拒绝 | 保留 | `.../finalization/` |
+| SQL-064 | forum_finalizations_semantic_request_hash_len_ck | 定稿 | CHECK | forum_finalizations | hash 定长 | `... CHECK (octet_length(semantic_request_hash) = 32)` | TX | NO | 1 | 表已建 | pg_constraint | 非 32 字节 hash 拒绝 | 保留 | `.../finalization/` |
+| SQL-065 | forum_finalizations_thread_revision_uq | 定稿 | UNIQUE CONSTRAINT | forum_finalizations | 每 revision 一条（验收引用稳定名，走 raw） | `ALTER TABLE forum_finalizations ADD CONSTRAINT forum_finalizations_thread_revision_uq UNIQUE(thread_id,revision)` | TX | YES（但采用 raw 命名） | 2 | 表已建 | pg_constraint 同名 | duplicate revision 拒绝 | 保留 | `.../finalization/` |
+| SQL-066 | forum_finalizations_idempotency_uq | 定稿 | UNIQUE CONSTRAINT | forum_finalizations | key scope | `ALTER TABLE forum_finalizations ADD CONSTRAINT forum_finalizations_idempotency_uq UNIQUE(thread_id,idempotency_key)` | TX | YES（同上） | 2 | 表已建 | pg_constraint 同名 | 同 key 二次插入拒绝（并发 loser 409） | 保留 | `.../finalization/` |
+| SQL-067 | forum_finalizations_revision_fk | 定稿 | COMPOSITE FK | forum_finalizations | 绑定 revision | `ALTER TABLE forum_finalizations ADD CONSTRAINT forum_finalizations_revision_fk FOREIGN KEY (thread_id,revision) REFERENCES forum_thread_revisions(thread_id,revision)`（新空表，inline VALID） | TX | 部分 | 2 | D10 | pg_constraint 同名 | 跨 revision 引用拒绝 | 保留 | `.../finalization/` |
+| SQL-068 | forum_finalizations_append_only_tg | 定稿 | TRIGGER | forum_finalizations | append-only | `CREATE TRIGGER forum_finalizations_append_only_tg BEFORE UPDATE OR DELETE ON forum_finalizations FOR EACH ROW EXECUTE FUNCTION forum_forbid_mutation()` | TX | NO | 3 | SQL-009 | pg_trigger 同名 | UPDATE/DELETE 拒绝 | 保留 | `.../finalization/` |
+
+#### 删除 执行（6 objects）
+
+| SQL_OBJECT_ID | STABLE_OBJECT_NAME | OWNING_WORKSTREAM | OBJECT_TYPE | TARGET_TABLE | PURPOSE | EXACT_SQL_OR_EXECUTABLE_PSEUDOSQL | TRANSACTION_MODE | PRISMA_EXPRESSIBLE | CREATION_ORDER | DEPENDENCIES | VALIDATION_QUERY | NEGATIVE_TEST | ROLLBACK_OR_FORWARD_REPAIR | EVIDENCE_PATH |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SQL-069 | forum_thread_tombstones_reason_ck | 删除 | CHECK | forum_thread_tombstones | reason 非空 | `... CHECK (length(btrim(reason)) > 0)` | TX | NO | 1 | 表已建（D13） | pg_constraint | empty reason 拒绝 | 保留 | `.../deletion/` |
+| SQL-070 | forum_message_tombstones_reason_ck | 删除 | CHECK | forum_message_tombstones | reason 非空 | `... CHECK (length(btrim(reason)) > 0)` | TX | NO | 1 | 表已建 | pg_constraint | empty reason 拒绝 | 保留 | `.../deletion/` |
+| SQL-071 | forum_thread_tombstones_append_only_tg | 删除 | TRIGGER | forum_thread_tombstones | append-only | `CREATE TRIGGER forum_thread_tombstones_append_only_tg BEFORE UPDATE OR DELETE ON forum_thread_tombstones FOR EACH ROW EXECUTE FUNCTION forum_forbid_mutation()` | TX | NO | 2 | SQL-009 | pg_trigger 同名 | UPDATE/DELETE 拒绝 | 保留 | `.../deletion/` |
+| SQL-072 | forum_message_tombstones_append_only_tg | 删除 | TRIGGER | forum_message_tombstones | append-only | 同 SQL-071 形式 | TX | NO | 2 | SQL-009 | pg_trigger 同名 | UPDATE/DELETE 拒绝 | 保留 | `.../deletion/` |
+| SQL-073 | forum_review_resolutions_invalidated_by_fk | 删除 | FK NOT VALID (staged) | forum_review_resolutions | staged tombstone FK（B-FK-001） | `ALTER TABLE forum_review_resolutions ADD CONSTRAINT forum_review_resolutions_invalidated_by_fk FOREIGN KEY (invalidated_by_message_tombstone_id) REFERENCES forum_message_tombstones(message_id) NOT VALID` → `VALIDATE CONSTRAINT`（DDL D20） | TX；VALIDATE 独立 | 部分 | 3 | D13、SQL-070 | pg_constraint 同名 + convalidated | 指向不存在 tombstone 拒绝 | 保留；VALIDATE 失败修复数据后重验（D17） | `.../deletion/` |
+| SQL-074 | forum_invalidate_response (function) | 删除 | FUNCTION (SECURITY DEFINER) | forum_review_resolutions | 唯一 invalidation 路径 | `CREATE FUNCTION forum_invalidate_response(p_resolution_id uuid, p_tombstone_id uuid) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$ ... 校验 tombstone.message_id = resolution.message_id 且两者当前未失效，成对 UPDATE，写 forum_audit_events ... $$`；`GRANT EXECUTE ON FUNCTION forum_invalidate_response TO forum_app` | 调用方在删除事务内 | NO | 4 | SQL-052/053/073 | pg_proc 同名 | message 不匹配拒绝；二次失效拒绝 | 保留 | `.../deletion/` |
+
+Registry 计数（逐行可加和）：
+
+```text
+RAW_SQL_OBJECTS_TOTAL = 74
+基座 14 + 证据 3 + 身份 11 + 订阅 12 + 状态 8 + 评审 11 + 定稿 9 + 删除 6
+```
+
+替代旧口径 `RAW_SQL_CONSTRAINTS_REQUIRED = 27 / PRISMA_ONLY_CONSTRAINTS = 75`：旧数字不可从文档推导复算，本轮按逐对象登记后重新计算为 74 / 64，未保留旧数字。
 
 ---
 
@@ -1069,6 +1559,8 @@ PRISMA_ONLY_CONSTRAINTS = 75
 | D16 | functions/triggers/grants | `CREATE FUNCTION/TRIGGER`, `REVOKE` | 新表短暂 SHARE ROW EXCLUSIVE/catalog lock；无 rewrite | 0 | 低；必须负向测试 | 独立 TX-H |
 | D17 | validate nullable FK/CHECK | `VALIDATE CONSTRAINT` | referencing table SHARE UPDATE EXCLUSIVE；heap scan；无 rewrite | 0–607 | 目标大表时耗时由行数/I/O决定 | 每约束独立 |
 | D18 | 现有表新增查询 index | `CREATE INDEX CONCURRENTLY` | 允许 DML；多阶段 scan/wait；无 rewrite | 0–607 | 失败可能留下 invalid index | standalone，无显式 transaction |
+| D19 | Thread currentRevision composite FK | `ALTER TABLE forum_threads ADD CONSTRAINT forum_threads_current_revision_fk FOREIGN KEY (id,current_revision) REFERENCES forum_thread_revisions(thread_id,revision) NOT VALID` | 两 relation catalog lock；无 scan（NOT VALID） | 90 | NULL 不参与匹配；VALIDATE 在 D17 | 10 后 / TX-D（registry SQL-046） |
+| D20 | Resolution staged tombstone FK | `ALTER TABLE forum_review_resolutions ADD CONSTRAINT forum_review_resolutions_invalidated_by_fk FOREIGN KEY (invalidated_by_message_tombstone_id) REFERENCES forum_message_tombstones(message_id) NOT VALID` + 后续 `VALIDATE CONSTRAINT` | catalog lock；NOT VALID 无 scan；VALIDATE SHARE UPDATE EXCLUSIVE | 0 | 删除 执行 专属；依赖 D13 | 13 后 / TX-G（registry SQL-073） |
 
 ### 10.1 Rewrite 风险
 
@@ -1122,9 +1614,11 @@ Phase 2 默认 rollback 是**应用回退并保留 additive schema/evidence**，
 | D16 | 旧 app 不写新表 | 保留 triggers/grants | YES | NO | trigger 自身阻断旧路径时 forward fix |
 | D17 | validation 失败不切换应用 | 修复数据/约束后重验，不 DROP evidence | YES | NO | validation phase 决定 |
 | D18 | 旧 app 继续 | invalid index 用 `DROP INDEX CONCURRENTLY` forward repair | YES | 仅 invalid index | 仅失败恢复 |
+| D19 | 旧 app 不写 current_revision | 保留 composite FK；NULL 行为不受影响 | YES | NO | cleanup gate |
+| D20 | 旧 app 不写 invalidation 列 | 保留 staged FK；评审阶段语义不受影响 | YES | NO | cleanup gate；VALIDATE 失败修复数据后重验 |
 
 ```text
-ROLLBACK_OPERATIONS_DEFINED = 18
+ROLLBACK_OPERATIONS_DEFINED = 20
 ADDITIVE_ROLLBACK_SAFETY = PASS
 ```
 
@@ -1199,20 +1693,24 @@ Option C 字段行为：
 
 所有任务均为 Phase 2 additive storage；`PRODUCT_CODE_CHANGED=NO` 指不切换业务 runtime path，允许 Prisma schema、migration SQL、migration test/harness 变更。
 
+**Migration lineage 约束（B-LINEAGE-001）**：任一触及 `svc-forum/prisma/schema.prisma` 或 `svc-forum/prisma/migrations/**` 的任务，authoring 与 merge 均严格串行（见 §15 冻结块）；下表 `PARALLEL_WITH` 仅表示非 schema 准备工作（调查、测试设计、不生成 migration 的代码）可并行。
+
 | TASK_NAME / TYPE | CONTRACT_SUBSET | DEPENDENCIES | CHANGED_MODELS / DDL_SCOPE | PRODUCT CODE | BF / DUAL WRITE / CUTOVER | PARALLEL_WITH | AUDIT_TASK |
 |---|---|---|---|---|---|---|---|
-| **基座 执行** / 执行 | MIG-001,004,005 | persisted READY report + independent audit | 五个 Migration models；基础 CHECK/FK/index | NO | NO/NO/NO | NONE，最先 | 基座 审计 |
-| **证据 执行** / 执行 | ID-005, MIG-004,005, DELETE-003 | 基座 | ForumAuditEvent、append-only grants/triggers | NO | NO/NO/NO | 身份 执行 | 证据 审计 |
-| **身份 执行** / 执行 | ID-001..005, AUTHZ-002..004 | 基座 | PrincipalAlias；13 个 nullable existing columns；NOT VALID FK | NO | NO/NO/NO | 证据 执行 | 身份 审计 |
-| **订阅 执行** / 执行 | AUTHZ-005, REVIEW-001, MIG-002 | 身份 | Participation、Watch、Read、Mention、Notification | NO | NO/NO/NO | 状态 执行 | 订阅 审计 |
-| **状态 执行** / 执行 | AUTHZ-001,006, LIFE-001..005 | 身份 | Thread lifecycle columns、Revision、revision FK/trigger | NO | NO/NO/NO | 订阅 执行 | 状态 审计 |
-| **评审 执行** / 执行 | REVIEW-001..007 | 状态、身份 | Requirement、Resolution、partial unique、guards | NO | NO/NO/NO | NONE | 评审 审计 |
-| **定稿 执行** / 执行 | FINAL-001..005, MIG-003 | 评审、状态、身份 | Finalization inline Outcome、idempotency、immutable guard | NO | NO/NO/NO | NONE | 定稿 审计 |
-| **删除 执行** / 执行 | DELETE-001..003, LIFE-005, REVIEW-007 | 定稿、评审、状态、身份、证据 | typed Tombstones、reason checks、audit linkage | NO | NO/NO/NO | NONE | 删除 审计 |
+| **基座 执行** / 执行 | MIG-001,004,005 | persisted READY report + independent audit | 五个 Migration models；基础 CHECK/FK/index；sealed guard；rerun identity | NO | NO/NO/NO | NONE，最先 | 基座 审计 |
+| **证据 执行** / 执行 | ID-005, MIG-004,005, DELETE-003 | 基座 | ForumAuditEvent、append-only grants/triggers | NO | NO/NO/NO | 身份 执行（仅非 schema 准备） | 证据 审计 |
+| **身份 执行** / 执行 | ID-001..005, AUTHZ-002..004 | 基座 | PrincipalAlias；13 个 nullable existing columns；NOT VALID FK | NO | NO/NO/NO | 证据 执行（仅非 schema 准备） | 身份 审计 |
+| **订阅 执行** / 执行 | AUTHZ-005, REVIEW-001, MIG-002 | 身份 | Participation、Watch、Read、Mention、Notification | NO | NO/NO/NO | 状态 执行（仅非 schema 准备） | 订阅 审计 |
+| **状态 执行** / 执行 | AUTHZ-001,006, LIFE-001..005 | 身份 | Thread lifecycle columns、Revision、revision FK/trigger、composite FK（D19）、CIC | NO | NO/NO/NO | 订阅 执行（仅非 schema 准备） | 状态 审计 |
+| **评审 执行** / 执行 | REVIEW-001..007 | 状态、身份 | Requirement、Resolution（`invalidated_by_message_tombstone_id` 仅 scalar、无 relation/FK）、partial unique、guards | NO | NO/NO/NO | NONE | 评审 审计 |
+| **定稿 执行** / 执行 | FINAL-001..005, MIG-003 | 评审、状态、身份 | Finalization inline Outcome、idempotency（version/hash）、immutable guard | NO | NO/NO/NO | NONE | 定稿 审计 |
+| **删除 执行** / 执行 | DELETE-001..003, LIFE-005, REVIEW-007 | 定稿、评审、状态、身份、证据 | typed Tombstones、reason checks、audit linkage、staged FK（D20）+ `forum_invalidate_response` | NO | NO/NO/NO | NONE | 删除 审计 |
 
 ---
 
 ## 15. Parallel/serial dependency graph
+
+逻辑依赖图：
 
 ```text
 报告持久化
@@ -1227,26 +1725,89 @@ Option C 字段行为：
                            → 删除 执行 ←─┘
 ```
 
-并行关系：
+### 15.1 Prisma migration lineage 冻结（B-LINEAGE-001）
 
 ```text
-PARALLEL_WORKSTREAMS =
+PARALLEL_INVESTIGATION_ALLOWED = YES
+PARALLEL_NON_SCHEMA_AUTHORING_ALLOWED = YES
+PARALLEL_SCHEMA_AUTHORING_ALLOWED = NO
+PARALLEL_MERGE_ALLOWED = NO
+MIGRATION_LINEAGE = SERIAL
+```
+
+任何修改以下路径的任务，authoring 与 merge 均严格串行：
+
+```text
+svc-forum/prisma/schema.prisma
+svc-forum/prisma/migrations/**
+```
+
+**Migration merge chain（固定线性）**：
+
+```text
+基座 执行 → 基座 审计 → 基座 合并
+→ 证据 执行 → 证据 审计 → 证据 合并
+→ 身份 执行 → 身份 审计 → 身份 合并
+→ 订阅 执行 → 订阅 审计 → 订阅 合并
+→ 状态 执行 → 状态 审计 → 状态 合并
+→ 评审 执行 → 评审 审计 → 评审 合并
+→ 定稿 执行 → 定稿 审计 → 定稿 合并
+→ 删除 执行 → 删除 审计 → 删除 合并
+```
+
+串行规则：
+
+1. 每个 migration workstream 必须从**前一 migration PR 已合并的最新 `origin/main`** 创建全新 worktree 开始；
+2. 前一个 migration PR 合并后，下一个任务才允许启动 schema authoring；
+3. 使用单一线性 Prisma migration lineage：不允许两个分支从同一 schema base 各自生成 migration 后合并；
+4. 不允许只靠 rebase 解决 migration 目录冲突：base 漂移时必须 rebase 后由 `prisma migrate` **重新生成** migration（记录重生成证据：新旧 migration ID/checksum）；
+5. 不允许并行 merge migration PR；
+6. 若提前进行了非 Schema 设计（调查、测试设计、不触碰 schema/migration 的代码），可并行进行；真正创建 migration 时必须重新从最新 main 开始。
+
+每个 Schema PR 必须报告并持久化：
+
+```text
+PREVIOUS_MAIN
+PREVIOUS_MIGRATION_TIP
+NEW_MIGRATION_ID
+NEW_MIGRATION_CHECKSUM
+MIGRATION_STATUS
+NEXT_ALLOWED_WORKSTREAM
+```
+
+每个 Schema PR 必须执行并持久化：
+
+```text
+prisma migrate status
+clean database apply
+current snapshot apply
+second deploy no-op
+migration history consistency
+```
+
+### 15.2 并行/串行声明
+
+并行关系（仅限 §15.1 定义的非 schema 工作）：
+
+```text
+PARALLEL_WORKSTREAMS (non-schema only) =
 [证据 执行 || 身份 执行],
 [订阅 执行 || 状态 执行]
 ```
 
-串行依赖：
+串行依赖（逻辑 + migration merge chain）：
 
 ```text
 SERIAL_DEPENDENCIES =
-基座 → 身份 → 状态 → 评审 → 定稿 → 删除
-基座 → 身份 → 订阅
-基座 → 证据 → 删除
+基座 → 证据 → 身份 → 订阅 → 状态 → 评审 → 定稿 → 删除
+（migration merge chain 顺序；逻辑依赖基座 → 身份 → 状态 → 评审 → 定稿 → 删除、
+  基座 → 身份 → 订阅、基座 → 证据 → 删除 均被该线性链满足）
 ```
 
 - Revision 基础完成前不得开始评审。
 - Review 基础完成前不得开始定稿。
 - 删除中的 Review response invalidation 和 immutable Finalization preservation 依赖评审与定稿结构，因此删除必须最后。
+- `PARALLEL_WORKSTREAMS` 仅表示逻辑依赖上的可并行调研与非 schema 产物准备；触及 schema/migration 的 PR 一律走 §15.1 线性链。
 
 ---
 
@@ -1255,6 +1816,10 @@ SERIAL_DEPENDENCIES =
 ```text
 RECOMMENDED_FIRST_IMPLEMENTATION_TASK =
 基座 执行
+
+BASE_TASK_ALLOWED_TO_START =
+NO
+（本 PR 通过重新独立审计、disposition 变为 adopted 并合入 main 前不得启动）
 ```
 
 范围严格限制为：
@@ -1329,14 +1894,16 @@ ROLLBACK_REFERENCE
 
 | WORKSTREAM | CONTRACT_IDS | APPLY / ROLLBACK / OLD APP | EMPTY / NO BF / NO DUAL WRITE | CONSTRAINT TEST | LOCK / TOOLING / SUITE | FUTURE EVIDENCE PATH |
 |---|---|---|---|---|---|---|
-| 基座 | MIG-001,004,005 | clean+snapshot apply；old app start；app rollback；schema retained | 五表均 0；旧表 hash 相同 | invalid classification/status；duplicate rerun/check/source ref rejected | CREATE TABLE locks；Prisma generate/typecheck/full tests | `docs/investigations/evidence/additive-storage/base/` |
-| 证据 | ID-005,MIG-004,005,DELETE-003 | Audit apply；旧 app不写表；回退后表保留 | Audit 0；无 stderr→DB dual write | Audit UPDATE/DELETE/TRUNCATE rejected；payload boundaries | trigger/grant catalog；lock duration | `.../audit/` |
-| 身份 | ID-001..005,AUTHZ-002..004 | nullable columns/FK apply；旧 app CRUD suite；rollback app | 所有新增 actor 列 NULL；Alias 0 | invalid FK rejected on explicit test row；alias reassignment rejected | ADD COLUMN filenode unchanged；NOT VALID/VALIDATE observations | `.../identity/` |
-| 订阅 | AUTHZ-005,REVIEW-001,MIG-002 | tables apply；旧 awareness suite unchanged | 六表 0；Participant 不复制 | second active Watch rejected；ended intervals allowed；Read unknown/known invalid shapes rejected | partial indexes catalog；Prisma types | `.../subscription/` |
-| 状态 | AUTHZ-001,006,LIFE-001..005 | nullable lifecycle+Revision apply；旧 status behavior unchanged | Revision 0；currentRevision/visibility NULL | invalid state/revision rejected；jump/decrease/clear rejected | Thread ADD COLUMN lock；composite FK catalog | `.../lifecycle/` |
-| 评审 | REVIEW-001..007 | Review tables apply；旧 readiness tests unchanged | Requirement/Resolution 0；历史 reviewer 不导入 | duplicate req；response+waiver conflict；empty reason；mismatched actor/thread/revision；DELETE req rejected | trigger/partial index evidence；negative SQL tests | `.../review/` |
-| 定稿 | FINAL-001..005,MIG-003 | Finalization apply；旧 Outcome/resolve suite unchanged | Finalization 0；legacy Outcome authorityKind NULL | duplicate revision/key；empty key/summary；UPDATE/DELETE rejected | failure-safe migration；Prisma generate/typecheck | `.../finalization/` |
-| 删除 | DELETE-001..003,LIFE-005,REVIEW-007 | Tombstones apply；旧 deletedAt/status behavior unchanged | Tombstones 0；不补 deleted rows | empty reason rejected；bad actor/target FK；mutation rejected | trigger/grant catalog；full report/search suite | `.../deletion/` |
+| 基座 | MIG-001,004,005 | clean+snapshot apply；old app start；app rollback；schema retained | 五表均 0；旧表 hash 相同 | invalid classification/status/category/result rejected；ambiguous+selected rejected；duplicate rerun_identity/attempt rejected；sealed/terminal run UPDATE/DELETE rejected；非法 status 转移 rejected；identity 列改写 rejected | CREATE TABLE locks；Prisma generate/typecheck/full tests | `docs/investigations/evidence/additive-storage/base/` |
+| 证据 | ID-005,MIG-004,005,DELETE-003 | Audit apply；旧 app不写表；回退后表保留 | Audit 0；无 stderr→DB dual write | Audit UPDATE/DELETE/TRUNCATE rejected（trigger+grant 双验证）；payload boundaries；invalid provenance rejected | trigger/grant catalog；lock duration | `.../audit/` |
+| 身份 | ID-001..005,AUTHZ-002..004 | nullable columns/FK apply；旧 app CRUD suite；rollback app | 所有新增 actor 列 NULL；Alias 0 | invalid FK rejected on explicit test row；alias reassignment rejected；invalid namespace rejected | ADD COLUMN filenode unchanged；NOT VALID/VALIDATE observations | `.../identity/` |
+| 订阅 | AUTHZ-005,REVIEW-001,MIG-002 | tables apply；旧 awareness suite unchanged | 六表 0；Participant 不复制 | second active Watch rejected；ended intervals allowed；Read unknown/known invalid shapes rejected；cursor 回退 rejected；invalid closed-set values rejected | partial indexes catalog；Prisma types | `.../subscription/` |
+| 状态 | AUTHZ-001,006,LIFE-001..005 | nullable lifecycle+Revision apply；旧 status behavior unchanged | Revision 0；currentRevision/visibility NULL | invalid state/revision rejected；jump/decrease/clear UPDATE rejected；revisions 跳号/前置 INSERT rejected；orphan pointer 被 composite FK 拒绝；initial revision 非 1 拒绝 | Thread ADD COLUMN lock；composite FK catalog；CIC invalid-index 演练 | `.../lifecycle/` |
+| 评审 | REVIEW-001..007 | Review tables apply；旧 readiness tests unchanged | Requirement/Resolution 0；历史 reviewer 不导入；invalidated_by 列无 FK 且全 NULL | duplicate req；response+waiver conflict；empty reason；mismatched actor/thread/revision；DELETE req rejected；waiver 重放返回原行（不 409）；无 tombstone 的 invalidation UPDATE 拒绝；单字段 invalidation 拒绝；并发 response+waiver 单胜 | trigger/partial index evidence；negative SQL tests | `.../review/` |
+| 定稿 | FINAL-001..005,MIG-003 | Finalization apply；旧 Outcome/resolve suite unchanged | Finalization 0；legacy Outcome authorityKind NULL | duplicate revision/key；empty key/summary；UPDATE/DELETE rejected；same key+different payload 409；same key+same hash 返回原行；canonical JSON key-order/Unicode NFC 等价返回原行；null/array 差异 409；different actor 409；stale revision 409；changed readiness 409；version mismatch 拒绝；hash 非 32 字节拒绝 | failure-safe migration；Prisma generate/typecheck | `.../finalization/` |
+| 删除 | DELETE-001..003,LIFE-005,REVIEW-007 | Tombstones apply；旧 deletedAt/status behavior unchanged | Tombstones 0；不补 deleted rows；staged FK VALIDATE 通过（全 NULL） | empty reason rejected；bad actor/target FK；mutation rejected；指向不存在 tombstone 的 invalidation 拒绝；`forum_invalidate_response` 成对失效成功且仅一次；message 不匹配拒绝 | trigger/grant catalog；full report/search suite | `.../deletion/` |
+
+每个 workstream 行同时适用 §15.1 串行 lineage 验收：报告 `PREVIOUS_MAIN / PREVIOUS_MIGRATION_TIP / NEW_MIGRATION_ID / NEW_MIGRATION_CHECKSUM / MIGRATION_STATUS / NEXT_ALLOWED_WORKSTREAM`，并执行 `prisma migrate status`、clean apply、current snapshot apply、second deploy no-op、migration history consistency。
 
 ### 17.3 DDL lock evidence
 
@@ -1354,8 +1921,8 @@ ROLLBACK_REFERENCE
 - CIC 是否生成 invalid index
 
 ```text
-DDL_OPERATIONS_ANALYZED = 18
-ROLLBACK_OPERATIONS_DEFINED = 18
+DDL_OPERATIONS_ANALYZED = 20
+ROLLBACK_OPERATIONS_DEFINED = 20
 ACCEPTANCE_EVIDENCE_PLAN = COMPLETE
 ```
 
@@ -1494,16 +2061,16 @@ ForumReport.handledByPrincipalId,
 ForumReaction.actorPrincipalId
 
 RAW_SQL_CONSTRAINTS_REQUIRED =
-27
+74
 
 PRISMA_ONLY_CONSTRAINTS =
-75
+64
 
 DDL_OPERATIONS_ANALYZED =
-18
+20
 
 ROLLBACK_OPERATIONS_DEFINED =
-18
+20
 
 IMPLEMENTATION_WORKSTREAMS =
 基座 执行,
@@ -1515,14 +2082,28 @@ IMPLEMENTATION_WORKSTREAMS =
 定稿 执行,
 删除 执行
 
-PARALLEL_WORKSTREAMS =
+PARALLEL_WORKSTREAMS (non-schema only) =
 [证据 执行 || 身份 执行],
 [订阅 执行 || 状态 执行]
 
+PARALLEL_INVESTIGATION_ALLOWED =
+YES
+
+PARALLEL_NON_SCHEMA_AUTHORING_ALLOWED =
+YES
+
+PARALLEL_SCHEMA_AUTHORING_ALLOWED =
+NO
+
+PARALLEL_MERGE_ALLOWED =
+NO
+
+MIGRATION_LINEAGE =
+SERIAL
+
 SERIAL_DEPENDENCIES =
-基座 → 身份 → 状态 → 评审 → 定稿 → 删除;
-基座 → 身份 → 订阅;
-基座 → 证据 → 删除
+基座 → 证据 → 身份 → 订阅 → 状态 → 评审 → 定稿 → 删除
+（migration merge chain；逻辑依赖均被满足）
 
 RECOMMENDED_FIRST_IMPLEMENTATION_TASK =
 基座 执行
@@ -1550,6 +2131,34 @@ OWNER_DECISIONS_REQUIRED =
 
 STORAGE_DESIGN_STATUS =
 READY
+
+AMENDMENT_REVIEWER =
+AF-STORAGE-REAUDIT-R1
+
+AMENDMENT_PRIOR_HEAD =
+d69c705009fff633f4d3e57062f64755a5027c62
+
+AMENDMENT_SCOPE =
+DOCS_ONLY_DESIGN_AMENDMENT
+
+B_REV_001_AMENDED = YES
+B_FK_001_AMENDED = YES
+B_IDEMP_001_AMENDED = YES
+B_MODEL_001_AMENDED = YES
+B_SQL_001_AMENDED = YES
+B_LINEAGE_001_AMENDED = YES
+B_RW_001_AMENDED = YES
+
+RESPONSE_WAIVER_EXCLUSION_AMENDED = YES
+
+B_LINK_001 = NOT_A_BLOCKER
+STABLE_LINK_REVIEW = PASS
+
+OPTION_C_POLICY_CHANGED = NO
+QUARANTINE_POLICY_CHANGED = NO
+STABLE_LINKS_CHANGED = NO
+
+FRESH_INDEPENDENT_REVIEW_REQUIRED = YES
 
 REPORT_ID =
 INV-AGENT-FORUM-ADDITIVE-STORAGE-DESIGN-V1
