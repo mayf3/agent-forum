@@ -12,10 +12,13 @@ OWNER =
 mayf3
 
 DISPOSITION =
-open
+adopted
 
 INVESTIGATION_RESULT =
-ready_for_independent_review
+independent_review_accepted
+
+CLOSED_AT =
+2026-08-22T06:20:12Z
 
 PRIMARY_GOVERNING_SPEC =
 AGENT_FORUM_CORE_INVARIANTS_V1
@@ -1853,10 +1856,25 @@ SERIAL_DEPENDENCIES =
 RECOMMENDED_FIRST_IMPLEMENTATION_TASK =
 基座 执行
 
-BASE_TASK_ALLOWED_TO_START =
+BASE_TASK_ALLOWED_BEFORE_MERGE =
 NO
-（本 PR 通过重新独立审计、disposition 变为 adopted 并合入 main 前不得启动）
+
+BASE_TASK_ALLOWED_AFTER_MERGE =
+YES
 ```
+
+条件式门禁（精确含义）：
+
+- 只有本 adopted revision 合入 `main` 之后，基座 执行 才被允许；
+  merge 完成前一律禁止启动。
+- 新任务必须从包含本 PR merge commit 的最新 `main` 创建全新独立 worktree，
+  不得复用任何归档前 worktree。
+- 必须重新执行完整 PREFLIGHT。
+- 只能实施 Phase 2 additive storage 范围（基座 执行 的五个
+  migration evidence 模型及其 PK/FK/CHECK/INDEX 与 migration
+  apply/rollback/old-app compatibility tests）。
+- backfill、dual-read、dual-write、authority switch、cutover 和 cleanup
+  仍然禁止。
 
 范围严格限制为：
 
@@ -2197,7 +2215,28 @@ OPTION_C_POLICY_CHANGED = NO
 QUARANTINE_POLICY_CHANGED = NO
 STABLE_LINKS_CHANGED = NO
 
-FRESH_INDEPENDENT_REVIEW_REQUIRED = YES
+FRESH_INDEPENDENT_REVIEW_REQUIRED = NO
+
+FINAL_INDEPENDENT_REVIEWER =
+AF-STORAGE-FINAL-INDEP-REVIEW-R1
+
+FINAL_REVIEWED_HEAD =
+a36e29b614e1183c68f61520ed5f1534650cf228
+
+FINAL_INDEPENDENT_REVIEW_RESULT =
+ACCEPT
+
+READY_TO_MARK_ADOPTED =
+YES
+
+ARCHIVE_TRANSACTION_ALLOWED =
+YES
+
+NEW_BLOCKERS =
+0
+
+BLOCKERS =
+NONE
 
 REPORT_ID =
 INV-AGENT-FORUM-ADDITIVE-STORAGE-DESIGN-V1
@@ -2239,7 +2278,10 @@ CUTOVER_EXECUTED = NO
 DEPLOYMENT_CHANGED = NO
 
 NEXT_TASK =
-存档 执行
+基座 执行
+
+NEXT_TASK_ALLOWED_ONLY_AFTER_MERGE =
+YES
 ```
 
 ## Stable links
