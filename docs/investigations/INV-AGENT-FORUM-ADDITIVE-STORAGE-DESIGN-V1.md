@@ -601,7 +601,32 @@ FOR UPDATE Requirement
   1. equality CHECK 阻止无 tombstone 的单字段失效；
   2. staged FK（E/F.1）要求 tombstone 行真实存在；
   3. `forum_review_resolutions_invalidation_guard`（BEFORE UPDATE trigger，registry SQL-058/059）拒绝应用 role 直接 UPDATE invalidation 两列；
-  4. 唯一合法路径是 SECURITY DEFINER 函数 `forum_invalidate_response(resolution_id, tombstone_id)`（registry SQL-074），由删除事务调用，校验 tombstone 与 response 的 message 一致后成对更新，并写 `ForumAuditEvent`。
+  4. 唯一合法路径是 SECURITY DEFINER 函数 `public.forum_invalidate_response(resolution_id, tombstone_id)`（registry SQL-074，B-SECDEF-001 加固），由删除事务调用，校验 tombstone 与 response 的 message 一致后成对更新，并写 `public.forum_audit_events`。
+
+SECURITY DEFINER 安全边界（B-SECDEF-001 冻结）：
+
+```text
+SECURITY DEFINER path is safe only with:
+fixed search_path (SET search_path = pg_catalog, public)
++ schema-qualified objects (public.forum_review_resolutions /
+  public.forum_message_tombstones / public.forum_audit_events)
++ PUBLIC EXECUTE revoked (REVOKE ALL ON FUNCTION ... FROM PUBLIC)
++ explicit app-role grant (GRANT EXECUTE ... TO forum_app)
++ separate function owner
+```
+
+函数 owner 边界：
+
+```text
+FUNCTION_OWNER != forum_app
+FUNCTION_OWNER = dedicated non-login schema owner
+（实际角色名称在 删除 执行 中绑定，本设计只冻结约束）
+- owner 不是应用运行角色；
+- forum_app 不具备 ALTER FUNCTION / ownership；
+- superuser/owner 可以绕过权限，因此 Acceptance 必须记录
+  真实 owner 和 grants。
+```
+
 - 负向测试：无 tombstone 的 invalidation UPDATE 拒绝；普通 UPDATE 路径设置 `invalidated_at` 拒绝；经 `forum_invalidate_response` 的成对更新成功且只成功一次。
 
 ##### E/F.4 semantic_key 定义（B-RW-001）
@@ -1306,8 +1331,8 @@ ADD CONSTRAINT forum_migration_field_decisions_classification_ck CHECK (
   classification IN ('deterministic','ambiguous','unprovable')
 ),
 ADD CONSTRAINT forum_migration_field_decisions_selected_ck CHECK (
-  classification <> 'deterministic' AND selected_value_safe IS NOT NULL
-  OR classification = 'deterministic'
+  classification = 'deterministic'
+  OR selected_value_safe IS NULL
 );
 
 ALTER TABLE forum_migration_quarantines
@@ -1323,6 +1348,17 @@ ALTER TABLE forum_migration_validation_results
 ADD CONSTRAINT forum_migration_validation_results_result_ck CHECK (
   result IN ('pass','fail','inconclusive')
 );
+```
+
+`forum_migration_field_decisions_selected_ck` 真值表（B-CHK-001 冻结验收口径）：
+
+```text
+deterministic + NULL       = ACCEPT
+deterministic + non-NULL   = ACCEPT
+ambiguous + NULL           = ACCEPT
+ambiguous + non-NULL       = REJECT
+unprovable + NULL          = ACCEPT
+unprovable + non-NULL      = REJECT
 ```
 
 #### MigrationRun sealed guard（B-MODEL-001）
@@ -1420,7 +1456,7 @@ PRISMA_ONLY_CONSTRAINTS = 64
 | SQL-002 | forum_migration_runs_attempt_pos_ck | 基座 | CHECK | forum_migration_runs | attempt 正整数 | `... ADD CONSTRAINT forum_migration_runs_attempt_pos_ck CHECK (attempt > 0)` | TX | NO | 1 | 表已建 | pg_constraint 同名 | attempt<=0 INSERT 拒绝 | 保留 | `.../base/` |
 | SQL-003 | forum_migration_legacy_evidence_classification_ck | 基座 | CHECK | forum_migration_legacy_evidence | classification closed set | `... CHECK (classification IN ('deterministic','ambiguous','unprovable'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 classification 拒绝 | 保留 | `.../base/` |
 | SQL-004 | forum_migration_field_decisions_classification_ck | 基座 | CHECK | forum_migration_field_decisions | classification closed set | `... CHECK (classification IN ('deterministic','ambiguous','unprovable'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 classification 拒绝 | 保留 | `.../base/` |
-| SQL-005 | forum_migration_field_decisions_selected_ck | 基座 | CHECK | forum_migration_field_decisions | 非 deterministic 时 selected 必须 NULL | `... CHECK (classification <> 'deterministic' AND selected_value_safe IS NOT NULL OR classification = 'deterministic')` | TX | NO | 1 | SQL-004 | pg_constraint | ambiguous+selected 拒绝 | 保留 | `.../base/` |
+| SQL-005 | forum_migration_field_decisions_selected_ck | 基座 | CHECK | forum_migration_field_decisions | 非 deterministic 时 selected 必须 NULL | `... CHECK (classification = 'deterministic' OR selected_value_safe IS NULL)`（真值表见 §9.1，B-CHK-001） | TX | NO | 1 | SQL-004 | pg_constraint | ambiguous+selected 拒绝；ambiguous+NULL 接受；unprovable+selected 拒绝；unprovable+NULL 接受 | 保留 | `.../base/` |
 | SQL-006 | forum_migration_quarantines_category_ck | 基座 | CHECK | forum_migration_quarantines | category closed set | `... CHECK (category IN ('participant_collision','unresolved_participant','archived_lifecycle_unknown','other'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 category 拒绝 | 保留 | `.../base/` |
 | SQL-007 | forum_migration_quarantines_status_ck | 基座 | CHECK | forum_migration_quarantines | status closed set | `... CHECK (status IN ('open','resolved'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 status 拒绝 | 保留 | `.../base/` |
 | SQL-008 | forum_migration_validation_results_result_ck | 基座 | CHECK | forum_migration_validation_results | result closed set | `... CHECK (result IN ('pass','fail','inconclusive'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 result 拒绝 | 保留 | `.../base/` |
@@ -1524,7 +1560,7 @@ PRISMA_ONLY_CONSTRAINTS = 64
 | SQL-071 | forum_thread_tombstones_append_only_tg | 删除 | TRIGGER | forum_thread_tombstones | append-only | `CREATE TRIGGER forum_thread_tombstones_append_only_tg BEFORE UPDATE OR DELETE ON forum_thread_tombstones FOR EACH ROW EXECUTE FUNCTION forum_forbid_mutation()` | TX | NO | 2 | SQL-009 | pg_trigger 同名 | UPDATE/DELETE 拒绝 | 保留 | `.../deletion/` |
 | SQL-072 | forum_message_tombstones_append_only_tg | 删除 | TRIGGER | forum_message_tombstones | append-only | 同 SQL-071 形式 | TX | NO | 2 | SQL-009 | pg_trigger 同名 | UPDATE/DELETE 拒绝 | 保留 | `.../deletion/` |
 | SQL-073 | forum_review_resolutions_invalidated_by_fk | 删除 | FK NOT VALID (staged) | forum_review_resolutions | staged tombstone FK（B-FK-001） | `ALTER TABLE forum_review_resolutions ADD CONSTRAINT forum_review_resolutions_invalidated_by_fk FOREIGN KEY (invalidated_by_message_tombstone_id) REFERENCES forum_message_tombstones(message_id) NOT VALID` → `VALIDATE CONSTRAINT`（DDL D20） | TX；VALIDATE 独立 | 部分 | 3 | D13、SQL-070 | pg_constraint 同名 + convalidated | 指向不存在 tombstone 拒绝 | 保留；VALIDATE 失败修复数据后重验（D17） | `.../deletion/` |
-| SQL-074 | forum_invalidate_response (function) | 删除 | FUNCTION (SECURITY DEFINER) | forum_review_resolutions | 唯一 invalidation 路径 | `CREATE FUNCTION forum_invalidate_response(p_resolution_id uuid, p_tombstone_id uuid) RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$ ... 校验 tombstone.message_id = resolution.message_id 且两者当前未失效，成对 UPDATE，写 forum_audit_events ... $$`；`GRANT EXECUTE ON FUNCTION forum_invalidate_response TO forum_app` | 调用方在删除事务内 | NO | 4 | SQL-052/053/073 | pg_proc 同名 | message 不匹配拒绝；二次失效拒绝 | 保留 | `.../deletion/` |
+| SQL-074 | forum_invalidate_response (function) | 删除 | FUNCTION (SECURITY DEFINER) | forum_review_resolutions | 唯一 invalidation 路径（B-SECDEF-001 加固） | `CREATE OR REPLACE FUNCTION public.forum_invalidate_response(resolution_id uuid, tombstone_id uuid) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$ BEGIN -- 校验 public.forum_message_tombstones.message_id = public.forum_review_resolutions.message_id 且两者当前未失效；成对 UPDATE public.forum_review_resolutions(invalidated_at, invalidated_by_message_tombstone_id)；INSERT public.forum_audit_events；全部对象 schema-qualified END $$`；`REVOKE ALL ON FUNCTION public.forum_invalidate_response(uuid, uuid) FROM PUBLIC`；`GRANT EXECUTE ON FUNCTION public.forum_invalidate_response(uuid, uuid) TO forum_app` | 调用方在删除事务内 | NO | 4 | SQL-052/053/073 | `pg_proc.prosecdef = true`；`pg_proc.proconfig` 含 `search_path=pg_catalog, public`；`pg_get_userbyid(pg_proc.proowner) <> 'forum_app'`；函数 ACL 不向 PUBLIC 提供 EXECUTE；forum_app 拥有 EXECUTE | message 不匹配拒绝；二次失效拒绝；非 forum_app 角色调用返回 42501；篡改 caller search_path 后调用仍访问固定 public schema 对象；普通 UPDATE 仍不能直接 invalidate response | 保留；owner/grants 漂移在 Acceptance 记录真实 owner 与 grants 后修复（owner 必须保持非 forum_app 的 dedicated non-login schema owner） | `.../deletion/` |
 
 Registry 计数（逐行可加和）：
 
@@ -1894,14 +1930,14 @@ ROLLBACK_REFERENCE
 
 | WORKSTREAM | CONTRACT_IDS | APPLY / ROLLBACK / OLD APP | EMPTY / NO BF / NO DUAL WRITE | CONSTRAINT TEST | LOCK / TOOLING / SUITE | FUTURE EVIDENCE PATH |
 |---|---|---|---|---|---|---|
-| 基座 | MIG-001,004,005 | clean+snapshot apply；old app start；app rollback；schema retained | 五表均 0；旧表 hash 相同 | invalid classification/status/category/result rejected；ambiguous+selected rejected；duplicate rerun_identity/attempt rejected；sealed/terminal run UPDATE/DELETE rejected；非法 status 转移 rejected；identity 列改写 rejected | CREATE TABLE locks；Prisma generate/typecheck/full tests | `docs/investigations/evidence/additive-storage/base/` |
+| 基座 | MIG-001,004,005 | clean+snapshot apply；old app start；app rollback；schema retained | 五表均 0；旧表 hash 相同 | invalid classification/status/category/result rejected；selected_ck 真值表六格全验（deterministic+NULL/non-NULL ACCEPT；ambiguous+NULL ACCEPT、ambiguous+selected REJECT；unprovable+NULL ACCEPT、unprovable+selected REJECT）；duplicate rerun_identity/attempt rejected；sealed/terminal run UPDATE/DELETE rejected；非法 status 转移 rejected；identity 列改写 rejected | CREATE TABLE locks；Prisma generate/typecheck/full tests | `docs/investigations/evidence/additive-storage/base/` |
 | 证据 | ID-005,MIG-004,005,DELETE-003 | Audit apply；旧 app不写表；回退后表保留 | Audit 0；无 stderr→DB dual write | Audit UPDATE/DELETE/TRUNCATE rejected（trigger+grant 双验证）；payload boundaries；invalid provenance rejected | trigger/grant catalog；lock duration | `.../audit/` |
 | 身份 | ID-001..005,AUTHZ-002..004 | nullable columns/FK apply；旧 app CRUD suite；rollback app | 所有新增 actor 列 NULL；Alias 0 | invalid FK rejected on explicit test row；alias reassignment rejected；invalid namespace rejected | ADD COLUMN filenode unchanged；NOT VALID/VALIDATE observations | `.../identity/` |
 | 订阅 | AUTHZ-005,REVIEW-001,MIG-002 | tables apply；旧 awareness suite unchanged | 六表 0；Participant 不复制 | second active Watch rejected；ended intervals allowed；Read unknown/known invalid shapes rejected；cursor 回退 rejected；invalid closed-set values rejected | partial indexes catalog；Prisma types | `.../subscription/` |
 | 状态 | AUTHZ-001,006,LIFE-001..005 | nullable lifecycle+Revision apply；旧 status behavior unchanged | Revision 0；currentRevision/visibility NULL | invalid state/revision rejected；jump/decrease/clear UPDATE rejected；revisions 跳号/前置 INSERT rejected；orphan pointer 被 composite FK 拒绝；initial revision 非 1 拒绝 | Thread ADD COLUMN lock；composite FK catalog；CIC invalid-index 演练 | `.../lifecycle/` |
 | 评审 | REVIEW-001..007 | Review tables apply；旧 readiness tests unchanged | Requirement/Resolution 0；历史 reviewer 不导入；invalidated_by 列无 FK 且全 NULL | duplicate req；response+waiver conflict；empty reason；mismatched actor/thread/revision；DELETE req rejected；waiver 重放返回原行（不 409）；无 tombstone 的 invalidation UPDATE 拒绝；单字段 invalidation 拒绝；并发 response+waiver 单胜 | trigger/partial index evidence；negative SQL tests | `.../review/` |
 | 定稿 | FINAL-001..005,MIG-003 | Finalization apply；旧 Outcome/resolve suite unchanged | Finalization 0；legacy Outcome authorityKind NULL | duplicate revision/key；empty key/summary；UPDATE/DELETE rejected；same key+different payload 409；same key+same hash 返回原行；canonical JSON key-order/Unicode NFC 等价返回原行；null/array 差异 409；different actor 409；stale revision 409；changed readiness 409；version mismatch 拒绝；hash 非 32 字节拒绝 | failure-safe migration；Prisma generate/typecheck | `.../finalization/` |
-| 删除 | DELETE-001..003,LIFE-005,REVIEW-007 | Tombstones apply；旧 deletedAt/status behavior unchanged | Tombstones 0；不补 deleted rows；staged FK VALIDATE 通过（全 NULL） | empty reason rejected；bad actor/target FK；mutation rejected；指向不存在 tombstone 的 invalidation 拒绝；`forum_invalidate_response` 成对失效成功且仅一次；message 不匹配拒绝 | trigger/grant catalog；full report/search suite | `.../deletion/` |
+| 删除 | DELETE-001..003,LIFE-005,REVIEW-007 | Tombstones apply；旧 deletedAt/status behavior unchanged | Tombstones 0；不补 deleted rows；staged FK VALIDATE 通过（全 NULL） | empty reason rejected；bad actor/target FK；mutation rejected；指向不存在 tombstone 的 invalidation 拒绝；`forum_invalidate_response` 成对失效成功且仅一次；message 不匹配拒绝；非 forum_app 角色调用函数返回 42501；修改 caller search_path 后调用仍访问固定 public schema 对象；PUBLIC 不具有 EXECUTE；forum_app 具有 EXECUTE；function owner 不是 forum_app；普通 UPDATE 仍不能直接 invalidated response | trigger/grant catalog；full report/search suite | `.../deletion/` |
 
 每个 workstream 行同时适用 §15.1 串行 lineage 验收：报告 `PREVIOUS_MAIN / PREVIOUS_MIGRATION_TIP / NEW_MIGRATION_ID / NEW_MIGRATION_CHECKSUM / MIGRATION_STATUS / NEXT_ALLOWED_WORKSTREAM`，并执行 `prisma migrate status`、clean apply、current snapshot apply、second deploy no-op、migration history consistency。
 
@@ -2133,10 +2169,10 @@ STORAGE_DESIGN_STATUS =
 READY
 
 AMENDMENT_REVIEWER =
-AF-STORAGE-REAUDIT-R1
+AF-STORAGE-REAUDIT-R1; AF-STORAGE-AMEND-REAUDIT-R1
 
 AMENDMENT_PRIOR_HEAD =
-d69c705009fff633f4d3e57062f64755a5027c62
+d69c705009fff633f4d3e57062f64755a5027c62; d44509c9731c31b92e72901f8ddd5768d383caaa
 
 AMENDMENT_SCOPE =
 DOCS_ONLY_DESIGN_AMENDMENT
@@ -2148,6 +2184,9 @@ B_MODEL_001_AMENDED = YES
 B_SQL_001_AMENDED = YES
 B_LINEAGE_001_AMENDED = YES
 B_RW_001_AMENDED = YES
+
+B_CHK_001_AMENDED = YES
+B_SECDEF_001_AMENDED = YES
 
 RESPONSE_WAIVER_EXCLUSION_AMENDED = YES
 
