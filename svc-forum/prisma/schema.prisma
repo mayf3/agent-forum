@@ -176,6 +176,9 @@ model ForumPrincipal {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
+  candidateMigrationEvidence   MigrationLegacyEvidence[] @relation("MigrationEvidenceCandidatePrincipal")
+  resolvedMigrationQuarantines MigrationQuarantine[]     @relation("MigrationQuarantineResolvedByPrincipal")
+
   @@index([status])
   @@index([principalType])
   @@map("forum_principals")
@@ -231,4 +234,104 @@ model ForumReaction {
   @@index([messageId])
   @@index([threadId])
   @@map("forum_reactions")
+}
+
+model MigrationRun {
+  id                   String    @id @default(uuid()) @db.Uuid
+  sourceCommit         String    @map("source_commit")
+  sourceSchemaRevision String    @map("source_schema_revision")
+  targetCommit         String    @map("target_commit")
+  targetSchemaRevision String    @map("target_schema_revision")
+  environment          String
+  datasetId            String    @map("dataset_id")
+  snapshotAt           DateTime  @map("snapshot_at") @db.Timestamptz(3)
+  policyId             String    @map("policy_id")
+  phase                String
+  runIdentityKey       String    @map("run_identity_key")
+  attempt              Int
+  status               String
+  startedAt            DateTime  @map("started_at") @db.Timestamptz(3)
+  finishedAt           DateTime? @map("finished_at") @db.Timestamptz(3)
+  rollbackReference    String?   @map("rollback_reference")
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  legacyEvidence    MigrationLegacyEvidence[]
+  validationResults MigrationValidationResult[]
+
+  @@unique([runIdentityKey, attempt])
+  @@map("forum_migration_runs")
+}
+
+model MigrationLegacyEvidence {
+  id                   String   @id @default(uuid()) @db.Uuid
+  migrationRunId       String   @map("migration_run_id") @db.Uuid
+  sourceTable          String   @map("source_table")
+  sourceRowReference   String   @map("source_row_reference")
+  sourceRowHash        Bytes    @map("source_row_hash") @db.ByteA
+  sourceNamespace      String?  @map("source_namespace")
+  candidatePrincipalId String?  @map("candidate_principal_id") @db.Uuid
+  classification       String
+  safePayload          Json     @map("safe_payload")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  migrationRun       MigrationRun             @relation(fields: [migrationRunId], references: [id], onDelete: Restrict)
+  candidatePrincipal ForumPrincipal?          @relation("MigrationEvidenceCandidatePrincipal", fields: [candidatePrincipalId], references: [id], onDelete: Restrict)
+  fieldDecisions     MigrationFieldDecision[]
+  quarantine         MigrationQuarantine?
+
+  @@unique([migrationRunId, sourceTable, sourceRowReference])
+  @@map("forum_migration_legacy_evidence")
+}
+
+model MigrationFieldDecision {
+  id                String   @id @default(uuid()) @db.Uuid
+  legacyEvidenceId  String   @map("legacy_evidence_id") @db.Uuid
+  fieldName         String   @map("field_name")
+  classification    String
+  sourceValuesSafe  Json     @map("source_values_safe")
+  selectedValueSafe Json?    @map("selected_value_safe")
+  reasonCode        String   @map("reason_code")
+  decidedByPolicy   String   @map("decided_by_policy")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  legacyEvidence MigrationLegacyEvidence @relation(fields: [legacyEvidenceId], references: [id], onDelete: Restrict)
+
+  @@unique([legacyEvidenceId, fieldName])
+  @@map("forum_migration_field_decisions")
+}
+
+model MigrationQuarantine {
+  id                          String    @id @default(uuid()) @db.Uuid
+  legacyEvidenceId            String    @unique @map("legacy_evidence_id") @db.Uuid
+  category                    String
+  authorityEffect             String    @map("authority_effect")
+  status                      String
+  reasonCode                  String    @map("reason_code")
+  reclassificationRequirement String    @map("reclassification_requirement")
+  createdAt                   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  resolvedAt                  DateTime? @map("resolved_at") @db.Timestamptz(3)
+  resolvedByPrincipalId       String?   @map("resolved_by_principal_id") @db.Uuid
+
+  legacyEvidence      MigrationLegacyEvidence @relation(fields: [legacyEvidenceId], references: [id], onDelete: Restrict)
+  resolvedByPrincipal ForumPrincipal?         @relation("MigrationQuarantineResolvedByPrincipal", fields: [resolvedByPrincipalId], references: [id], onDelete: Restrict)
+
+  @@map("forum_migration_quarantines")
+}
+
+model MigrationValidationResult {
+  id                String   @id @default(uuid()) @db.Uuid
+  migrationRunId    String   @map("migration_run_id") @db.Uuid
+  checkId           String   @map("check_id")
+  contractId        String?  @map("contract_id")
+  required          Boolean
+  expected          Json
+  actual            Json
+  result            String
+  evidenceReference String   @map("evidence_reference")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  migrationRun MigrationRun @relation(fields: [migrationRunId], references: [id], onDelete: Restrict)
+
+  @@unique([migrationRunId, checkId])
+  @@map("forum_migration_validation_results")
 }
