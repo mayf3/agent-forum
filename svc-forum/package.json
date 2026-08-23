@@ -11,6 +11,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:migrate:dev": "prisma migrate dev",
+    "verify:migration-foundation": "node scripts/verify-migration-foundation.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
     "health-check": "bash ../scripts/arch-health-check.sh"
   },
