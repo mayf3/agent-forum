@@ -274,8 +274,8 @@ model MigrationLegacyEvidence {
   safePayload          Json     @map("safe_payload")
   createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  migrationRun       MigrationRun             @relation(fields: [migrationRunId], references: [id], onDelete: Restrict)
-  candidatePrincipal ForumPrincipal?          @relation("MigrationEvidenceCandidatePrincipal", fields: [candidatePrincipalId], references: [id], onDelete: Restrict)
+  migrationRun       MigrationRun             @relation(fields: [migrationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  candidatePrincipal ForumPrincipal?          @relation("MigrationEvidenceCandidatePrincipal", fields: [candidatePrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   fieldDecisions     MigrationFieldDecision[]
   quarantine         MigrationQuarantine?
 
@@ -294,7 +294,7 @@ model MigrationFieldDecision {
   decidedByPolicy   String   @map("decided_by_policy")
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  legacyEvidence MigrationLegacyEvidence @relation(fields: [legacyEvidenceId], references: [id], onDelete: Restrict)
+  legacyEvidence MigrationLegacyEvidence @relation(fields: [legacyEvidenceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([legacyEvidenceId, fieldName])
   @@map("forum_migration_field_decisions")
@@ -312,8 +312,8 @@ model MigrationQuarantine {
   resolvedAt                  DateTime? @map("resolved_at") @db.Timestamptz(3)
   resolvedByPrincipalId       String?   @map("resolved_by_principal_id") @db.Uuid
 
-  legacyEvidence      MigrationLegacyEvidence @relation(fields: [legacyEvidenceId], references: [id], onDelete: Restrict)
-  resolvedByPrincipal ForumPrincipal?         @relation("MigrationQuarantineResolvedByPrincipal", fields: [resolvedByPrincipalId], references: [id], onDelete: Restrict)
+  legacyEvidence      MigrationLegacyEvidence @relation(fields: [legacyEvidenceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  resolvedByPrincipal ForumPrincipal?         @relation("MigrationQuarantineResolvedByPrincipal", fields: [resolvedByPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@map("forum_migration_quarantines")
 }
@@ -330,7 +330,7 @@ model MigrationValidationResult {
   evidenceReference String   @map("evidence_reference")
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  migrationRun MigrationRun @relation(fields: [migrationRunId], references: [id], onDelete: Restrict)
+  migrationRun MigrationRun @relation(fields: [migrationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([migrationRunId, checkId])
   @@map("forum_migration_validation_results")

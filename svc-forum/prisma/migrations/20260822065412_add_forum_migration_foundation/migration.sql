@@ -100,22 +100,22 @@ CREATE UNIQUE INDEX "forum_migration_quarantines_legacy_evidence_id_key" ON "for
 CREATE UNIQUE INDEX "forum_migration_validation_results_migration_run_id_check_i_key" ON "forum_migration_validation_results"("migration_run_id", "check_id");
 
 -- AddForeignKey
-ALTER TABLE "forum_migration_legacy_evidence" ADD CONSTRAINT "forum_migration_legacy_evidence_migration_run_id_fkey" FOREIGN KEY ("migration_run_id") REFERENCES "forum_migration_runs"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "forum_migration_legacy_evidence" ADD CONSTRAINT "forum_migration_legacy_evidence_migration_run_id_fkey" FOREIGN KEY ("migration_run_id") REFERENCES "forum_migration_runs"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
-ALTER TABLE "forum_migration_legacy_evidence" ADD CONSTRAINT "forum_migration_legacy_evidence_candidate_principal_id_fkey" FOREIGN KEY ("candidate_principal_id") REFERENCES "forum_principals"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "forum_migration_legacy_evidence" ADD CONSTRAINT "forum_migration_legacy_evidence_candidate_principal_id_fkey" FOREIGN KEY ("candidate_principal_id") REFERENCES "forum_principals"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
-ALTER TABLE "forum_migration_field_decisions" ADD CONSTRAINT "forum_migration_field_decisions_legacy_evidence_id_fkey" FOREIGN KEY ("legacy_evidence_id") REFERENCES "forum_migration_legacy_evidence"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "forum_migration_field_decisions" ADD CONSTRAINT "forum_migration_field_decisions_legacy_evidence_id_fkey" FOREIGN KEY ("legacy_evidence_id") REFERENCES "forum_migration_legacy_evidence"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
-ALTER TABLE "forum_migration_quarantines" ADD CONSTRAINT "forum_migration_quarantines_legacy_evidence_id_fkey" FOREIGN KEY ("legacy_evidence_id") REFERENCES "forum_migration_legacy_evidence"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "forum_migration_quarantines" ADD CONSTRAINT "forum_migration_quarantines_legacy_evidence_id_fkey" FOREIGN KEY ("legacy_evidence_id") REFERENCES "forum_migration_legacy_evidence"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
-ALTER TABLE "forum_migration_quarantines" ADD CONSTRAINT "forum_migration_quarantines_resolved_by_principal_id_fkey" FOREIGN KEY ("resolved_by_principal_id") REFERENCES "forum_principals"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "forum_migration_quarantines" ADD CONSTRAINT "forum_migration_quarantines_resolved_by_principal_id_fkey" FOREIGN KEY ("resolved_by_principal_id") REFERENCES "forum_principals"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
-ALTER TABLE "forum_migration_validation_results" ADD CONSTRAINT "forum_migration_validation_results_migration_run_id_fkey" FOREIGN KEY ("migration_run_id") REFERENCES "forum_migration_runs"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "forum_migration_validation_results" ADD CONSTRAINT "forum_migration_validation_results_migration_run_id_fkey" FOREIGN KEY ("migration_run_id") REFERENCES "forum_migration_runs"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- SQL-001..SQL-008: migration foundation closed-set and shape constraints
 ALTER TABLE "forum_migration_runs"
