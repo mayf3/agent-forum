@@ -36,6 +36,7 @@ model ForumThread {
   snapshots    ForumContextSnapshot[]
   outcomes     ForumOutcome[]
   views        ForumThreadView[]
+  auditEvents  ForumAuditEvent[]
 
   @@index([status])
   @@index([type])
@@ -178,6 +179,7 @@ model ForumPrincipal {
 
   candidateMigrationEvidence   MigrationLegacyEvidence[] @relation("MigrationEvidenceCandidatePrincipal")
   resolvedMigrationQuarantines MigrationQuarantine[]     @relation("MigrationQuarantineResolvedByPrincipal")
+  auditEvents                  ForumAuditEvent[]
 
   @@index([status])
   @@index([principalType])
@@ -334,4 +336,39 @@ model MigrationValidationResult {
 
   @@unique([migrationRunId, checkId])
   @@map("forum_migration_validation_results")
+}
+
+// ─── Forum Audit Event (append-only evidence storage) ──────────────────────
+//
+// INV-AGENT-FORUM-ADDITIVE-STORAGE-DESIGN-V1 §8.3 K. Append-only: UPDATE and
+// DELETE are rejected by forum_audit_events_append_only_tg (SQL-016); the
+// forum_app role holds only SELECT/INSERT (SQL-017). actorPrincipalId may be
+// NULL only for system migration/constraint events, which must be explained
+// by provenance. authSubject/agentId/clientId are authentication-context
+// snapshots only: they grant no authority and never replace actorPrincipalId.
+// payload is bounded, allowlisted metadata only — never tokens, Authorization
+// headers, secrets, or full sensitive legacy rows. No runtime writer exists in
+// Phase 2; the table is created empty.
+
+model ForumAuditEvent {
+  eventId              String   @id @default(uuid()) @map("event_id") @db.Uuid
+  eventType            String   @map("event_type")
+  actorPrincipalId     String?  @map("actor_principal_id") @db.Uuid
+  authSubject          String?  @map("auth_subject")
+  agentId              String?  @map("agent_id")
+  clientId             String?  @map("client_id")
+  targetType           String   @map("target_type")
+  targetId             String?  @map("target_id") @db.Uuid
+  threadId             String?  @map("thread_id") @db.Uuid
+  revision             Int?
+  requestCorrelationId String?  @map("request_correlation_id")
+  idempotencyKey       String?  @map("idempotency_key")
+  payload              Json     @default("{}")
+  provenance           String
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  actorPrincipal ForumPrincipal? @relation(fields: [actorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  thread         ForumThread?    @relation(fields: [threadId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@map("forum_audit_events")
 }
