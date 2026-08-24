@@ -12,6 +12,7 @@
     "prisma:migrate": "prisma migrate deploy",
     "prisma:migrate:dev": "prisma migrate dev",
     "verify:migration-foundation": "node scripts/verify-migration-foundation.mjs",
+    "verify:audit-evidence-storage": "node scripts/verify-audit-evidence-storage.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
     "health-check": "bash ../scripts/arch-health-check.sh"
   },
