@@ -412,7 +412,8 @@ CONTRACTS_MAPPED = 36
 - UNIQUE：`(namespace,value)`
 - CHECK：namespace=`auth_subject|agent_id`
 - INDEX：`(principalId,namespace)`
-- Immutability：namespace/value/principal owner 不可改；只允许 `retiredAt NULL→timestamp`
+- Physical permanence：`(namespace,value)` 永久归属原 Principal；disable、retirement、rename 均不释放 alias；物理 `DELETE` 和表级 `TRUNCATE` 均拒绝，失败删除后不得向不同 Principal 重新插入同 alias
+- Immutability：`principalId`、`namespace`、`value`、`firstSeenAt`、`createdAt` 不可改；`retiredAt` 只允许 `NULL→timestamp`，既有 timestamp 不得清空或改值
 - Phase 2：0 行
 - BF：只接受 one-to-one proven aliases
 - Option C：unresolved 不插入；冲突进入 quarantine
@@ -1126,6 +1127,63 @@ Notification 是持久 unread discussion fact；是否 unread 由 ReadState 和 
 
 ### 9.1 Core SQL candidates
 
+#### Alias identity immutability and physical permanence
+
+SQL-019 keeps the stable function name and must branch on `TG_OP` before reading `NEW`, because `NEW` does not exist for `DELETE` or statement-level `TRUNCATE`:
+
+```sql
+CREATE OR REPLACE FUNCTION public.forum_alias_owner_immutable_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'principal alias rows are permanent'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF NEW.principal_id IS DISTINCT FROM OLD.principal_id
+     OR NEW.namespace IS DISTINCT FROM OLD.namespace
+     OR NEW.value IS DISTINCT FROM OLD.value
+     OR NEW.first_seen_at IS DISTINCT FROM OLD.first_seen_at
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'principal alias identity is immutable'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF OLD.retired_at IS NOT NULL
+     AND NEW.retired_at IS DISTINCT FROM OLD.retired_at THEN
+    RAISE EXCEPTION 'retired principal alias is immutable'
+      USING ERRCODE = '55000';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+```
+
+SQL-020 keeps its stable object name and covers row-level identity updates and physical deletes:
+
+```sql
+CREATE TRIGGER forum_alias_owner_immutable_guard_tg
+BEFORE UPDATE OR DELETE
+ON public.forum_principal_aliases
+FOR EACH ROW
+EXECUTE FUNCTION public.forum_alias_owner_immutable_guard();
+```
+
+SQL-075 is the separate statement-level `TRUNCATE` boundary; SQL-029 remains assigned to the Watch state CHECK and is not reused:
+
+```sql
+CREATE TRIGGER forum_alias_owner_immutable_guard_truncate_tg
+BEFORE TRUNCATE
+ON public.forum_principal_aliases
+FOR EACH STATEMENT
+EXECUTE FUNCTION public.forum_alias_owner_immutable_guard();
+```
+
+Allowed `retired_at` transitions are `NULL→NULL`, `NULL→timestamp`, and `timestamp→same timestamp`. `timestamp→NULL` and `timestamp→different timestamp` reject with `55000`. Physical `DELETE` and `TRUNCATE` reject with `55000`; after either failed attempt, the original `(namespace,value)` row remains and the existing unique constraint rejects reuse by another Principal with `23505`. Database-owner/superuser adversarial bypass is out of scope, but normal database operation paths fail closed through these triggers.
+
 #### Watch active interval
 
 ```sql
@@ -1434,18 +1492,18 @@ FROM forum_app;
 | Response message cross-row关系 | NO | YES | trigger + transaction |
 | Requirement/Resolution deferred一致性 | NO | YES | deferred constraint trigger |
 | append-only | NO | YES | trigger + grants |
-| immutable alias owner | NO | YES | update guard trigger |
+| immutable/permanent alias identity | NO | YES | UPDATE/DELETE row trigger + TRUNCATE statement trigger |
 | existing-table nullable FK | YES，但不可表达 `NOT VALID` | YES | `ADD CONSTRAINT ... NOT VALID` |
 | `CREATE INDEX CONCURRENTLY` | NO | YES | standalone migration SQL |
 
 计数口径（B-SQL-001 修订后，逐对象可加和，明细见 §9.3 registry）：
 
 ```text
-RAW_SQL_CONSTRAINTS_REQUIRED = 74
+RAW_SQL_CONSTRAINTS_REQUIRED = 75
 PRISMA_ONLY_CONSTRAINTS = 64
 ```
 
-`64` 为 candidate schema 中由 Prisma models/relations 表达的 PK、普通 UNIQUE 和普通 FK 声明总数（新增 17 表逐表可加和：Alias 3、Participation 5、Watch 4、ReadState 4、Resolution 5、Requirement 5、Revision 5、Finalization 2、ThreadTombstone 3、MessageTombstone 3、MigrationRun 1、LegacyEvidence 4、FieldDecision 3、Quarantine 4、ValidationResult 3、Mention 4、NotificationFact 6）；普通 non-unique indexes 不计入。`74` 为 §9.3 registry 逐行登记的 named CHECK、partial unique、named UNIQUE（finalization 两项因验收引用稳定物理名而走 raw）、trigger/constraint-trigger/function、`NOT VALID`/staged FK、CIC 与 grant 对象总数（基座 14、证据 3、身份 11、订阅 12、状态 8、评审 11、定稿 9、删除 6）。
+`64` 为 candidate schema 中由 Prisma models/relations 表达的 PK、普通 UNIQUE 和普通 FK 声明总数（新增 17 表逐表可加和：Alias 3、Participation 5、Watch 4、ReadState 4、Resolution 5、Requirement 5、Revision 5、Finalization 2、ThreadTombstone 3、MessageTombstone 3、MigrationRun 1、LegacyEvidence 4、FieldDecision 3、Quarantine 4、ValidationResult 3、Mention 4、NotificationFact 6）；普通 non-unique indexes 不计入。`75` 为 §9.3 registry 逐行登记的 named CHECK、partial unique、named UNIQUE（finalization 两项因验收引用稳定物理名而走 raw）、trigger/constraint-trigger/function、`NOT VALID`/staged FK、CIC 与 grant 对象总数（基座 14、证据 3、身份 12、订阅 12、状态 8、评审 11、定稿 9、删除 6）。SQL-075 属于既有 D16 functions/triggers/grants 类别，不新增 DDL phase。
 
 ### 9.3 Raw SQL object registry（B-SQL-001）
 
@@ -1478,13 +1536,13 @@ PRISMA_ONLY_CONSTRAINTS = 64
 | SQL-016 | forum_audit_events_append_only_tg | 证据 | TRIGGER | forum_audit_events | append-only | `CREATE TRIGGER forum_audit_events_append_only_tg BEFORE UPDATE OR DELETE ON forum_audit_events FOR EACH ROW EXECUTE FUNCTION forum_forbid_mutation()` | TX | NO | 2 | SQL-009 | pg_trigger 同名 | UPDATE/DELETE/TRUNCATE 拒绝 | 保留 | `.../audit/` |
 | SQL-017 | revoke-forum-app-audit-mutation | 证据 | GRANT/REVOKE | forum_audit_events | 应用 role 边界 | `REVOKE UPDATE, DELETE, TRUNCATE ON forum_audit_events FROM forum_app` | TX | NO | 3 | 表已建 | `SELECT NOT has_table_privilege('forum_app','forum_audit_events','UPDATE')` | forum_app UPDATE 以权限错误失败 | REVOKE 幂等重放；owner/superuser 例外记录 | `.../audit/` |
 
-#### 身份 执行（11 objects）
+#### 身份 执行（12 objects）
 
 | SQL_OBJECT_ID | STABLE_OBJECT_NAME | OWNING_WORKSTREAM | OBJECT_TYPE | TARGET_TABLE | PURPOSE | EXACT_SQL_OR_EXECUTABLE_PSEUDOSQL | TRANSACTION_MODE | PRISMA_EXPRESSIBLE | CREATION_ORDER | DEPENDENCIES | VALIDATION_QUERY | NEGATIVE_TEST | ROLLBACK_OR_FORWARD_REPAIR | EVIDENCE_PATH |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | SQL-018 | forum_principal_aliases_namespace_ck | 身份 | CHECK | forum_principal_aliases | namespace closed set | `... CHECK (namespace IN ('auth_subject','agent_id'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 namespace 拒绝 | 保留 | `.../identity/` |
-| SQL-019 | forum_alias_owner_immutable_guard (function) | 身份 | FUNCTION | — | alias owner 不可变 | `CREATE FUNCTION forum_alias_owner_immutable_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.principal_id <> OLD.principal_id OR NEW.namespace <> OLD.namespace OR NEW.value <> OLD.value OR (OLD.retired_at IS NOT NULL AND NEW.retired_at <> OLD.retired_at) THEN RAISE EXCEPTION 'alias identity immutable' USING ERRCODE='55000'; END IF; RETURN NEW; END $$` | TX | NO | 2 | — | pg_proc 同名 | owner/namespace/value 改写拒绝 | 保留 | `.../identity/` |
-| SQL-020 | forum_alias_owner_immutable_guard_tg | 身份 | TRIGGER | forum_principal_aliases | 绑定 immutability | `CREATE TRIGGER forum_alias_owner_immutable_guard_tg BEFORE UPDATE ON forum_principal_aliases FOR EACH ROW EXECUTE FUNCTION forum_alias_owner_immutable_guard()` | TX | NO | 3 | SQL-019 | pg_trigger 同名 | alias 重分配拒绝 | 保留 | `.../identity/` |
+| SQL-019 | forum_alias_owner_immutable_guard (function) | 身份 | FUNCTION | — | alias identity 不可变且物理永久 | `CREATE OR REPLACE FUNCTION public.forum_alias_owner_immutable_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF TG_OP IN ('DELETE', 'TRUNCATE') THEN RAISE EXCEPTION 'principal alias rows are permanent' USING ERRCODE='55000'; END IF; IF NEW.principal_id IS DISTINCT FROM OLD.principal_id OR NEW.namespace IS DISTINCT FROM OLD.namespace OR NEW.value IS DISTINCT FROM OLD.value OR NEW.first_seen_at IS DISTINCT FROM OLD.first_seen_at OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN RAISE EXCEPTION 'principal alias identity is immutable' USING ERRCODE='55000'; END IF; IF OLD.retired_at IS NOT NULL AND NEW.retired_at IS DISTINCT FROM OLD.retired_at THEN RAISE EXCEPTION 'retired principal alias is immutable' USING ERRCODE='55000'; END IF; RETURN NEW; END; $$`（全文见 §9.1） | TX | NO | 2 | — | `SELECT count(*)=1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname='forum_alias_owner_immutable_guard'` | identity fields 改写、retired_at 反向/二次改值、DELETE、TRUNCATE 均拒绝 55000 | 保留；trigger 故障时 D16 forward fix | `.../identity/` |
+| SQL-020 | forum_alias_owner_immutable_guard_tg | 身份 | TRIGGER | forum_principal_aliases | 绑定 row-level UPDATE/DELETE permanence | `CREATE TRIGGER forum_alias_owner_immutable_guard_tg BEFORE UPDATE OR DELETE ON public.forum_principal_aliases FOR EACH ROW EXECUTE FUNCTION public.forum_alias_owner_immutable_guard()` | TX | NO | 3 | SQL-019 | `SELECT count(*)=1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgname='forum_alias_owner_immutable_guard_tg' AND n.nspname='public' AND c.relname='forum_principal_aliases' AND p.proname='forum_alias_owner_immutable_guard' AND (t.tgtype & 1)=1 AND (t.tgtype & 2)=2 AND (t.tgtype & 8)=8 AND (t.tgtype & 16)=16 AND (t.tgtype & 32)=0 AND t.tgenabled<>'D'` | identity UPDATE 与 alias row DELETE 拒绝 55000 | 保留；D16 forward fix | `.../identity/` |
 | SQL-021 | forum_threads_creator_principal_fk | 身份 | FK NOT VALID | forum_threads | creator FK | `ALTER TABLE forum_threads ADD CONSTRAINT forum_threads_creator_principal_fk FOREIGN KEY (creator_principal_id) REFERENCES forum_principals(id) NOT VALID` | TX；D17 VALIDATE | 部分（NOT VALID 不可表达） | 4 | 列已加（D04） | pg_constraint 同名 + `convalidated` 翻转 | 非法 principal 引用拒绝（VALIDATE 后） | 保留 FK；DDL 失败由事务回滚（D06） | `.../identity/` |
 | SQL-022 | forum_messages_author_principal_fk | 身份 | FK NOT VALID | forum_messages | author FK | 同 SQL-021 形式，列 `author_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
 | SQL-023 | forum_thread_views_viewer_principal_fk | 身份 | FK NOT VALID | forum_thread_views | viewer FK | 同上，列 `viewer_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
@@ -1493,6 +1551,9 @@ PRISMA_ONLY_CONSTRAINTS = 64
 | SQL-026 | forum_reports_reporter_principal_fk | 身份 | FK NOT VALID | forum_reports | reporter FK | 同上，列 `reporter_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
 | SQL-027 | forum_reports_handled_by_principal_fk | 身份 | FK NOT VALID | forum_reports | moderator FK | 同上，列 `handled_by_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
 | SQL-028 | forum_reactions_actor_principal_fk | 身份 | FK NOT VALID | forum_reactions | reaction actor FK | 同上，列 `actor_principal_id` | TX；D17 VALIDATE | 部分 | 4 | D04 | pg_constraint | 同上 | 同 D06 | `.../identity/` |
+| SQL-075 | forum_alias_owner_immutable_guard_truncate_tg | 身份 | TRIGGER | forum_principal_aliases | statement-level TRUNCATE permanence | `CREATE TRIGGER forum_alias_owner_immutable_guard_truncate_tg BEFORE TRUNCATE ON public.forum_principal_aliases FOR EACH STATEMENT EXECUTE FUNCTION public.forum_alias_owner_immutable_guard()` | TX | NO | 3 | SQL-019 | `SELECT count(*)=1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE NOT t.tgisinternal AND t.tgname='forum_alias_owner_immutable_guard_truncate_tg' AND n.nspname='public' AND c.relname='forum_principal_aliases' AND t.tgfoid='public.forum_alias_owner_immutable_guard()'::regprocedure::oid AND (t.tgtype & 1)=0 AND (t.tgtype & 2)=2 AND (t.tgtype & 4)=0 AND (t.tgtype & 8)=0 AND (t.tgtype & 16)=0 AND (t.tgtype & 32)=32 AND t.tgenabled<>'D'` | `TRUNCATE public.forum_principal_aliases` 拒绝 55000；失败后原 alias 仍占位且不同 Principal 重插同 `(namespace,value)` 拒绝 23505 | 保留；D16 forward fix | `.../identity/` |
+
+SQL-075 是唯一新增 registry ID。SQL-001..SQL-074 不重编号、不复用；尤其 SQL-029 仍为 `forum_watch_subscriptions_state_ck`。
 
 #### 订阅 执行（12 objects）
 
@@ -1568,11 +1629,11 @@ PRISMA_ONLY_CONSTRAINTS = 64
 Registry 计数（逐行可加和）：
 
 ```text
-RAW_SQL_OBJECTS_TOTAL = 74
-基座 14 + 证据 3 + 身份 11 + 订阅 12 + 状态 8 + 评审 11 + 定稿 9 + 删除 6
+RAW_SQL_OBJECTS_TOTAL = 75
+基座 14 + 证据 3 + 身份 12 + 订阅 12 + 状态 8 + 评审 11 + 定稿 9 + 删除 6
 ```
 
-替代旧口径 `RAW_SQL_CONSTRAINTS_REQUIRED = 27 / PRISMA_ONLY_CONSTRAINTS = 75`：旧数字不可从文档推导复算，本轮按逐对象登记后重新计算为 74 / 64，未保留旧数字。
+替代旧口径 `RAW_SQL_CONSTRAINTS_REQUIRED = 27 / PRISMA_ONLY_CONSTRAINTS = 75`：旧数字不可从文档推导复算；B-SQL-001 首次逐对象登记为 74 / 64，本次 alias permanence 修订只新增 SQL-075，因此当前可复算为 75 / 64。
 
 ---
 
@@ -1595,7 +1656,7 @@ RAW_SQL_OBJECTS_TOTAL = 74
 | D13 | 创建 typed Tombstones | `CREATE TABLE` | 新 relation | 0 | 低 | 13 / TX-G |
 | D14 | 新空表普通 indexes | `CREATE INDEX` | SHARE lock，仅新空表；无业务写阻塞 | 0 | 可事务内 | 随各 create table |
 | D15 | Watch/Resolution partial unique | `CREATE UNIQUE INDEX ... WHERE` | SHARE lock，仅新空表 | 0 | 可事务内 | 随对应表 |
-| D16 | functions/triggers/grants | `CREATE FUNCTION/TRIGGER`, `REVOKE` | 新表短暂 SHARE ROW EXCLUSIVE/catalog lock；无 rewrite | 0 | 低；必须负向测试 | 独立 TX-H |
+| D16 | functions/triggers/grants | `CREATE FUNCTION/TRIGGER`, `REVOKE`；包含 SQL-019/020 及新增 SQL-075 alias UPDATE/DELETE/TRUNCATE guards | 新表短暂 SHARE ROW EXCLUSIVE/catalog lock；无 rewrite | 0 | 低；必须负向测试 UPDATE、DELETE、TRUNCATE 及删除失败后的 alias reuse | 独立 TX-H |
 | D17 | validate nullable FK/CHECK | `VALIDATE CONSTRAINT` | referencing table SHARE UPDATE EXCLUSIVE；heap scan；无 rewrite | 0–607 | 目标大表时耗时由行数/I/O决定 | 每约束独立 |
 | D18 | 现有表新增查询 index | `CREATE INDEX CONCURRENTLY` | 允许 DML；多阶段 scan/wait；无 rewrite | 0–607 | 失败可能留下 invalid index | standalone，无显式 transaction |
 | D19 | Thread currentRevision composite FK | `ALTER TABLE forum_threads ADD CONSTRAINT forum_threads_current_revision_fk FOREIGN KEY (id,current_revision) REFERENCES forum_thread_revisions(thread_id,revision) NOT VALID` | 两 relation catalog lock；无 scan（NOT VALID） | 90 | NULL 不参与匹配；VALIDATE 在 D17 | 10 后 / TX-D（registry SQL-046） |
@@ -1650,7 +1711,7 @@ Phase 2 默认 rollback 是**应用回退并保留 additive schema/evidence**，
 | D13 | 旧 deletion 字段继续 | 保留空 Tombstones | YES | NO | cleanup gate |
 | D14 | 无应用依赖 | 保留 indexes | YES | NO | 性能证据后可单独 DROP |
 | D15 | 无应用依赖 | 保留 partial indexes | YES | NO | 不默认删除约束 |
-| D16 | 旧 app 不写新表 | 保留 triggers/grants | YES | NO | trigger 自身阻断旧路径时 forward fix |
+| D16 | 旧 app 不写新表 | 保留 triggers/grants，包括 alias UPDATE/DELETE row trigger 与 TRUNCATE statement trigger；不得通过删除 guard 释放 alias | YES | NO | trigger 自身阻断旧路径时 forward fix；不得回退为允许 alias physical delete/reuse |
 | D17 | validation 失败不切换应用 | 修复数据/约束后重验，不 DROP evidence | YES | NO | validation phase 决定 |
 | D18 | 旧 app 继续 | invalid index 用 `DROP INDEX CONCURRENTLY` forward repair | YES | 仅 invalid index | 仅失败恢复 |
 | D19 | 旧 app 不写 current_revision | 保留 composite FK；NULL 行为不受影响 | YES | NO | cleanup gate |
@@ -1738,7 +1799,7 @@ Option C 字段行为：
 |---|---|---|---|---|---|---|---|
 | **基座 执行** / 执行 | MIG-001,004,005 | persisted READY report + independent audit | 五个 Migration models；基础 CHECK/FK/index；sealed guard；rerun identity | NO | NO/NO/NO | NONE，最先 | 基座 审计 |
 | **证据 执行** / 执行 | ID-005, MIG-004,005, DELETE-003 | 基座 | ForumAuditEvent、append-only grants/triggers | NO | NO/NO/NO | 身份 执行（仅非 schema 准备） | 证据 审计 |
-| **身份 执行** / 执行 | ID-001..005, AUTHZ-002..004 | 基座 | PrincipalAlias；13 个 nullable existing columns；NOT VALID FK | NO | NO/NO/NO | 证据 执行（仅非 schema 准备） | 身份 审计 |
+| **身份 执行** / 执行 | ID-001..005, AUTHZ-002..004 | 基座；本 alias permanence amendment adopted/archived 后从包含修订的 base 重启 | PrincipalAlias；13 个 nullable existing columns；NOT VALID FK；12 个 identity raw SQL objects（SQL-018..028 + SQL-075），含 alias UPDATE/DELETE/TRUNCATE permanence guards | NO | NO/NO/NO | 证据 执行（仅非 schema 准备） | 身份 审计 |
 | **订阅 执行** / 执行 | AUTHZ-005, REVIEW-001, MIG-002 | 身份 | Participation、Watch、Read、Mention、Notification | NO | NO/NO/NO | 状态 执行（仅非 schema 准备） | 订阅 审计 |
 | **状态 执行** / 执行 | AUTHZ-001,006, LIFE-001..005 | 身份 | Thread lifecycle columns、Revision、revision FK/trigger、composite FK（D19）、CIC | NO | NO/NO/NO | 订阅 执行（仅非 schema 准备） | 状态 审计 |
 | **评审 执行** / 执行 | REVIEW-001..007 | 状态、身份 | Requirement、Resolution（`invalidated_by_message_tombstone_id` 仅 scalar、无 relation/FK）、partial unique、guards | NO | NO/NO/NO | NONE | 评审 审计 |
@@ -1950,7 +2011,7 @@ ROLLBACK_REFERENCE
 |---|---|---|---|---|---|---|
 | 基座 | MIG-001,004,005 | clean+snapshot apply；old app start；app rollback；schema retained | 五表均 0；旧表 hash 相同 | invalid classification/status/category/result rejected；selected_ck 真值表六格全验（deterministic+NULL/non-NULL ACCEPT；ambiguous+NULL ACCEPT、ambiguous+selected REJECT；unprovable+NULL ACCEPT、unprovable+selected REJECT）；duplicate rerun_identity/attempt rejected；sealed/terminal run UPDATE/DELETE rejected；非法 status 转移 rejected；identity 列改写 rejected | CREATE TABLE locks；Prisma generate/typecheck/full tests | `docs/investigations/evidence/additive-storage/base/` |
 | 证据 | ID-005,MIG-004,005,DELETE-003 | Audit apply；旧 app不写表；回退后表保留 | Audit 0；无 stderr→DB dual write | Audit UPDATE/DELETE/TRUNCATE rejected（trigger+grant 双验证）；payload boundaries；invalid provenance rejected | trigger/grant catalog；lock duration | `.../audit/` |
-| 身份 | ID-001..005,AUTHZ-002..004 | nullable columns/FK apply；旧 app CRUD suite；rollback app | 所有新增 actor 列 NULL；Alias 0 | invalid FK rejected on explicit test row；alias reassignment rejected；invalid namespace rejected | ADD COLUMN filenode unchanged；NOT VALID/VALIDATE observations | `.../identity/` |
+| 身份 | ID-001..005,AUTHZ-002..004 | nullable columns/FK apply；旧 app CRUD suite；rollback app | 所有新增 actor 列 NULL；Alias table apply 后 rows=0 | invalid FK rejected on explicit test row；namespace `auth_subject`/`agent_id` accepted、其他值拒绝 23514；修改 `principal_id`/`namespace`/`value`/`first_seen_at`/`created_at` 拒绝 55000；`retired_at` 仅 `NULL→NULL`、`NULL→timestamp`、`timestamp→same timestamp` accepted，`timestamp→NULL/different timestamp` 拒绝 55000；直接 physical DELETE 拒绝 55000；直接 TRUNCATE 拒绝 55000；删除失败后原 `(namespace,value)` 仍占位，向不同 Principal INSERT 相同 alias 拒绝 23505；不得只测试应用 API 而不直接调用 DELETE/TRUNCATE | ADD COLUMN filenode unchanged；NOT VALID/VALIDATE observations；catalog 确认 SQL-020/075 均在 public、target exact table、exact SQL-019 function OID、BEFORE、enabled，SQL-020 row-level UPDATE+DELETE only，SQL-075 statement-level TRUNCATE only | `.../identity/` |
 | 订阅 | AUTHZ-005,REVIEW-001,MIG-002 | tables apply；旧 awareness suite unchanged | 六表 0；Participant 不复制 | second active Watch rejected；ended intervals allowed；Read unknown/known invalid shapes rejected；cursor 回退 rejected；invalid closed-set values rejected | partial indexes catalog；Prisma types | `.../subscription/` |
 | 状态 | AUTHZ-001,006,LIFE-001..005 | nullable lifecycle+Revision apply；旧 status behavior unchanged | Revision 0；currentRevision/visibility NULL | invalid state/revision rejected；jump/decrease/clear UPDATE rejected；revisions 跳号/前置 INSERT rejected；orphan pointer 被 composite FK 拒绝；initial revision 非 1 拒绝 | Thread ADD COLUMN lock；composite FK catalog；CIC invalid-index 演练 | `.../lifecycle/` |
 | 评审 | REVIEW-001..007 | Review tables apply；旧 readiness tests unchanged | Requirement/Resolution 0；历史 reviewer 不导入；invalidated_by 列无 FK 且全 NULL | duplicate req；response+waiver conflict；empty reason；mismatched actor/thread/revision；DELETE req rejected；waiver 重放返回原行（不 409）；无 tombstone 的 invalidation UPDATE 拒绝；单字段 invalidation 拒绝；并发 response+waiver 单胜 | trigger/partial index evidence；negative SQL tests | `.../review/` |
@@ -2115,7 +2176,10 @@ ForumReport.handledByPrincipalId,
 ForumReaction.actorPrincipalId
 
 RAW_SQL_CONSTRAINTS_REQUIRED =
-74
+75
+
+IDENTITY_RAW_SQL_OBJECTS =
+12
 
 PRISMA_ONLY_CONSTRAINTS =
 64
