@@ -8,28 +8,32 @@ datasource db {
 }
 
 model ForumThread {
-  id             String    @id @default(uuid()) @db.Uuid
-  title          String
-  type           String    @default("discussion")
-  status         String    @default("open")
-  contextType    String?
-  contextId      String?
-  pipeline       String?
-  layer          String?
-  tags           String[]  @default([])
-  pinned         Boolean   @default(false)
-  featured       Boolean   @default(false)
-  messageCount   Int       @default(0)
-  viewCount      Int       @default(0)
-  lastMessageAt  DateTime?
-  createdById    String
-  createdByName  String
-  createdByType  String    @default("agent")
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  resolvedAt     DateTime?
-  resolvedById   String?
-  resolvedByName String?
+  id                 String          @id @default(uuid()) @db.Uuid
+  title              String
+  type               String          @default("discussion")
+  status             String          @default("open")
+  contextType        String?
+  contextId          String?
+  pipeline           String?
+  layer              String?
+  tags               String[]        @default([])
+  pinned             Boolean         @default(false)
+  featured           Boolean         @default(false)
+  messageCount       Int             @default(0)
+  viewCount          Int             @default(0)
+  lastMessageAt      DateTime?
+  createdById        String
+  createdByName      String
+  createdByType      String          @default("agent")
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  resolvedAt         DateTime?
+  resolvedById       String?
+  resolvedByName     String?
+  creatorPrincipalId String?         @map("creator_principal_id") @db.Uuid
+  visibilityState    String?         @map("visibility_state")
+  currentRevision    Int?            @map("current_revision")
+  creatorPrincipal   ForumPrincipal? @relation("ForumThreadCreatorPrincipal", fields: [creatorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_threads_creator_principal_fk")
 
   participants ForumThreadParticipant[]
   messages     ForumThreadMessage[]
@@ -57,11 +61,13 @@ model ForumThread {
 // anti-abuse controlled server-side (dedup + rate limit).
 
 model ForumThreadView {
-  id          String   @id @default(uuid()) @db.Uuid
-  threadId    String   @db.Uuid
-  thread      ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  principalId String   @map("principal_id")
-  viewedAt    DateTime @default(now()) @map("viewed_at")
+  id                String          @id @default(uuid()) @db.Uuid
+  threadId          String          @db.Uuid
+  thread            ForumThread     @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  principalId       String          @map("principal_id")
+  viewedAt          DateTime        @default(now()) @map("viewed_at")
+  viewerPrincipalId String?         @map("viewer_principal_id") @db.Uuid
+  viewerPrincipal   ForumPrincipal? @relation("ForumThreadViewViewerPrincipal", fields: [viewerPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_thread_views_viewer_principal_fk")
 
   @@unique([threadId, principalId])
   @@index([threadId])
@@ -69,16 +75,16 @@ model ForumThreadView {
 }
 
 model ForumThreadParticipant {
-  id                 String    @id @default(uuid()) @db.Uuid
-  threadId           String    @db.Uuid
-  thread             ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  agentId            String
-  agentName          String
-  role               String    @default("member")
-  status             String    @default("invited")
-  lastReadAt         DateTime?
-  joinedAt           DateTime  @default(now())
-  leftAt             DateTime?
+  id         String      @id @default(uuid()) @db.Uuid
+  threadId   String      @db.Uuid
+  thread     ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  agentId    String
+  agentName  String
+  role       String      @default("member")
+  status     String      @default("invited")
+  lastReadAt DateTime?
+  joinedAt   DateTime    @default(now())
+  leftAt     DateTime?
 
   reviewWaivedAt     DateTime?
   reviewWaivedById   String?
@@ -89,24 +95,27 @@ model ForumThreadParticipant {
 }
 
 model ForumThreadMessage {
-  id         String    @id @default(uuid()) @db.Uuid
-  threadId   String    @db.Uuid
-  thread     ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  parentId   String?   @db.Uuid
-  seq        Int
-  authorId   String
-  authorName String
-  authorType String    @default("agent")
-  kind       String    @default("comment")
-  content    String    @db.Text
-  mentions   String[]  @default([])
-  attachments Json?
-  metadata   Json?
-  editedAt   DateTime?
-  deletedAt  DateTime?
-  createdAt  DateTime  @default(now())
+  id                 String          @id @default(uuid()) @db.Uuid
+  threadId           String          @db.Uuid
+  thread             ForumThread     @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  parentId           String?         @db.Uuid
+  seq                Int
+  authorId           String
+  authorName         String
+  authorType         String          @default("agent")
+  kind               String          @default("comment")
+  content            String          @db.Text
+  mentions           String[]        @default([])
+  attachments        Json?
+  metadata           Json?
+  editedAt           DateTime?
+  deletedAt          DateTime?
+  createdAt          DateTime        @default(now())
+  authorPrincipalId  String?         @map("author_principal_id") @db.Uuid
+  discussionRevision Int?            @map("discussion_revision")
+  authorPrincipal    ForumPrincipal? @relation("ForumMessageAuthorPrincipal", fields: [authorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_messages_author_principal_fk")
 
-  reactions  ForumReaction[]
+  reactions ForumReaction[]
 
   @@index([threadId, seq])
   @@index([threadId, createdAt])
@@ -117,20 +126,23 @@ model ForumThreadMessage {
 }
 
 model ForumContextSnapshot {
-  id           String    @id @default(uuid()) @db.Uuid
-  threadId     String    @db.Uuid
-  thread       ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  snapshotType String    @default("thread_creation")
-  sourceType   String
-  sourceRef    String
-  title        String
-  excerptMd    String?   @db.Text
-  contentHash  String?
-  snapshot     Json?
-  takenById    String
-  takenByName  String
-  takenAt      DateTime  @default(now())
-  note         String?
+  id                 String          @id @default(uuid()) @db.Uuid
+  threadId           String          @db.Uuid
+  thread             ForumThread     @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  snapshotType       String          @default("thread_creation")
+  sourceType         String
+  sourceRef          String
+  title              String
+  excerptMd          String?         @db.Text
+  contentHash        String?
+  snapshot           Json?
+  takenById          String
+  takenByName        String
+  takenAt            DateTime        @default(now())
+  note               String?
+  takenByPrincipalId String?         @map("taken_by_principal_id") @db.Uuid
+  discussionRevision Int?            @map("discussion_revision")
+  takenByPrincipal   ForumPrincipal? @relation("ForumContextSnapshotTakenByPrincipal", fields: [takenByPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_context_snapshots_taken_by_principal_fk")
 
   @@index([threadId])
   @@index([sourceType, sourceRef])
@@ -138,10 +150,10 @@ model ForumContextSnapshot {
 }
 
 model ForumOutcome {
-  id                   String    @id @default(uuid()) @db.Uuid
-  threadId             String    @db.Uuid
-  thread               ForumThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  summaryMd            String    @db.Text
+  id                   String          @id @default(uuid()) @db.Uuid
+  threadId             String          @db.Uuid
+  thread               ForumThread     @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  summaryMd            String          @db.Text
   decisionsJson        Json?
   actionItemsJson      Json?
   rejectedOptionsJson  Json?
@@ -150,8 +162,11 @@ model ForumOutcome {
   writebackTargetRef   String?
   createdById          String
   createdByName        String
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  createdByPrincipalId String?         @map("created_by_principal_id") @db.Uuid
+  authorityKind        String?         @map("authority_kind")
+  createdByPrincipal   ForumPrincipal? @relation("ForumOutcomeCreatedByPrincipal", fields: [createdByPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_outcomes_created_by_principal_fk")
 
   @@index([threadId])
   @@map("forum_outcomes")
@@ -180,10 +195,35 @@ model ForumPrincipal {
   candidateMigrationEvidence   MigrationLegacyEvidence[] @relation("MigrationEvidenceCandidatePrincipal")
   resolvedMigrationQuarantines MigrationQuarantine[]     @relation("MigrationQuarantineResolvedByPrincipal")
   auditEvents                  ForumAuditEvent[]
+  aliases                      ForumPrincipalAlias[]
+  createdThreads               ForumThread[]             @relation("ForumThreadCreatorPrincipal")
+  authoredMessages             ForumThreadMessage[]      @relation("ForumMessageAuthorPrincipal")
+  threadViews                  ForumThreadView[]         @relation("ForumThreadViewViewerPrincipal")
+  createdOutcomes              ForumOutcome[]            @relation("ForumOutcomeCreatedByPrincipal")
+  takenContextSnapshots        ForumContextSnapshot[]    @relation("ForumContextSnapshotTakenByPrincipal")
+  submittedReports             ForumReport[]             @relation("ForumReportReporterPrincipal")
+  handledReports               ForumReport[]             @relation("ForumReportHandledByPrincipal")
+  actedReactions               ForumReaction[]           @relation("ForumReactionActorPrincipal")
 
   @@index([status])
   @@index([principalType])
   @@map("forum_principals")
+}
+
+model ForumPrincipalAlias {
+  id          String    @id @default(uuid()) @db.Uuid
+  principalId String    @map("principal_id") @db.Uuid
+  namespace   String
+  value       String
+  firstSeenAt DateTime  @map("first_seen_at") @db.Timestamptz(3)
+  retiredAt   DateTime? @map("retired_at") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  principal ForumPrincipal @relation(fields: [principalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([namespace, value])
+  @@index([principalId, namespace])
+  @@map("forum_principal_aliases")
 }
 
 // ─── Forum Report (Moderation Queue) ──────────────────────────────────────
@@ -193,20 +233,24 @@ model ForumPrincipal {
 // @@unique([targetType, targetId, reporterId]) database constraint (AC#3).
 
 model ForumReport {
-  id           String    @id @default(uuid()) @db.Uuid
-  targetType   String    @map("target_type") // "thread" | "message"
-  targetId     String    @map("target_id") @db.Uuid
-  reporterId   String    @map("reporter_id")
-  reporterName String    @map("reporter_name")
-  reason       String    // spam | abuse | off_topic | violation | other — required
-  note         String?   @db.Text // optional supporting explanation
-  status       String    @default("pending") // pending | ignored | warned | deleted
-  handledById  String?   @map("handled_by_id")
-  handledByName String?  @map("handled_by_name")
-  handledAt    DateTime? @map("handled_at")
-  handleNote   String?   @map("handle_note") @db.Text
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+  id                   String          @id @default(uuid()) @db.Uuid
+  targetType           String          @map("target_type") // "thread" | "message"
+  targetId             String          @map("target_id") @db.Uuid
+  reporterId           String          @map("reporter_id")
+  reporterName         String          @map("reporter_name")
+  reason               String // spam | abuse | off_topic | violation | other — required
+  note                 String?         @db.Text // optional supporting explanation
+  status               String          @default("pending") // pending | ignored | warned | deleted
+  handledById          String?         @map("handled_by_id")
+  handledByName        String?         @map("handled_by_name")
+  handledAt            DateTime?       @map("handled_at")
+  handleNote           String?         @map("handle_note") @db.Text
+  createdAt            DateTime        @default(now()) @map("created_at")
+  updatedAt            DateTime        @updatedAt @map("updated_at")
+  reporterPrincipalId  String?         @map("reporter_principal_id") @db.Uuid
+  handledByPrincipalId String?         @map("handled_by_principal_id") @db.Uuid
+  reporterPrincipal    ForumPrincipal? @relation("ForumReportReporterPrincipal", fields: [reporterPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_reports_reporter_principal_fk")
+  handledByPrincipal   ForumPrincipal? @relation("ForumReportHandledByPrincipal", fields: [handledByPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_reports_handled_by_principal_fk")
 
   @@unique([targetType, targetId, reporterId])
   @@index([status])
@@ -223,14 +267,16 @@ model ForumReport {
 // AC#4: reuses existing forum.read/forum.write scopes — no new scope.
 
 model ForumReaction {
-  id            String   @id @default(uuid()) @db.Uuid
-  messageId     String   @map("message_id") @db.Uuid
-  message       ForumThreadMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  threadId      String   @map("thread_id") @db.Uuid // denormalized for query convenience
-  principalId   String   @map("principal_id")
-  principalName String   @map("principal_name")
-  emoji         String
-  createdAt     DateTime @default(now()) @map("created_at")
+  id               String             @id @default(uuid()) @db.Uuid
+  messageId        String             @map("message_id") @db.Uuid
+  message          ForumThreadMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  threadId         String             @map("thread_id") @db.Uuid // denormalized for query convenience
+  principalId      String             @map("principal_id")
+  principalName    String             @map("principal_name")
+  emoji            String
+  createdAt        DateTime           @default(now()) @map("created_at")
+  actorPrincipalId String?            @map("actor_principal_id") @db.Uuid
+  actorPrincipal   ForumPrincipal?    @relation("ForumReactionActorPrincipal", fields: [actorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_reactions_actor_principal_fk")
 
   @@unique([messageId, principalId, emoji])
   @@index([messageId])
