@@ -12,7 +12,34 @@ OWNER =
 mayf3
 
 DISPOSITION =
-open
+adopted
+
+CLOSED_AT =
+2026-08-25T14:02:29Z
+
+INVESTIGATION_RESULT =
+independent_review_accepted
+
+FINAL_INDEPENDENT_REVIEWER =
+AF-ALIAS-PERMANENCE-AUDIT-R1
+
+FINAL_REVIEWED_HEAD =
+41e67ff88468573c9047ee50a7d656561088956a
+
+INVESTIGATION_REVIEW =
+ACCEPT
+
+READY_TO_MARK_ADOPTED =
+YES
+
+ARCHIVE_TRANSACTION_ALLOWED =
+YES
+
+NEW_BLOCKERS =
+0
+
+BLOCKERS =
+NONE
 
 PRIMARY_GOVERNING_SPEC =
 AGENT_FORUM_CORE_INVARIANTS_V1
@@ -187,11 +214,12 @@ Identity storage acceptance must prove all of the following against PostgreSQL r
 ## 8. Disposition
 
 ```text
-DISPOSITION = open
-REASON = docs-only design amendment awaits independent alias audit and later adoption/archive handling
-IMPLEMENTATION_ALLOWED = NO
-IDENTITY_IMPLEMENTATION_ALLOWED = NO
-NEXT_TASK = 别名 审计
+DISPOSITION = adopted
+REASON = independent review accepted; lifecycle and review binding archived for merge into main
+IMPLEMENTATION_ALLOWED = governed by accepted Spec AGENT_FORUM_CORE_INVARIANTS_V1 after this adopted design amendment is merged into main
+IDENTITY_IMPLEMENTATION_ALLOWED_BEFORE_MERGE = NO
+IDENTITY_IMPLEMENTATION_ALLOWED_AFTER_MERGE = YES
+NEXT_TASK = 身份 执行
 ```
 
 ## Stable links
