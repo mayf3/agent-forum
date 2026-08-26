@@ -503,7 +503,8 @@ PRIMARY KEY(thread_id,principal_id)
 - `known + last_read_seq=0 + last_read_at=NULL`：可证明尚未读任何消息
 - `known + seq>0`：必须有 `last_read_at`
 - `unknown`：cursor 和 time 必须都为空
-- cursor 单调前进由 CAS + defensive trigger 保证
+- cursor 单调前进由 CAS + defensive trigger 保证：unknown→known 是取得证据后的知识增强（允许）；known→unknown 销毁已证明的 cursor（拒绝 23514）；known cursor 数值下降（拒绝 23514）；known same/higher 允许。完整冻结转移矩阵见 §9.1 与 INV-AGENT-FORUM-READ-STATE-MONOTONICITY-AMENDMENT-V1
+- `last_read_at` 不引入新的时间单调性规则（governing Spec 未定义时间戳单调性，unread authority 由 `last_read_seq` 派生）；known cursor 不变而 `last_read_at` 变早属于非阻断观察
 - Option C 冲突 `lastReadAt` 为 unknown；禁止选择较新的 cursor
 
 #### E/F. `ForumReviewResponse` 与 `ForumReviewWaiver`
@@ -1217,6 +1218,64 @@ ADD CONSTRAINT forum_read_states_shape_ck CHECK (
 );
 ```
 
+#### Read cursor monotonic guard
+
+SQL-038 keeps its stable function name and freezes the complete ReadState transition matrix; the guard now also rejects `known → unknown`, which the prior `NEW.last_read_seq < OLD.last_read_seq` comparison silently accepted when `NEW.last_read_seq` was `NULL`（INV-AGENT-FORUM-READ-STATE-MONOTONICITY-AMENDMENT-V1）:
+
+```sql
+CREATE OR REPLACE FUNCTION public.forum_read_cursor_monotonic_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.state = 'known'
+     AND NEW.state = 'unknown' THEN
+    RAISE EXCEPTION 'read state must not regress from known to unknown'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF OLD.state = 'known'
+     AND NEW.state = 'known'
+     AND NEW.last_read_seq < OLD.last_read_seq THEN
+    RAISE EXCEPTION 'read cursor must not regress'
+      USING ERRCODE = '23514';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+```
+
+SQL-039 keeps its stable trigger name and binding:
+
+```sql
+CREATE TRIGGER forum_read_cursor_monotonic_guard_tg
+BEFORE UPDATE
+ON public.forum_read_states
+FOR EACH ROW
+EXECUTE FUNCTION public.forum_read_cursor_monotonic_guard();
+```
+
+冻结转移矩阵：
+
+```text
+unknown → unknown        = ACCEPT
+unknown → known(0)       = ACCEPT
+unknown → known(>0)      = ACCEPT
+known(0) → unknown       = REJECT 23514
+known(>0) → unknown      = REJECT 23514
+known(N) → known(N)      = ACCEPT
+known(N) → known(>N)     = ACCEPT
+known(N) → known(<N)     = REJECT 23514
+```
+
+- unknown→known 是取得新证据后的知识增强；
+- known→unknown 会销毁已经证明的 cursor，属于回退；
+- known cursor 数值下降属于回退；
+- state 与 cursor 均不得通过 mark-read 路径倒退。
+
+`last_read_at` 不引入新的时间单调性规则（governing Spec 未定义时间戳单调性；unread authority 由 `last_read_seq` 派生；本修订只关闭已确认的 state/cursor 回退）。known cursor 不变而 `last_read_at` 变早为非阻断观察；若未来要冻结 `last_read_at` 单调性，必须另行调查或设计修订。
+
 #### Waiver non-empty and Response/Waiver shape
 
 ```sql
@@ -1568,8 +1627,8 @@ SQL-075 是唯一新增 registry ID。SQL-001..SQL-074 不重编号、不复用�
 | SQL-035 | forum_participations_provenance_ck | 订阅 | CHECK | forum_participations | provenance closed set | `... CHECK (provenance IN ('runtime','migration'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 provenance 拒绝 | 保留 | `.../subscription/` |
 | SQL-036 | forum_read_states_shape_ck | 订阅 | CHECK | forum_read_states | state closed set + known/unknown 形状（全文见 §9.1） | `ALTER TABLE forum_read_states ADD CONSTRAINT forum_read_states_shape_ck CHECK ((state='unknown' AND last_read_seq IS NULL AND last_read_at IS NULL) OR (state='known' AND last_read_seq=0 AND last_read_at IS NULL) OR (state='known' AND last_read_seq>0 AND last_read_at IS NOT NULL))` | TX | NO | 1 | 表已建 | pg_constraint | unknown+seq 拒绝；known+seq>0 无 time 拒绝 | 保留 | `.../subscription/` |
 | SQL-037 | forum_read_states_provenance_ck | 订阅 | CHECK | forum_read_states | provenance closed set | `... CHECK (provenance IN ('runtime','migration'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 provenance 拒绝 | 保留 | `.../subscription/` |
-| SQL-038 | forum_read_cursor_monotonic_guard (function) | 订阅 | FUNCTION | — | cursor 单调 | `CREATE FUNCTION forum_read_cursor_monotonic_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.last_read_seq IS DISTINCT FROM OLD.last_read_seq AND NEW.last_read_seq < OLD.last_read_seq THEN RAISE EXCEPTION 'read cursor must not regress' USING ERRCODE='23514'; END IF; RETURN NEW; END $$` | TX | NO | 2 | — | pg_proc 同名 | cursor 回退拒绝 | 保留 | `.../subscription/` |
-| SQL-039 | forum_read_cursor_monotonic_guard_tg | 订阅 | TRIGGER | forum_read_states | 绑定 cursor 单调 | `CREATE TRIGGER forum_read_cursor_monotonic_guard_tg BEFORE UPDATE ON forum_read_states FOR EACH ROW EXECUTE FUNCTION forum_read_cursor_monotonic_guard()` | TX | NO | 3 | SQL-038 | pg_trigger 同名 | 同上 | 保留 | `.../subscription/` |
+| SQL-038 | forum_read_cursor_monotonic_guard (function) | 订阅 | FUNCTION | — | state/cursor 单调（known→unknown 拒绝 + cursor 不回退） | `CREATE OR REPLACE FUNCTION public.forum_read_cursor_monotonic_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.state='known' AND NEW.state='unknown' THEN RAISE EXCEPTION 'read state must not regress from known to unknown' USING ERRCODE='23514'; END IF; IF OLD.state='known' AND NEW.state='known' AND NEW.last_read_seq < OLD.last_read_seq THEN RAISE EXCEPTION 'read cursor must not regress' USING ERRCODE='23514'; END IF; RETURN NEW; END $$`（全文见 §9.1） | TX | NO | 2 | — | pg_proc 同名 | known→unknown 拒绝 23514（known(0) 与 known(>0) 均）；known cursor 数值下降拒绝 23514；unknown→known 接受；known same/higher cursor 接受 | 保留 | `.../subscription/` |
+| SQL-039 | forum_read_cursor_monotonic_guard_tg | 订阅 | TRIGGER | forum_read_states | 绑定 state/cursor 单调 | `CREATE TRIGGER forum_read_cursor_monotonic_guard_tg BEFORE UPDATE ON public.forum_read_states FOR EACH ROW EXECUTE FUNCTION public.forum_read_cursor_monotonic_guard()` | TX | NO | 3 | SQL-038 | pg_trigger 同名 | 完整转移矩阵逐项验证：known→unknown 拒绝 23514；known cursor 数值下降（如 5→4）拒绝 23514；unknown→known 接受；known same/higher cursor 接受；不得只测数值 5→4 | 保留 | `.../subscription/` |
 | SQL-040 | forum_notifications_reason_ck | 订阅 | CHECK | forum_notification_facts | reason closed set | `... CHECK (reason IN ('mention','watch','reaction'))` | TX | NO | 1 | 表已建 | pg_constraint | 非法 reason 拒绝 | 保留 | `.../subscription/` |
 
 #### 状态 执行（8 objects）
@@ -1800,7 +1859,7 @@ Option C 字段行为：
 | **基座 执行** / 执行 | MIG-001,004,005 | persisted READY report + independent audit | 五个 Migration models；基础 CHECK/FK/index；sealed guard；rerun identity | NO | NO/NO/NO | NONE，最先 | 基座 审计 |
 | **证据 执行** / 执行 | ID-005, MIG-004,005, DELETE-003 | 基座 | ForumAuditEvent、append-only grants/triggers | NO | NO/NO/NO | 身份 执行（仅非 schema 准备） | 证据 审计 |
 | **身份 执行** / 执行 | ID-001..005, AUTHZ-002..004 | 基座；本 alias permanence amendment adopted/archived 后从包含修订的 base 重启 | PrincipalAlias；13 个 nullable existing columns；NOT VALID FK；12 个 identity raw SQL objects（SQL-018..028 + SQL-075），含 alias UPDATE/DELETE/TRUNCATE permanence guards | NO | NO/NO/NO | 证据 执行（仅非 schema 准备） | 身份 审计 |
-| **订阅 执行** / 执行 | AUTHZ-005, REVIEW-001, MIG-002 | 身份 | Participation、Watch、Read、Mention、Notification | NO | NO/NO/NO | 状态 执行（仅非 schema 准备） | 订阅 审计 |
+| **订阅 执行** / 执行 | AUTHZ-005, REVIEW-001, MIG-002 | 身份；本 read-state monotonicity amendment adopted/archived 后从包含修订的 base 重启 | Participation、Watch、Read（含 known→unknown 单调 guard，完整转移矩阵见 §9.1）、Mention、Notification | NO | NO/NO/NO | 状态 执行（仅非 schema 准备） | 订阅 审计 |
 | **状态 执行** / 执行 | AUTHZ-001,006, LIFE-001..005 | 身份 | Thread lifecycle columns、Revision、revision FK/trigger、composite FK（D19）、CIC | NO | NO/NO/NO | 订阅 执行（仅非 schema 准备） | 状态 审计 |
 | **评审 执行** / 执行 | REVIEW-001..007 | 状态、身份 | Requirement、Resolution（`invalidated_by_message_tombstone_id` 仅 scalar、无 relation/FK）、partial unique、guards | NO | NO/NO/NO | NONE | 评审 审计 |
 | **定稿 执行** / 执行 | FINAL-001..005, MIG-003 | 评审、状态、身份 | Finalization inline Outcome、idempotency（version/hash）、immutable guard | NO | NO/NO/NO | NONE | 定稿 审计 |
@@ -2012,7 +2071,7 @@ ROLLBACK_REFERENCE
 | 基座 | MIG-001,004,005 | clean+snapshot apply；old app start；app rollback；schema retained | 五表均 0；旧表 hash 相同 | invalid classification/status/category/result rejected；selected_ck 真值表六格全验（deterministic+NULL/non-NULL ACCEPT；ambiguous+NULL ACCEPT、ambiguous+selected REJECT；unprovable+NULL ACCEPT、unprovable+selected REJECT）；duplicate rerun_identity/attempt rejected；sealed/terminal run UPDATE/DELETE rejected；非法 status 转移 rejected；identity 列改写 rejected | CREATE TABLE locks；Prisma generate/typecheck/full tests | `docs/investigations/evidence/additive-storage/base/` |
 | 证据 | ID-005,MIG-004,005,DELETE-003 | Audit apply；旧 app不写表；回退后表保留 | Audit 0；无 stderr→DB dual write | Audit UPDATE/DELETE/TRUNCATE rejected（trigger+grant 双验证）；payload boundaries；invalid provenance rejected | trigger/grant catalog；lock duration | `.../audit/` |
 | 身份 | ID-001..005,AUTHZ-002..004 | nullable columns/FK apply；旧 app CRUD suite；rollback app | 所有新增 actor 列 NULL；Alias table apply 后 rows=0 | invalid FK rejected on explicit test row；namespace `auth_subject`/`agent_id` accepted、其他值拒绝 23514；修改 `principal_id`/`namespace`/`value`/`first_seen_at`/`created_at` 拒绝 55000；`retired_at` 仅 `NULL→NULL`、`NULL→timestamp`、`timestamp→same timestamp` accepted，`timestamp→NULL/different timestamp` 拒绝 55000；直接 physical DELETE 拒绝 55000；直接 TRUNCATE 拒绝 55000；删除失败后原 `(namespace,value)` 仍占位，向不同 Principal INSERT 相同 alias 拒绝 23505；不得只测试应用 API 而不直接调用 DELETE/TRUNCATE | ADD COLUMN filenode unchanged；NOT VALID/VALIDATE observations；catalog 确认 SQL-020/075 均在 public、target exact table、exact SQL-019 function OID、BEFORE、enabled，SQL-020 row-level UPDATE+DELETE only，SQL-075 statement-level TRUNCATE only | `.../identity/` |
-| 订阅 | AUTHZ-005,REVIEW-001,MIG-002 | tables apply；旧 awareness suite unchanged | 六表 0；Participant 不复制 | second active Watch rejected；ended intervals allowed；Read unknown/known invalid shapes rejected；cursor 回退 rejected；invalid closed-set values rejected | partial indexes catalog；Prisma types | `.../subscription/` |
+| 订阅 | AUTHZ-005,REVIEW-001,MIG-002 | tables apply；旧 awareness suite unchanged | 五表 0（forum_participations、forum_watch_subscriptions、forum_read_states、forum_mentions、forum_notification_facts）；Participant 不复制 | second active Watch rejected；ended intervals allowed；Read unknown/known invalid shapes rejected；ReadState 完整转移矩阵逐项验证：known→unknown rejected 23514（known(0) 与 known(>0) 均）、known cursor 数值下降 rejected 23514、unknown→known accepted、known same/higher cursor accepted，不得只测数值 5→4；invalid closed-set values rejected | partial indexes catalog；Prisma types | `.../subscription/` |
 | 状态 | AUTHZ-001,006,LIFE-001..005 | nullable lifecycle+Revision apply；旧 status behavior unchanged | Revision 0；currentRevision/visibility NULL | invalid state/revision rejected；jump/decrease/clear UPDATE rejected；revisions 跳号/前置 INSERT rejected；orphan pointer 被 composite FK 拒绝；initial revision 非 1 拒绝 | Thread ADD COLUMN lock；composite FK catalog；CIC invalid-index 演练 | `.../lifecycle/` |
 | 评审 | REVIEW-001..007 | Review tables apply；旧 readiness tests unchanged | Requirement/Resolution 0；历史 reviewer 不导入；invalidated_by 列无 FK 且全 NULL | duplicate req；response+waiver conflict；empty reason；mismatched actor/thread/revision；DELETE req rejected；waiver 重放返回原行（不 409）；无 tombstone 的 invalidation UPDATE 拒绝；单字段 invalidation 拒绝；并发 response+waiver 单胜 | trigger/partial index evidence；negative SQL tests | `.../review/` |
 | 定稿 | FINAL-001..005,MIG-003 | Finalization apply；旧 Outcome/resolve suite unchanged | Finalization 0；legacy Outcome authorityKind NULL | duplicate revision/key；empty key/summary；UPDATE/DELETE rejected；same key+different payload 409；same key+same hash 返回原行；canonical JSON key-order/Unicode NFC 等价返回原行；null/array 差异 409；different actor 409；stale revision 409；changed readiness 409；version mismatch 拒绝；hash 非 32 字节拒绝 | failure-safe migration；Prisma generate/typecheck | `.../finalization/` |
@@ -2271,6 +2330,19 @@ B_CHK_001_AMENDED = YES
 B_SECDEF_001_AMENDED = YES
 
 RESPONSE_WAIVER_EXCLUSION_AMENDED = YES
+
+READ_STATE_AMENDMENT =
+INV-AGENT-FORUM-READ-STATE-MONOTONICITY-AMENDMENT-V1
+
+READ_STATE_MONOTONICITY_AMENDED = YES
+SUBSCRIPTION_COUNT_EDITORIAL_FIX = YES
+SUBSCRIPTION_MODELS = 5
+SUBSCRIPTION_TABLES = 5
+KNOWN_TO_UNKNOWN_REJECTED = YES
+KNOWN_CURSOR_DECREASE_REJECTED = YES
+UNKNOWN_TO_KNOWN_ALLOWED = YES
+LAST_READ_AT_MONOTONICITY_CHANGED = NO
+SQL_039_IDENTITY_PRESERVED = YES
 
 B_LINK_001 = NOT_A_BLOCKER
 STABLE_LINK_REVIEW = PASS
