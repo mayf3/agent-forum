@@ -1,0 +1,393 @@
+# SUBSCRIPTION_STORAGE_EVIDENCE_V1 — 订阅 执行 acceptance evidence
+
+Persistent acceptance evidence for the fourth serial Phase 2 additive-storage
+workstream. This record proves additive subscription storage readiness only. It
+does not claim runtime cutover or full runtime Contract conformance.
+
+```text
+TASK_NAME = 订阅 执行
+TASK_TYPE = 执行
+
+SOURCE_COMMIT = a72dcf231b690dca524532bff3a2bfc1b2a0c1de
+PRIMARY_GOVERNING_SPEC = AGENT_FORUM_CORE_INVARIANTS_V1
+SPEC_STATUS_IN_BASE = accepted
+IMPLEMENTATION_AUTHORITY = contracts
+RELATED_ADOPTED_DESIGNS =
+INV-AGENT-FORUM-ADDITIVE-STORAGE-DESIGN-V1
+INV-AGENT-FORUM-READ-STATE-MONOTONICITY-AMENDMENT-V1
+READ_STATE_AMENDMENT_DISPOSITION = adopted
+PREFLIGHT_MODE = REUSE
+CHANGE_CLASS = NON_MECHANICAL
+GOVERNING_SPEC_GAP = NO
+ADOPTED_DESIGN_GAP = NO
+OWNER_DECISION_REQUIRED = NO
+IMPLEMENTATION_ALLOWED = YES
+
+CONTRACTS =
+CTR-AUTHZ-005
+CTR-REVIEW-001
+CTR-MIG-002
+CTR-MIG-004
+CTR-MIG-005
+```
+
+## 1. Serial lineage and generation
+
+```text
+PREVIOUS_MAIN = a72dcf231b690dca524532bff3a2bfc1b2a0c1de
+REMOTE_MAIN_AT_START = a72dcf231b690dca524532bff3a2bfc1b2a0c1de
+MAIN_DRIFT = NO
+PREVIOUS_MIGRATION_COUNT = 14
+PREVIOUS_MIGRATION_TIP = 20260825144043_add_forum_identity_storage
+PREVIOUS_MIGRATION_SET_SHA256 =
+aff434623f3665d8aec3e62bd6703312d63149dcaa24b6dfdef8430b60001702
+PREVIOUS_MIGRATION_SET_SHA256_METHOD = SHA-256 over the complete UTF-8 listing,
+sorted by migration directory, with each line exactly
+"<sha256(migration.sql)>  <migration_directory>\n" and the final newline retained
+
+NEW_MIGRATION_ID = 20260827004400_add_forum_subscription_storage
+MIGRATION_GENERATION_METHOD =
+npx prisma migrate dev --create-only --name add_forum_subscription_storage
+against disposable PostgreSQL 16.14 after deploying the exact 14-migration base;
+then manual review and append of SQL-029..SQL-040
+NEW_MIGRATION_CHECKSUM =
+cec5b7dc09550d68944687ffa6d3ec893679aee8037c1d4656532fe30f802305
+PRISMA_SCHEMA_HASH =
+7f4650010b31ee6286df7794c6df7d9ea5ecf022bbe791c2234a829892e8e3d1
+SUBSCRIPTION_MIGRATION_COUNT = 1
+TOTAL_MIGRATION_COUNT = 15
+OLD_MIGRATION_BYTES_CHANGED = NO
+MIGRATION_LINEAGE = SERIAL
+PARALLEL_SCHEMA_AUTHORING_ALLOWED = NO
+```
+
+A Prisma drift probe against the fully migrated database generated an empty
+migration only; the temporary empty probe directory was removed. Prisma did not
+propose a second FK set or removal of the raw CHECKs, partial index, function, or
+trigger.
+
+```text
+PRISMA_MIGRATION_DRIFT_REVIEW = PASS
+```
+
+## 2. Source and disposable database boundary
+
+```text
+POSTGRES_VERSION = PostgreSQL 16.14 on aarch64-unknown-linux-musl
+SOURCE_APPLIED_MIGRATIONS = 11
+SOURCE_APPLIED_MIGRATION_TIP = 20260807034800_add_forum_reports
+SOURCE_FORUM_APP_ROLE_PRESENT = NO
+SOURCE_APPLICATION_ROLE = forum (LOGIN, SUPERUSER, BYPASSRLS, CREATEROLE, CREATEDB)
+SOURCE_TRANSACTION_ISOLATION = REPEATABLE READ
+SOURCE_TRANSACTION_READ_ONLY = on
+SOURCE_DB_OPERATIONS = SELECT + pg_dump + ROLLBACK only
+SOURCE_DB_WRITES = 0
+PRODUCTION_DB_WRITES = 0
+```
+
+The source database was inspected only in an explicit `REPEATABLE READ READ
+ONLY` transaction and cloned with `pg_dump --format=custom --no-owner
+--no-privileges`. No migration, DDL, DML, or role mutation was run against it.
+The snapshot artifact itself is outside the repository and no source row is
+included here.
+
+Every disposable cluster had `forum_app` created before migration 13 with:
+
+```text
+LOGIN = NO
+SUPERUSER = NO
+BYPASSRLS = NO
+CREATEROLE = NO
+CREATEDB = NO
+TABLE_OWNER = NO
+```
+
+The subscription migration creates or changes no database role.
+
+## 3. Implemented additive storage
+
+```text
+SUBSCRIPTION_MODELS = 5
+SUBSCRIPTION_TABLES = 5
+NEW_FKS = 15
+FIFTEEN_FK_CATALOG_BINDINGS = PASS
+FK_DELETE_ACTION = RESTRICT
+FK_UPDATE_ACTION = RESTRICT
+RAW_SQL_OBJECTS = 12
+RAW_SQL_OBJECTS_IMPLEMENTED = 12
+SQL_029_TO_040_COMPLETE = PASS
+RAW_SQL_OBJECT_COUNT_REPOSITORY = 75 (adopted registry SQL-001..SQL-075)
+
+PARTICIPATION_ROWS = 0
+WATCH_ROWS = 0
+READ_STATE_ROWS = 0
+MENTION_ROWS = 0
+NOTIFICATION_ROWS = 0
+BACKFILLED_ROWS = 0
+```
+
+The new models/tables are exactly:
+
+- `ForumParticipation` / `public.forum_participations`
+- `ForumWatchSubscription` / `public.forum_watch_subscriptions`
+- `ForumReadState` / `public.forum_read_states`
+- `ForumMention` / `public.forum_mentions`
+- `ForumNotificationFact` / `public.forum_notification_facts`
+
+`ForumThreadMessage.mentions String[]` remains unchanged. No old Participant row,
+Mention, Notification, Watch, or Read fact was imported.
+
+## 4. Verifier and catalog evidence
+
+Added `svc-forum/scripts/verify-subscription-storage.mjs` and package script
+`verify:subscription-storage`, with no dependency change.
+
+```text
+NO_DATABASE_URL = EXIT 2
+DISPOSABLE_DATABASE_ONLY_WARNING = PRESENT
+ON_ERROR_STOP = ON
+LOCK_TIMEOUT = 5s
+STATEMENT_TIMEOUT = 60s
+MAIN_BEHAVIOR_TRANSACTION_RESULT = ROLLBACK
+UNEXPECTED_SQLSTATE = VERIFIER FAILURE
+CATALOG_BINDING = exact public schema + relation OID + definition + function OID
+WRONG_SCHEMA_DECOY = REJECTED
+WRONG_TARGET_DECOY = REJECTED
+WRONG_FUNCTION_OID_DECOY = REJECTED
+NEW_TABLES = 5
+NEW_FKS = 15
+RAW_SQL_OBJECTS = 12
+```
+
+The ordinary behavior and decoy probes run in one transaction and finish with
+`ROLLBACK`. The two-session concurrency probes necessarily expose a committed
+synthetic parent fixture and winning transaction to the waiting session; they
+run only on disposable databases, use transaction boundaries, and a guaranteed
+cleanup transaction removes every synthetic row. The verifier fails if cleanup
+fails and verifies all five tables are zero afterward.
+
+Exact catalog results:
+
+```text
+FIVE_EXACT_TABLE_SHAPES = PASS
+FIFTEEN_VALIDATED_FKS_RESTRICT_RESTRICT = PASS
+FOUR_BUSINESS_KEYS = PASS
+WATCH_PARTIAL_UNIQUE_COUNT = 1
+SQL_038_SINGLE_PUBLIC_NOARG_TRIGGER_FUNCTION = PASS
+SQL_039_EXACT_FUNCTION_OID = PASS
+SQL_039_ENABLED_NONINTERNAL = PASS
+SQL_039_TIMING = BEFORE
+SQL_039_LEVEL = ROW
+SQL_039_EVENTS = UPDATE_ONLY
+```
+
+## 5. Behavioral acceptance
+
+The verifier passed on the clean database, migrated current snapshot clone, and
+failure/retry database.
+
+```text
+PARTICIPATION_CONSTRAINTS = PASS
+  known / partial / unknown = ACCEPT
+  runtime / migration = ACCEPT
+  invalid fact_state / provenance = 23514
+  duplicate(thread,principal) = 23505
+  invalid thread / principal / evidence FK = 23503
+  presentation fields create no runtime or authority path
+
+WATCH_CONSTRAINTS = PASS
+WATCH_ONE_ACTIVE = PASS
+  active + ended_at NULL = ACCEPT
+  inactive + ended_at timestamp = ACCEPT
+  started_at NULL = ACCEPT
+  source=unknown + provenance=migration = ACCEPT
+  invalid state / source / provenance = 23514
+  invalid interval shapes = 23514
+  second active = 23505
+  invalid thread / principal / evidence FK = 23503
+  multiple inactive intervals = ACCEPT
+  ended active followed by new active = ACCEPT
+  concurrent second active = one winner; loser 23505
+
+READ_STATE_SHAPE = PASS
+  unknown + NULL/NULL = ACCEPT
+  known + 0/NULL = ACCEPT
+  known + positive/time = ACCEPT
+  invalid shape/state/provenance = 23514
+
+READ_STATE_TRANSITION_MATRIX = PASS
+UNKNOWN_TO_UNKNOWN = PASS
+UNKNOWN_TO_KNOWN = PASS
+KNOWN_TO_UNKNOWN_PROTECTION = PASS (23514 for known(0) and known(>0))
+KNOWN_CURSOR_DECREASE_PROTECTION = PASS (23514)
+KNOWN_CURSOR_SAME_OR_HIGHER = PASS
+ON_CONFLICT_GUARD = PASS (23514)
+MERGE_UPDATE_GUARD = PASS (23514)
+CONCURRENT_CURSOR_MONOTONICITY = PASS (final cursor 10; cursor 5 rejected 23514)
+LAST_READ_AT_MONOTONICITY_CHANGED = NO
+KNOWN_SAME_CURSOR_EARLIER_LAST_READ_AT = ACCEPT
+READ_STATE_PHYSICAL_DELETE_POLICY = UNSPECIFIED
+READ_STATE_TRUNCATE_POLICY = UNSPECIFIED
+READ_STATE_KEY_MUTATION_POLICY = UNSPECIFIED
+RUNTIME_CAS_IMPLEMENTED = NO
+RUNTIME_CAS_DEFERRED = YES
+
+MENTION_CONSTRAINTS = PASS
+  duplicate(message,mentioned principal) = 23505
+  invalid message / principal FK = 23503
+
+NOTIFICATION_CONSTRAINTS = PASS
+  mention / watch / reaction = ACCEPT
+  invalid reason = 23514
+  duplicate(recipient,source_event_key) = 23505
+  invalid recipient / thread / message / reaction FK = 23503
+```
+
+Mention and Notification create no Review, Watch, task, workflow, or authority
+side effect. No frozen-but-unadopted reason-specific shape CHECK was added.
+
+## 6. Clean, snapshot, rerun, and legacy-data evidence
+
+```text
+CLEAN_DB_APPLY = PASS (all 15 migrations)
+CURRENT_SNAPSHOT_APPLY = PASS (source 11 -> repository 15)
+SOURCE_TO_REPOSITORY_MIGRATIONS_APPLIED =
+20260822065412_add_forum_migration_foundation
+20260823162405_add_forum_audit_events
+20260825144043_add_forum_identity_storage
+20260827004400_add_forum_subscription_storage
+SECOND_DEPLOY_NOOP = PASS
+MIGRATION_STATUS = UP_TO_DATE
+MIGRATION_HISTORY_CONSISTENCY = PASS
+FAILURE_RETRY_REHEARSAL = PASS
+```
+
+Failure/retry used an isolated migration copy and a fresh database. An injected
+invalid final statement made the subscription migration fail. It was marked
+rolled back with Prisma, replaced by the exact repository migration bytes, and
+redeployed successfully. The final stored checksum on clean, snapshot-clone,
+and retry databases equals the repository checksum.
+
+Legacy comparison covered the original columns of all nine source business
+tables. Before/after row counts, canonical JSONB projection digests, relation
+filenodes, and table shapes were stable.
+
+```text
+SOURCE_SNAPSHOT_ROWS =
+forum_context_snapshots=0
+forum_messages=607
+forum_outcomes=0
+forum_participants=389
+forum_principals=98
+forum_reactions=0
+forum_reports=0
+forum_thread_views=81
+forum_threads=90
+
+ROW_COUNTS_CHANGED = NO
+LEGACY_COLUMN_VALUES_CHANGED = NO
+RELATION_FILENODES_CHANGED = NO
+NO_EXISTING_TABLE_REWRITE = PASS
+EXISTING_TABLE_REWRITE = NO
+FIVE_TABLES_EMPTY = PASS
+```
+
+Existing verifier results:
+
+```text
+FOUNDATION_VERIFIER_NO_REGRESSION = PASS (final migrated snapshot clone)
+AUDIT_STORAGE_VERIFIER_NO_REGRESSION = PASS (final migrated snapshot clone)
+IDENTITY_STORAGE_VERIFIER_NO_REGRESSION = PASS (exact 14-migration predecessor database)
+```
+
+The identity verifier intentionally contains the prior-workstream serial-lineage
+sentinel that rejects the future `forum_watch_subscriptions` table, so its exact
+unchanged script was executed successfully against the exact 14-migration
+predecessor. On the 15-migration database it exits only at that expected sentinel,
+not at any identity catalog or behavior assertion. The subscription verifier
+then validates the new SQL-029 boundary on every final database.
+
+## 7. DDL lock and rewrite evidence
+
+```text
+APPLY_STARTED_AT = 2026-08-27T00:45:06Z
+APPLY_FINISHED_AT = 2026-08-27T00:45:07Z
+LOCK_TIMEOUT = 5s (verification sessions)
+STATEMENT_TIMEOUT = 60s (verification sessions)
+PG_LOCKS_RELEVANT_BEFORE = 0
+PG_LOCKS_RELEVANT_AFTER = 0
+WAITING_OR_BLOCKING_PID = NONE OBSERVED
+WAL_BEFORE = 0/2DD7CE0
+WAL_AFTER = 0/2E36408
+WAL_DELTA_BYTES = 386856
+PARENT_RELATION_FILENODES_CHANGED = NO
+EXISTING_ROW_COUNTS_OR_DIGESTS_CHANGED = NO
+MIGRATION_FAILURE_RETRY_REFERENCE = isolated subscription_retry rehearsal
+EXISTING_TABLE_REWRITE = NO
+```
+
+The migration creates only new relations plus their constraints/index/function/
+trigger. Existing parent relation filenodes for threads, principals, messages,
+reactions, and migration legacy evidence were identical before and after.
+
+## 8. Tooling and old-application compatibility
+
+Executed in `svc-forum`:
+
+```text
+npm ci = PASS
+npm run prisma:generate = PASS
+npm run typecheck = PASS
+npm run build = PASS
+npm test = PASS
+TESTS = 294
+SUITES = 39
+PASSED = 294
+FAILED = 0
+```
+
+The exact previous-main source was separately archived and built, then started
+against the fully migrated current snapshot clone.
+
+```text
+OLD_APPLICATION_COMMIT = a72dcf231b690dca524532bff3a2bfc1b2a0c1de
+OLD_APPLICATION_HEALTH_HTTP = 200
+OLD_APPLICATION_DB = connected
+OLD_APPLICATION_COMPATIBILITY = PASS
+OLD_APP_NEW_TABLE_SEQ_SCANS = 0
+OLD_APP_NEW_TABLE_INDEX_SCANS = 0
+OLD_APP_NEW_TABLE_INSERTS = 0
+OLD_APP_NEW_TABLE_UPDATES = 0
+OLD_APP_NEW_TABLE_DELETES = 0
+```
+
+All five new tables remained empty. The old application continues to use the
+legacy Participant, Watch, Read, Mention-array, and notification derivation
+paths.
+
+## 9. Scope and close-out
+
+```text
+RUNTIME_WATCH_PATH_CHANGED = NO
+RUNTIME_READ_PATH_CHANGED = NO
+RUNTIME_NOTIFICATION_PATH_CHANGED = NO
+RUNTIME_MENTION_PATH_CHANGED = NO
+RUNTIME_REVIEW_PATH_CHANGED = NO
+PARTICIPANT_BACKFILL = NO
+MENTION_IMPORT = NO
+NOTIFICATION_IMPORT = NO
+BACKFILLED_ROWS = 0
+DUAL_READ_ENABLED = NO
+DUAL_WRITE_ENABLED = NO
+AUTHORITY_SWITCH = NO
+CUTOVER = NO
+CLEANUP = NO
+DEPLOYED = NO
+MERGED = NO
+SOURCE_DB_WRITES = 0
+PRODUCTION_DB_WRITES = 0
+NEXT_TASK = 订阅 审计
+```
+
+No password, token, Authorization header, secret, or raw sensitive legacy row is
+stored in this evidence record. UUIDs in the verifier are synthetic.
