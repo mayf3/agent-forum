@@ -12,13 +12,37 @@ OPENED_AT =
 2026-08-26T15:10:00Z
 
 CLOSED_AT =
-OPEN
+2026-08-27T00:11:21Z
 
 OWNER =
 mayf3
 
 DISPOSITION =
-open
+adopted
+
+INVESTIGATION_RESULT =
+independent_review_accepted
+
+FINAL_INDEPENDENT_REVIEWER =
+AF-READSTATE-AUDIT-PR12-0826743-R1
+
+FINAL_REVIEWED_HEAD =
+0826743e8d3e1b8fa169f68a2c7eb58ea11883dc
+
+INVESTIGATION_REVIEW =
+ACCEPT
+
+READY_TO_MARK_ADOPTED =
+YES
+
+ARCHIVE_TRANSACTION_ALLOWED =
+YES
+
+NEW_BLOCKERS =
+0
+
+BLOCKERS =
+NONE
 
 PRIMARY_GOVERNING_SPEC =
 AGENT_FORUM_CORE_INVARIANTS_V1
@@ -318,17 +342,17 @@ SQL-038 is an in-place function amendment inside existing D16 (`functions/trigge
 ## 10. Disposition
 
 ```text
-DISPOSITION = open
-REASON = docs-only amendment authored; awaits independent 读态 审计 before adoption binding
-IMPLEMENTATION_ALLOWED = governed by accepted Spec AGENT_FORUM_CORE_INVARIANTS_V1 after this amendment is adopted and merged into main
+DISPOSITION = adopted
+REASON = independent review accepted; lifecycle and review-binding archive transaction complete
+IMPLEMENTATION_ALLOWED = governed by accepted Spec AGENT_FORUM_CORE_INVARIANTS_V1 after this adopted amendment is merged into main
 SUBSCRIPTION_IMPLEMENTATION_ALLOWED_BEFORE_MERGE = NO
-SUBSCRIPTION_IMPLEMENTATION_ALLOWED_AFTER_MERGE = only after 读态 审计 and 归档 执行 complete
+SUBSCRIPTION_IMPLEMENTATION_ALLOWED_AFTER_MERGE = YES
 LAST_READ_AT_MONOTONICITY_CHANGED = NO
 SPEC_CHANGED = NO
 PRODUCT_CODE_CHANGED = NO
 SCHEMA_CHANGED = NO
 MIGRATION_CREATED = NO
-NEXT_TASK = 读态 审计
+NEXT_TASK = 订阅 执行
 ```
 
 ## What would reopen the question
