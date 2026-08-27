@@ -161,10 +161,30 @@ RAW_SQL_OBJECTS = 12
 
 The ordinary behavior and decoy probes run in one transaction and finish with
 `ROLLBACK`. The two-session concurrency probes necessarily expose a committed
-synthetic parent fixture and winning transaction to the waiting session; they
-run only on disposable databases, use transaction boundaries, and a guaranteed
-cleanup transaction removes every synthetic row. The verifier fails if cleanup
-fails and verifies all five tables are zero afterward.
+synthetic parent fixture and winning transaction to the waiting session. They
+run only on disposable databases. Every verifier run generates unique fixture
+IDs and persists an exact ownership marker on both parent rows. Setup commits
+Principal, Thread, and ReadState atomically; cleanup deletes only exact IDs whose
+parent markers prove ownership. Catchable failures and signals receive
+best-effort cleanup. SIGKILL, host crash, forced container deletion, and a
+permanent database outage cannot guarantee finally or signal-handler execution.
+Any SIGKILL residue remains safely identifiable by its unique ownership marker.
+
+```text
+CONCURRENCY_FIXTURE_IDENTITY = UNIQUE_PER_RUN
+CONCURRENCY_FIXTURE_OWNERSHIP = MARKER_VERIFIED
+SETUP_ATOMICITY = PASS
+SETUP_CONFLICT_NONDESTRUCTIVE = PASS
+CLEANUP_OWNERSHIP_VERIFIED = PASS
+PREEXISTING_ROWS_PRESERVED = PASS
+CLEANUP_IDEMPOTENT_FOR_OWNED_FIXTURES = PASS
+CATCHABLE_SIGNAL_CLEANUP = BEST_EFFORT_PASS
+CLEANUP_REENTRANCY_GUARD = PASS
+SIGKILL_CLEANUP_GUARANTEED = NO
+HOST_CRASH_CLEANUP_GUARANTEED = NO
+CONCURRENCY_FIXTURE_CLEANUP = CLEANUP_BEST_EFFORT_DISPOSABLE_ONLY
+SIGKILL_RESIDUE_OWNERSHIP_IDENTIFIABLE = PASS
+```
 
 Exact catalog results:
 
@@ -246,6 +266,44 @@ NOTIFICATION_CONSTRAINTS = PASS
 Mention and Notification create no Review, Watch, task, workflow, or authority
 side effect. No frozen-but-unadopted reason-specific shape CHECK was added.
 
+### 5.1 Concurrency fixture cleanup amendment
+
+`test:subscription-verifier-cleanup` ran against a newly created disposable
+PostgreSQL 16 database after all 15 repository migrations. It preseeded the old
+fixed Principal and Thread UUIDs, injected setup and child-session failures,
+exercised database timeouts, and sent real process signals. Every preservation
+assertion bound exact fixture IDs to all applicable parent ownership fields; no
+source database was used.
+
+```text
+BLOCKER_AMENDMENT_IMPLEMENTED = YES
+INDEPENDENT_REAUDIT_REQUIRED = YES
+
+FIXED_UUID_REGRESSION_TEST = PASS
+SETUP_COLLISION_TEST = PASS
+POST_COMMIT_ACK_FAILURE_CLEANUP = PASS
+CLEANUP_RETRY_AFTER_TRANSIENT_FAILURE = PASS
+FIRST_SESSION_FAILURE_CLEANUP = PASS
+FIRST_SESSION_AFTER_READY_CLEANUP = PASS
+SECOND_SESSION_FAILURE_CLEANUP = PASS
+LOCK_TIMEOUT_CLEANUP = PASS
+STATEMENT_TIMEOUT_CLEANUP = PASS
+SIGTERM_CLEANUP = PASS
+SIGKILL_BOUNDARY_TEST = PASS
+PREEXISTING_PARENT_PRESERVATION = PASS
+```
+
+SIGTERM was delivered after `SETUP_COMMITTED=YES` while both psql concurrency
+children were active; the handler blocked new child starts, terminated and joined
+both children with bounded SIGKILL escalation, then exited nonzero after
+ownership-safe cleanup. SIGKILL was delivered at the post-setup idle boundary; as
+expected, neither `finally` nor a signal handler ran, and the committed Principal,
+Thread, and ReadState remained. The harness proved the Principal and Thread held
+the exact unique marker and that ReadState referenced those marked parents by the
+exact run IDs. It then removed the residue externally with marker-qualified
+predicates, repeated the same cleanup safely, and left unrelated preexisting
+parents unchanged. This is a tested boundary, not a SIGKILL cleanup guarantee.
+
 ## 6. Clean, snapshot, rerun, and legacy-data evidence
 
 ```text
@@ -298,6 +356,7 @@ Existing verifier results:
 FOUNDATION_VERIFIER_NO_REGRESSION = PASS (final migrated snapshot clone)
 AUDIT_STORAGE_VERIFIER_NO_REGRESSION = PASS (final migrated snapshot clone)
 IDENTITY_STORAGE_VERIFIER_NO_REGRESSION = PASS (exact 14-migration predecessor database)
+IDENTITY_VERIFIER_LINEAGE = PHASE_EXACT_PREDECESSOR_EVIDENCE
 ```
 
 The identity verifier intentionally contains the prior-workstream serial-lineage
@@ -340,6 +399,7 @@ npm run prisma:generate = PASS
 npm run typecheck = PASS
 npm run build = PASS
 npm test = PASS
+npm run test:subscription-verifier-cleanup = PASS
 TESTS = 294
 SUITES = 39
 PASSED = 294
@@ -386,6 +446,12 @@ DEPLOYED = NO
 MERGED = NO
 SOURCE_DB_WRITES = 0
 PRODUCTION_DB_WRITES = 0
+PRODUCT_MIGRATION_CHANGED = NO
+SCHEMA_CHANGED = NO
+RUNTIME_CODE_CHANGED = NO
+RUNTIME_SCOPE_CREEP = NO
+BLOCKER_AMENDMENT_IMPLEMENTED = YES
+INDEPENDENT_REAUDIT_REQUIRED = YES
 NEXT_TASK = 订阅 审计
 ```
 
