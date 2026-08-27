@@ -3,6 +3,7 @@
 // Subscription-storage verifier. Run only against a disposable PostgreSQL database:
 // normal probes roll back, while concurrency probes briefly commit isolated fixtures.
 import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 
 const databaseUrl = process.env.SUBSCRIPTION_STORAGE_DATABASE_URL ?? process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -433,48 +434,104 @@ BEGIN
 END $$;
 `;
 
+function sqlLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function fixtureUuid(name) {
+  const injected = process.env[`SUBSCRIPTION_VERIFIER_TEST_${name}`];
+  const value = injected || randomUUID();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new Error(`invalid test-only ${name} UUID: ${value}`);
+  }
+  return value;
+}
+
+const fixtureRunId = randomUUID();
+const ownershipMarker = `subscription-verifier:${fixtureRunId}`;
+const principalId = fixtureUuid('PRINCIPAL_ID');
+const threadId = fixtureUuid('THREAD_ID');
+const firstWatchId = fixtureUuid('FIRST_WATCH_ID');
+const secondWatchId = fixtureUuid('SECOND_WATCH_ID');
+const faultMode = process.env.SUBSCRIPTION_VERIFIER_TEST_FAULT ?? '';
+const pauseAfterSetup = process.env.SUBSCRIPTION_VERIFIER_TEST_PAUSE_AFTER_SETUP === '1';
+const q = Object.fromEntries(Object.entries({
+  fixtureRunId,
+  ownershipMarker,
+  principalId,
+  threadId,
+  firstWatchId,
+  secondWatchId,
+}).map(([key, value]) => [key, sqlLiteral(value)]));
+
+console.log(`FIXTURE_RUN_ID=${fixtureRunId}`);
+console.log(`FIXTURE_OWNERSHIP_MARKER=${ownershipMarker}`);
+console.log(`FIXTURE_PRINCIPAL_ID=${principalId}`);
+console.log(`FIXTURE_THREAD_ID=${threadId}`);
+console.log(`FIXTURE_FIRST_WATCH_ID=${firstWatchId}`);
+console.log(`FIXTURE_SECOND_WATCH_ID=${secondWatchId}`);
+
 const setupSql = String.raw`
 \set ON_ERROR_STOP on
 SET lock_timeout='5s'; SET statement_timeout='60s';
 BEGIN;
 INSERT INTO public.forum_principals (id,auth_subject,agent_id,"updatedAt") VALUES
- ('81000000-0000-0000-0000-000000000001','subscription-concurrency-subject','subscription-concurrency-agent',now());
+ (${q.principalId},${q.ownershipMarker},${q.ownershipMarker},now());
 INSERT INTO public.forum_threads (id,title,"createdById","createdByName","createdAt","updatedAt") VALUES
- ('82000000-0000-0000-0000-000000000001','subscription concurrency verifier','verifier','verifier',now(),now());
+ (${q.threadId},${q.ownershipMarker},${q.ownershipMarker},'subscription verifier',now(),now());
 INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES
- ('82000000-0000-0000-0000-000000000001','81000000-0000-0000-0000-000000000001','known',0,NULL,'runtime',now());
+ (${q.threadId},${q.principalId},'known',0,NULL,'runtime',now());
 COMMIT;
 `;
 
+const firstFailureBeforeReady = faultMode === 'first-before-ready'
+  ? `SELECT public.subscription_verifier_injected_first_before_ready_failure();`
+  : '';
+const firstFailureAfterReady = faultMode === 'first-after-ready'
+  ? `SELECT public.subscription_verifier_injected_first_after_ready_failure();`
+  : '';
+const firstSleepSeconds = faultMode === 'signal-active' ? 30 : 2;
 const firstSql = String.raw`
 \set ON_ERROR_STOP on
 SET lock_timeout='5s'; SET statement_timeout='60s';
+SELECT pg_catalog.set_config('application_name', 'subver:' || ${q.fixtureRunId} || ':first', false);
 BEGIN;
 INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,started_at,updated_at)
-VALUES ('83000000-0000-0000-0000-000000000001','82000000-0000-0000-0000-000000000001','81000000-0000-0000-0000-000000000001','active','explicit','runtime',now(),now());
+VALUES (${q.firstWatchId},${q.threadId},${q.principalId},'active','explicit','runtime',now(),now());
 UPDATE public.forum_read_states SET last_read_seq=10,last_read_at=now(),updated_at=now()
-WHERE thread_id='82000000-0000-0000-0000-000000000001' AND principal_id='81000000-0000-0000-0000-000000000001';
+WHERE thread_id=${q.threadId} AND principal_id=${q.principalId};
+${firstFailureBeforeReady}
 \echo CONCURRENCY_LOCKS_READY
-SELECT pg_sleep(2);
+${firstFailureAfterReady}
+SELECT pg_sleep(${firstSleepSeconds});
 COMMIT;
 `;
 
+const secondPrelude = faultMode === 'second-failure'
+  ? `SELECT public.subscription_verifier_injected_second_failure();`
+  : faultMode === 'statement-timeout'
+    ? `SET statement_timeout='100ms'; SELECT pg_sleep(1);`
+    : faultMode === 'lock-timeout'
+      ? `SET lock_timeout='100ms';`
+      : '';
 const secondSql = String.raw`
 \set ON_ERROR_STOP on
 SET lock_timeout='5s'; SET statement_timeout='60s';
+SELECT pg_catalog.set_config('application_name', 'subver:' || ${q.fixtureRunId} || ':second', false);
 BEGIN;
+${secondPrelude}
 DO $$
 BEGIN
   BEGIN
     INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,started_at,updated_at)
-    VALUES ('83000000-0000-0000-0000-000000000002','82000000-0000-0000-0000-000000000001','81000000-0000-0000-0000-000000000001','active','mention','runtime',now(),now());
+    VALUES (${q.secondWatchId},${q.threadId},${q.principalId},'active','mention','runtime',now(),now());
   EXCEPTION WHEN OTHERS THEN
     IF SQLSTATE <> '23505' THEN RAISE EXCEPTION 'concurrent second active returned unexpected SQLSTATE %, expected 23505: %',SQLSTATE,SQLERRM; END IF;
     RAISE NOTICE 'CONCURRENT_SECOND_ACTIVE_23505=PASS';
   END;
   BEGIN
     UPDATE public.forum_read_states SET last_read_seq=5,last_read_at=now(),updated_at=now()
-    WHERE thread_id='82000000-0000-0000-0000-000000000001' AND principal_id='81000000-0000-0000-0000-000000000001';
+    WHERE thread_id=${q.threadId} AND principal_id=${q.principalId};
   EXCEPTION WHEN OTHERS THEN
     IF SQLSTATE <> '23514' THEN RAISE EXCEPTION 'concurrent cursor 10/5 returned unexpected SQLSTATE %, expected 23514: %',SQLSTATE,SQLERRM; END IF;
     RAISE NOTICE 'CONCURRENT_CURSOR_10_5_23514=PASS';
@@ -489,36 +546,169 @@ const cleanupSql = String.raw`
 \set ON_ERROR_STOP on
 SET lock_timeout='5s'; SET statement_timeout='60s';
 BEGIN;
-DELETE FROM public.forum_read_states
-WHERE thread_id='82000000-0000-0000-0000-000000000001' AND principal_id='81000000-0000-0000-0000-000000000001';
-DELETE FROM public.forum_watch_subscriptions
-WHERE id IN ('83000000-0000-0000-0000-000000000001','83000000-0000-0000-0000-000000000002');
-DELETE FROM public.forum_threads WHERE id='82000000-0000-0000-0000-000000000001';
-DELETE FROM public.forum_principals WHERE id='81000000-0000-0000-0000-000000000001';
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM public.forum_principals WHERE id=${q.principalId}::uuid
+             AND (auth_subject IS DISTINCT FROM ${q.ownershipMarker} OR agent_id IS DISTINCT FROM ${q.ownershipMarker})) THEN
+    RAISE EXCEPTION 'cleanup ownership mismatch for Principal %',${q.principalId} USING ERRCODE='42501';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.forum_threads WHERE id=${q.threadId}::uuid
+             AND (title IS DISTINCT FROM ${q.ownershipMarker} OR "createdById" IS DISTINCT FROM ${q.ownershipMarker})) THEN
+    RAISE EXCEPTION 'cleanup ownership mismatch for Thread %',${q.threadId} USING ERRCODE='42501';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.forum_read_states WHERE thread_id=${q.threadId}::uuid AND principal_id=${q.principalId}::uuid)
+     AND NOT (
+       EXISTS (SELECT 1 FROM public.forum_principals WHERE id=${q.principalId}::uuid AND auth_subject=${q.ownershipMarker} AND agent_id=${q.ownershipMarker})
+       AND EXISTS (SELECT 1 FROM public.forum_threads WHERE id=${q.threadId}::uuid AND title=${q.ownershipMarker} AND "createdById"=${q.ownershipMarker})
+     ) THEN
+    RAISE EXCEPTION 'cleanup ownership mismatch for ReadState (%,%)',${q.threadId},${q.principalId} USING ERRCODE='42501';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.forum_watch_subscriptions
+    WHERE id IN (${q.firstWatchId}::uuid,${q.secondWatchId}::uuid)
+      AND (thread_id IS DISTINCT FROM ${q.threadId}::uuid OR principal_id IS DISTINCT FROM ${q.principalId}::uuid)
+  ) THEN
+    RAISE EXCEPTION 'cleanup ownership mismatch for Watch fixture' USING ERRCODE='42501';
+  END IF;
+END $$;
+
+DELETE FROM public.forum_read_states r
+WHERE r.thread_id=${q.threadId}::uuid AND r.principal_id=${q.principalId}::uuid
+  AND EXISTS (SELECT 1 FROM public.forum_principals p WHERE p.id=r.principal_id AND p.auth_subject=${q.ownershipMarker} AND p.agent_id=${q.ownershipMarker})
+  AND EXISTS (SELECT 1 FROM public.forum_threads t WHERE t.id=r.thread_id AND t.title=${q.ownershipMarker} AND t."createdById"=${q.ownershipMarker});
+DELETE FROM public.forum_watch_subscriptions w
+WHERE w.id IN (${q.firstWatchId}::uuid,${q.secondWatchId}::uuid)
+  AND w.thread_id=${q.threadId}::uuid AND w.principal_id=${q.principalId}::uuid
+  AND EXISTS (SELECT 1 FROM public.forum_principals p WHERE p.id=w.principal_id AND p.auth_subject=${q.ownershipMarker} AND p.agent_id=${q.ownershipMarker})
+  AND EXISTS (SELECT 1 FROM public.forum_threads t WHERE t.id=w.thread_id AND t.title=${q.ownershipMarker} AND t."createdById"=${q.ownershipMarker});
+DELETE FROM public.forum_threads
+WHERE id=${q.threadId}::uuid AND title=${q.ownershipMarker} AND "createdById"=${q.ownershipMarker};
+DELETE FROM public.forum_principals
+WHERE id=${q.principalId}::uuid AND auth_subject=${q.ownershipMarker} AND agent_id=${q.ownershipMarker};
 COMMIT;
 DO $$ DECLARE table_name text; n bigint; BEGIN
   FOREACH table_name IN ARRAY ARRAY[${targetTables.map((name) => `'${name}'`).join(',')}] LOOP
     EXECUTE format('SELECT count(*) FROM public.%I',table_name) INTO n;
     IF n <> 0 THEN RAISE EXCEPTION 'public.% must contain zero rows after concurrency cleanup, found %',table_name,n; END IF;
   END LOOP;
+  RAISE NOTICE 'CLEANUP_OWNERSHIP_VERIFIED=PASS';
   RAISE NOTICE 'CONCURRENCY_CLEANUP_AND_FIVE_TABLES_ZERO=PASS';
   RAISE NOTICE 'SUBSCRIPTION_STORAGE=PASS';
 END $$;
 `;
 
+const activeChildren = new Set();
+const activeChildClosures = new Map();
+let setupAttempted = false;
+let setupCommitted = false;
+let cleanupInProgress = false;
+let cleanupCompleted = false;
+let cleanupFailure;
+let cleanupAttempts = 0;
+let terminating = false;
+
+function trackChild(child) {
+  activeChildren.add(child);
+  const closed = new Promise((resolve) => child.once('close', resolve));
+  activeChildClosures.set(child, closed);
+  closed.finally(() => {
+    activeChildren.delete(child);
+    activeChildClosures.delete(child);
+  });
+  return child;
+}
+
+async function stopActiveChildren() {
+  const waits = [];
+  for (const child of activeChildren) {
+    waits.push(activeChildClosures.get(child));
+    if (!child.killed) child.kill('SIGTERM');
+  }
+  const settled = Promise.allSettled(waits);
+  await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+  for (const child of activeChildren) {
+    if (!child.killed || child.exitCode === null) child.kill('SIGKILL');
+  }
+  await settled;
+}
+
+function terminateOwnedDatabaseSessions() {
+  runPsql(String.raw`
+\set ON_ERROR_STOP on
+SET statement_timeout='10s';
+SELECT pg_catalog.pg_terminate_backend(pid)
+FROM pg_catalog.pg_stat_activity
+WHERE pid <> pg_catalog.pg_backend_pid()
+  AND application_name IN ('subver:' || ${q.fixtureRunId} || ':first', 'subver:' || ${q.fixtureRunId} || ':second');
+`, 'terminate owned concurrency database sessions');
+}
+
+function cleanupOwnedFixture() {
+  if (!setupAttempted || cleanupCompleted || cleanupInProgress) return;
+  cleanupInProgress = true;
+  try {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      cleanupAttempts += 1;
+      console.error(`CLEANUP_ATTEMPT=${cleanupAttempts}`);
+      try {
+        if (faultMode === 'cleanup-first-failure' && cleanupAttempts === 1) {
+          throw new Error('injected first cleanup attempt failure');
+        }
+        runPsql(cleanupSql, 'ownership-safe concurrency cleanup');
+        cleanupCompleted = true;
+        cleanupFailure = undefined;
+        setupAttempted = false;
+        setupCommitted = false;
+        return;
+      } catch (error) {
+        cleanupFailure = error;
+        if (attempt === 2) throw error;
+      }
+    }
+  } finally {
+    cleanupInProgress = false;
+  }
+}
+
+async function terminate(reason, error) {
+  if (terminating) return;
+  terminating = true;
+  console.error(`${reason}: ${error instanceof Error ? error.message : String(error ?? reason)}`);
+  await stopActiveChildren();
+  try {
+    terminateOwnedDatabaseSessions();
+  } catch (sessionError) {
+    console.error(`owned database session termination failed: ${sessionError.message}`);
+  }
+  try {
+    cleanupOwnedFixture();
+    console.error('CATCHABLE_SIGNAL_CLEANUP=PASS');
+  } catch (cleanupError) {
+    console.error(`catchable termination cleanup failed: ${cleanupError.message}`);
+  }
+  process.exit(1);
+}
+
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => { void terminate(signal, new Error(`received ${signal}`)); });
+}
+process.on('uncaughtException', (error) => { void terminate('uncaughtException', error); });
+process.on('unhandledRejection', (error) => { void terminate('unhandledRejection', error); });
+
 function runConcurrentProbe() {
   return new Promise((resolve, reject) => {
-    const first = spawn('psql', psqlArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const first = trackChild(spawn('psql', psqlArgs, { stdio: ['pipe', 'pipe', 'pipe'] }));
     let firstOut = '';
     let firstErr = '';
     let secondStarted = false;
     let secondPromise;
 
     const startSecond = () => {
-      if (secondStarted) return;
+      if (secondStarted || terminating) return;
       secondStarted = true;
+      console.log('SECOND_SESSION_STARTED=YES');
       secondPromise = new Promise((resolveSecond, rejectSecond) => {
-        const second = spawn('psql', psqlArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+        const second = trackChild(spawn('psql', psqlArgs, { stdio: ['pipe', 'pipe', 'pipe'] }));
         let out = '';
         let err = '';
         second.stdout.on('data', (chunk) => { out += chunk; process.stdout.write(chunk); });
@@ -527,6 +717,7 @@ function runConcurrentProbe() {
         second.on('close', (code) => code === 0 ? resolveSecond() : rejectSecond(new Error(`second concurrency psql exited ${code}: ${err || out}`)));
         second.stdin.end(secondSql);
       });
+      secondPromise.catch(() => {});
     };
 
     first.stdout.on('data', (chunk) => {
@@ -538,12 +729,21 @@ function runConcurrentProbe() {
     first.stderr.on('data', (chunk) => { firstErr += chunk; process.stderr.write(chunk); });
     first.on('error', reject);
     first.on('close', async (code) => {
-      try {
-        if (code !== 0) throw new Error(`first concurrency psql exited ${code}: ${firstErr || firstOut}`);
-        if (!secondStarted) throw new Error('first concurrency psql never reported lock readiness');
-        await secondPromise;
+      let firstFailure;
+      let secondFailure;
+      if (code !== 0) firstFailure = new Error(`first concurrency psql exited ${code}: ${firstErr || firstOut}`);
+      if (secondStarted) {
+        try { await secondPromise; } catch (error) { secondFailure = error; }
+      } else if (!firstFailure) {
+        firstFailure = new Error('first concurrency psql never reported lock readiness');
+      }
+      if (firstFailure && secondFailure) {
+        reject(new Error(`${firstFailure.message}; second concurrency session also failed: ${secondFailure.message}`));
+      } else if (firstFailure || secondFailure) {
+        reject(firstFailure || secondFailure);
+      } else {
         resolve();
-      } catch (error) { reject(error); }
+      }
     });
     first.stdin.end(firstSql);
   });
@@ -552,19 +752,33 @@ function runConcurrentProbe() {
 let failure;
 try {
   runPsql(mainSql, 'main subscription-storage verification');
-  runPsql(setupSql, 'concurrency fixture setup');
+  setupAttempted = true;
+  runPsql(setupSql, 'atomic concurrency fixture setup');
+  if (faultMode === 'setup-postcommit-before-ack') {
+    throw new Error('injected post-COMMIT pre-acknowledgement failure');
+  }
+  setupCommitted = true;
+  console.log('SETUP_COMMITTED=YES');
+  if (pauseAfterSetup) {
+    console.log('TEST_PAUSE_AFTER_SETUP=READY');
+    await new Promise(() => { setInterval(() => {}, 1_000); });
+  }
   await runConcurrentProbe();
 } catch (error) {
   failure = error;
 } finally {
-  try {
-    runPsql(cleanupSql, 'concurrency cleanup');
-  } catch (cleanupError) {
-    failure = failure ? new Error(`${failure.message}; cleanup also failed: ${cleanupError.message}`) : cleanupError;
+  if (!terminating) {
+    try {
+      cleanupOwnedFixture();
+    } catch (cleanupError) {
+      failure = failure
+        ? new Error(`${failure.message}; cleanup also failed: ${cleanupError.message}`)
+        : cleanupError;
+    }
   }
 }
 
-if (failure) {
-  console.error(failure.message);
+if (!terminating && (failure || cleanupFailure)) {
+  console.error((failure || cleanupFailure).message);
   process.exit(1);
 }
