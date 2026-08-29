@@ -26,6 +26,12 @@ if (!databaseUrl) {
 }
 
 const coordinatorFault = process.env.SUBSCRIPTION_COORDINATOR_TEST_FAULT ?? '';
+const hasCoordinatorIdentityPlan = process.env.SUBSCRIPTION_COORDINATOR_TEST_IDENTITY_PLAN !== undefined;
+const coordinatorIdentityPlan = hasCoordinatorIdentityPlan
+  ? JSON.parse(process.env.SUBSCRIPTION_COORDINATOR_TEST_IDENTITY_PLAN)
+  : { verifiers: [], harnesses: [] };
+let verifierIdentityIndex = 0;
+let harnessIdentityIndex = 0;
 const verifierPath = fileURLToPath(new URL('./verify-subscription-storage.mjs', import.meta.url));
 const harnessPath = fileURLToPath(new URL('./test-subscription-verifier-cleanup.mjs', import.meta.url));
 const targetTables = ['forum_participations', 'forum_watch_subscriptions', 'forum_read_states', 'forum_mentions', 'forum_notification_facts'];
@@ -142,13 +148,21 @@ COMMIT;`);
 // ---------------------------------------------------------------------------
 
 function verifierIdentity() {
-  const identity = {
+  const planned = coordinatorIdentityPlan.verifiers?.[verifierIdentityIndex++];
+  if (!planned && hasCoordinatorIdentityPlan) throw new Error('prespawn verifier identity plan exhausted');
+  const identity = planned ? { ...planned } : {
     runId: randomUUID(),
     principalId: randomUUID(),
     threadId: randomUUID(),
     firstWatchId: randomUUID(),
     secondWatchId: randomUUID(),
   };
+  for (const field of ['runId', 'principalId', 'threadId', 'firstWatchId', 'secondWatchId']) {
+    if (!uuidPattern.test(identity[field])) throw new Error(`invalid prespawn verifier identity ${field}: ${identity[field]}`);
+  }
+  if (new Set([identity.principalId, identity.threadId, identity.firstWatchId, identity.secondWatchId]).size !== 4) {
+    throw new Error('prespawn verifier fixture IDs are not distinct');
+  }
   identity.marker = `subscription-verifier:${identity.runId}`;
   identity.applicationNames = [`subver:${identity.runId}:first`, `subver:${identity.runId}:second`];
   allApplicationNames.push(...identity.applicationNames);
@@ -156,12 +170,19 @@ function verifierIdentity() {
 }
 
 function harnessIdentity(withChild) {
-  const identity = {
+  const planned = coordinatorIdentityPlan.harnesses?.[harnessIdentityIndex++];
+  if (!planned && hasCoordinatorIdentityPlan) throw new Error('prespawn harness identity plan exhausted');
+  const identity = planned ? { ...planned, child: null } : {
     runId: randomUUID(),
     sentinelPrincipalId: randomUUID(),
     sentinelThreadId: randomUUID(),
-    child: withChild ? verifierIdentity() : null,
+    child: null,
   };
+  for (const field of ['runId', 'sentinelPrincipalId', 'sentinelThreadId']) {
+    if (!uuidPattern.test(identity[field])) throw new Error(`invalid prespawn harness identity ${field}: ${identity[field]}`);
+  }
+  if (identity.sentinelPrincipalId === identity.sentinelThreadId) throw new Error('prespawn harness sentinel IDs are not distinct');
+  identity.child = withChild ? verifierIdentity() : null;
   identity.marker = `subscription-verifier-harness:${identity.runId}`;
   return identity;
 }
@@ -233,7 +254,10 @@ function startChild(script, kind, identity, env) {
       resolve({ child, code, signal, output, spawnError });
     });
   });
-  const record = { kind, identity, child, done, getOutput: () => output, settled: null, metadataValidated: false };
+  const record = {
+    kind, identity, child, done, getOutput: () => output, settled: null, metadataValidated: false,
+    creationReceipt: { verifierFixture: false, harnessSentinel: false, harnessChildFixture: false },
+  };
   done.then((result) => { record.settled = result; });
   childRecords.set(child, record);
   const waitFor = (text) => new Promise((resolve, reject) => {
@@ -354,6 +378,15 @@ function externalCleanup(fixture) {
   const marker = sqlLiteral(fixture.marker);
   const principal = sqlLiteral(fixture.principalId);
   const thread = sqlLiteral(fixture.threadId);
+  const ownership = psql(`SELECT
+ (SELECT count(*) FROM public.forum_principals WHERE id=${principal}::uuid),
+ (SELECT count(*) FROM public.forum_principals WHERE id=${principal}::uuid AND auth_subject=${marker} AND agent_id=${marker}),
+ (SELECT count(*) FROM public.forum_threads WHERE id=${thread}::uuid),
+ (SELECT count(*) FROM public.forum_threads WHERE id=${thread}::uuid AND title=${marker} AND "createdById"=${marker});`, true).replaceAll('|', ',');
+  const [principalAny, principalOwned, threadAny, threadOwned] = ownership.split(',').map(Number);
+  if (principalAny !== principalOwned || threadAny !== threadOwned) {
+    throw new Error(`ownership mismatch for run ${fixture.runId}: exact/owned principal=${principalAny}/${principalOwned} thread=${threadAny}/${threadOwned}`);
+  }
   psql(`
 BEGIN;
 SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity
@@ -381,7 +414,18 @@ SELECT
 `, true).replaceAll('|', ',');
 }
 
+function harnessSentinelIdCounts(harness) {
+  return psql(`SELECT
+ (SELECT count(*) FROM public.forum_principals WHERE id=${sqlLiteral(harness.sentinelPrincipalId)}::uuid),
+ (SELECT count(*) FROM public.forum_threads WHERE id=${sqlLiteral(harness.sentinelThreadId)}::uuid);`, true).replaceAll('|', ',');
+}
+
 function recoverHarnessSentinel(harness) {
+  const exact = harnessSentinelIdCounts(harness).split(',').map(Number);
+  const owned = harnessSentinelCounts(harness).split(',').map(Number);
+  if (exact[0] !== owned[0] || exact[1] !== owned[1]) {
+    throw new Error(`ownership mismatch for harness ${harness.runId}: exact/owned principal=${exact[0]}/${owned[0]} thread=${exact[1]}/${owned[1]}`);
+  }
   psql(`BEGIN;
 DELETE FROM public.forum_threads WHERE id=${sqlLiteral(harness.sentinelThreadId)}::uuid AND title=${sqlLiteral(harness.marker)} AND "createdById"=${sqlLiteral(harness.marker)};
 DELETE FROM public.forum_principals WHERE id=${sqlLiteral(harness.sentinelPrincipalId)}::uuid AND auth_subject=${sqlLiteral(harness.marker)} AND agent_id=${sqlLiteral(harness.marker)};
@@ -534,6 +578,27 @@ function validateChildMetadata(record) {
 // Fail-closed recovery
 // ---------------------------------------------------------------------------
 
+function receiptCount(output, name) {
+  return [...output.matchAll(new RegExp(`^${name}=YES$`, 'gm'))].length;
+}
+
+function captureCreationReceipts(record) {
+  const output = record.getOutput();
+  if (record.kind === 'VERIFIER') {
+    const count = receiptCount(output, 'SETUP_COMMITTED');
+    if (count > 1) recoveryErrors.push(new Error(`duplicate verifier creation receipt for run ${record.identity.runId}`));
+    record.creationReceipt.verifierFixture = count === 1 || runCountsForRecovery(record.identity) !== '0,0,0,0';
+  } else if (record.kind === 'CLEANUP_HARNESS') {
+    const sentinelCount = receiptCount(output, 'HARNESS_SENTINEL_INSERT_COMMITTED');
+    const childCount = receiptCount(output, 'HARNESS_CHILD_INSERT_COMMITTED');
+    if (sentinelCount > 1) recoveryErrors.push(new Error(`duplicate harness sentinel creation receipt for run ${record.identity.runId}`));
+    if (childCount > 1) recoveryErrors.push(new Error(`duplicate harness child creation receipt for run ${record.identity.runId}`));
+    record.creationReceipt.harnessSentinel = sentinelCount === 1 || harnessSentinelIdCounts(record.identity) !== '0,0';
+    record.creationReceipt.harnessChildFixture = Boolean(record.identity.child)
+      && (childCount === 1 || runCountsForRecovery(record.identity.child) !== '0,0,0,0');
+  }
+}
+
 function runRecoveryStep(label, action) {
   try {
     return action();
@@ -559,7 +624,7 @@ async function terminateChildProcessGroup(record) {
   console.error(`PROCESS_GROUP_BACKEND_FALLBACK=EXECUTED run=${record.identity.runId}`);
   runRecoveryStep(`${label} backend fallback`, () => terminateSessionsExact(sessionNamesFor(record)));
   await waitBounded(record, 3_000);
-  try { child.kill('SIGKILL'); } catch { /* exact-pid last resort; verified below */ }
+  try { child.kill('SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') recoveryErrors.push(new Error(`${label} exact-pid kill failed: ${error.message}`)); }
   const closed = await waitBounded(record, 3_000);
   let sessionsLeft = null;
   runRecoveryStep(`${label} session check`, () => { sessionsLeft = countSessionsExact(sessionNamesFor(record)); });
@@ -604,15 +669,18 @@ function runFinalAssertions() {
   finalAssertionGroup('COORDINATOR_OWNED_ROWS_FINAL_ASSERTION=PASS', () => {
     for (const record of childRecords.values()) {
       const identity = record.kind === 'VERIFIER' ? record.identity : record.identity.child;
-      if (!identity) continue;
-      runFinalAssertion(`owned rows for run ${identity.runId}`, () => assertRunClean(identity));
+      const created = record.kind === 'VERIFIER'
+        ? record.creationReceipt.verifierFixture
+        : record.creationReceipt.harnessChildFixture;
+      if (!identity || !created) continue;
+      runFinalAssertion(`created owned IDs for run ${identity.runId}`, () => assertRunClean(identity));
     }
   });
   finalAssertionGroup('COORDINATOR_HARNESS_SENTINEL_FINAL_ASSERTION=PASS', () => {
     for (const record of childRecords.values()) {
-      if (record.kind !== 'CLEANUP_HARNESS') continue;
-      runFinalAssertion(`harness sentinel for run ${record.identity.runId}`, () => {
-        assert(harnessSentinelCounts(record.identity) === '0,0', `harness sentinel residue remained (${harnessSentinelCounts(record.identity)})`);
+      if (record.kind !== 'CLEANUP_HARNESS' || !record.creationReceipt.harnessSentinel) continue;
+      runFinalAssertion(`created harness sentinel IDs for run ${record.identity.runId}`, () => {
+        assert(harnessSentinelIdCounts(record.identity) === '0,0', `harness sentinel exact-ID residue remained (${harnessSentinelIdCounts(record.identity)})`);
       });
     }
   });
@@ -639,6 +707,7 @@ async function failClosedRecovery() {
   const running = [...childRecords.values()].filter(({ child }) => child.exitCode === null);
   for (const record of running) await terminateChildProcessGroup(record);
   await Promise.allSettled([...childRecords.values()].map(({ done }) => done));
+  for (const record of childRecords.values()) captureCreationReceipts(record);
   // 2. Kind-bound metadata validation for every child against expected identity.
   for (const record of childRecords.values()) validateChildMetadata(record);
   // 3. Marker-qualified external recovery driven only by coordinator-held identity.
@@ -664,7 +733,7 @@ async function failClosedRecovery() {
   runRecoveryStep('run-scoped session termination', () => terminateSessionsExact(allApplicationNames));
   runRecoveryStep('run-scoped session termination wait', () => { psql('SELECT pg_catalog.pg_sleep(1);'); });
   for (const control of controlChildren) {
-    try { control.kill('SIGKILL'); } catch { /* verified by the session assertion */ }
+    try { control.kill('SIGKILL'); } catch (error) { recoveryErrors.push(new Error(`control child termination failed: ${error.message}`)); }
   }
   // 6. Baseline cleanup (errors propagate into the aggregate report).
   runRecoveryStep('baseline cleanup', () => cleanupBaseline());
@@ -675,13 +744,15 @@ async function failClosedRecovery() {
 function identityDump() {
   return {
     children: [...childRecords.values()].map((record) => {
-      if (record.kind === 'VERIFIER') return { kind: record.kind, ...identityFields(record.identity) };
+      if (record.kind === 'VERIFIER') return { kind: record.kind, ...identityFields(record.identity), creationReceipt: { ...record.creationReceipt } };
       return {
         kind: record.kind,
         runId: record.identity.runId,
         marker: record.identity.marker,
         sentinelPrincipalId: record.identity.sentinelPrincipalId,
         sentinelThreadId: record.identity.sentinelThreadId,
+        tamperedMarker: record.identity.tamperedMarker ?? null,
+        creationReceipt: { ...record.creationReceipt },
         child: record.identity.child ? identityFields(record.identity.child) : null,
       };
     }),
@@ -816,10 +887,9 @@ async function runFullScenario() {
 // Compact fault scenarios for the coordinator failure-recovery suite
 // ---------------------------------------------------------------------------
 
-function seedForeignMismatchFixture() {
-  const marker = `foreign-mismatch:${randomUUID()}`;
-  const principalId = randomUUID();
-  const threadId = randomUUID();
+function seedForeignMismatchFixture(identity) {
+  const marker = `foreign-mismatch:${identity.runId}`;
+  const { principalId, threadId } = identity;
   psql(`BEGIN;
 INSERT INTO public.forum_principals (id,auth_subject,agent_id,"updatedAt") VALUES (${sqlLiteral(principalId)},${sqlLiteral(marker)},${sqlLiteral(marker)},now());
 INSERT INTO public.forum_threads (id,title,"createdById","createdByName","createdAt","updatedAt") VALUES (${sqlLiteral(threadId)},${sqlLiteral(marker)},${sqlLiteral(marker)},'foreign',now(),now());
@@ -900,21 +970,27 @@ async function runFaultScenario(fault) {
       break;
     }
     case 'marker-mismatch': {
-      const foreign = seedForeignMismatchFixture();
+      const probe = verifierIdentity();
+      const foreign = seedForeignMismatchFixture(probe);
       foreignFixtures.push(foreign);
-      const probeRunId = randomUUID();
-      const probe = {
-        runId: probeRunId,
-        marker: `subscription-verifier:${probeRunId}`,
-        principalId: foreign.principalId,
-        threadId: foreign.threadId,
-        firstWatchId: randomUUID(),
-        secondWatchId: randomUUID(),
-      };
-      externalCleanup(probe);
+      try { externalCleanup(probe); } catch (error) { recoveryErrors.push(new Error(`MARKER_MISMATCH_DETECTED: ${error.message}`)); }
       const remaining = foreignMismatchCounts(foreign);
       assert(remaining === '1,1,1', `marker-mismatch probe deleted or altered foreign rows (${remaining})`);
       recoveryErrors.push(new Error(`MARKER_MISMATCH_DETECTED: recovery identity for (${foreign.threadId},${foreign.principalId}) did not match the foreign ownership marker; no rows were deleted and the mismatch is reported instead`));
+      break;
+    }
+    case 'sentinel-marker-tamper': {
+      const harness = startHarness(false, { SUBSCRIPTION_CLEANUP_HARNESS_PAUSE_AFTER_SENTINEL: '1' });
+      await harness.waitFor('HARNESS_PAUSE_AFTER_SENTINEL=READY');
+      assert(harnessSentinelIdCounts(harness.identity) === '1,1', 'sentinel-marker-tamper: sentinel creation receipt was not visible');
+      const foreignMarker = `foreign-sentinel:${harness.identity.runId}`;
+      harness.identity.tamperedMarker = foreignMarker;
+      psql(`BEGIN;
+UPDATE public.forum_threads SET title=${sqlLiteral(foreignMarker)}, "createdById"=${sqlLiteral(foreignMarker)} WHERE id=${sqlLiteral(harness.identity.sentinelThreadId)}::uuid;
+UPDATE public.forum_principals SET auth_subject=${sqlLiteral(foreignMarker)}, agent_id=${sqlLiteral(foreignMarker)} WHERE id=${sqlLiteral(harness.identity.sentinelPrincipalId)}::uuid;
+COMMIT;`);
+      harness.child.kill('SIGKILL');
+      await harness.done;
       break;
     }
     case 'sentinel-recovery-failure': {
@@ -969,5 +1045,7 @@ console.log('HARNESS_SIGKILL_CLEANUP_GUARANTEED=NO');
 console.log('HARNESS_INTERRUPTION_RESIDUE_IDENTIFIABLE=PASS');
 console.log('HARNESS_EXTERNAL_RECOVERY=PASS');
 console.log('CHILD_KIND_BINDING=PASS');
+console.log('SENTINEL_ID_ONLY_FINAL_ASSERTION=PASS');
+console.log('CREATION_RECEIPT_TRACKING=PASS');
 console.log('SUCCESS_LOG_AFTER_FINAL_RECOVERY=YES');
 console.log('SUBSCRIPTION_VERIFIER_PARALLEL_ISOLATION_TESTS=PASS');

@@ -11,6 +11,7 @@
 // ownership, final database assertions run in finally, and any collected error
 // forces a nonzero exit with no top-level success claim.
 import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const databaseUrl = process.env.SUBSCRIPTION_STORAGE_DATABASE_URL ?? process.env.DATABASE_URL;
@@ -20,7 +21,51 @@ if (!databaseUrl) {
 }
 
 const coordinatorPath = fileURLToPath(new URL('./test-subscription-verifier-parallel-isolation.mjs', import.meta.url));
+const faultSuitePath = fileURLToPath(import.meta.url);
 const targetTables = ['forum_participations', 'forum_watch_subscriptions', 'forum_read_states', 'forum_mentions', 'forum_notification_facts'];
+const caseCleanupErrors = [];
+const caseFinalAssertionErrors = [];
+let suiteSignal = null;
+let activeCoordinator = null;
+
+function makeVerifierIdentity() {
+  const identity = {
+    runId: randomUUID(), principalId: randomUUID(), threadId: randomUUID(),
+    firstWatchId: randomUUID(), secondWatchId: randomUUID(),
+  };
+  identity.marker = `subscription-verifier:${identity.runId}`;
+  identity.applicationNames = [`subver:${identity.runId}:first`, `subver:${identity.runId}:second`];
+  return identity;
+}
+
+function makeCaseIdentity() {
+  const verifiers = Array.from({ length: 12 }, makeVerifierIdentity);
+  const harnesses = Array.from({ length: 3 }, () => {
+    const runId = randomUUID();
+    return {
+      runId,
+      marker: `subscription-verifier-harness:${runId}`,
+      sentinelPrincipalId: randomUUID(),
+      sentinelThreadId: randomUUID(),
+    };
+  });
+  return {
+    caseRunId: randomUUID(),
+    verifiers,
+    harnesses,
+    applicationNames: verifiers.flatMap((identity) => identity.applicationNames),
+  };
+}
+
+function captureFiveTableDigest() {
+  return psql(`SELECT md5(coalesce(string_agg(row_text, E'\\n' ORDER BY row_text), '')) FROM (
+ SELECT 'p:'||id::text||':'||to_jsonb(x)::text row_text FROM public.forum_participations x
+ UNION ALL SELECT 'w:'||id::text||':'||to_jsonb(x)::text FROM public.forum_watch_subscriptions x
+ UNION ALL SELECT 'r:'||thread_id::text||':'||principal_id::text||':'||to_jsonb(x)::text FROM public.forum_read_states x
+ UNION ALL SELECT 'm:'||id::text||':'||to_jsonb(x)::text FROM public.forum_mentions x
+ UNION ALL SELECT 'n:'||id::text||':'||to_jsonb(x)::text FROM public.forum_notification_facts x
+) rows;`, true);
+}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -112,24 +157,37 @@ SELECT
 `, true).replaceAll('|', ',');
 }
 
-function runCoordinator(fault) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [coordinatorPath], {
-      env: { ...process.env, SUBSCRIPTION_STORAGE_DATABASE_URL: databaseUrl, SUBSCRIPTION_COORDINATOR_TEST_FAULT: fault },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let output = '';
-    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
-    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
-    const timer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch { /* resolved by close below */ }
-    }, 240_000);
-    child.on('error', () => { /* resolved by close below */ });
-    child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, output });
-    });
+function runCoordinator(fault, caseIdentity, timeoutMs = 240_000) {
+  const child = spawn(process.execPath, [coordinatorPath], {
+    env: {
+      ...process.env,
+      SUBSCRIPTION_STORAGE_DATABASE_URL: databaseUrl,
+      SUBSCRIPTION_COORDINATOR_TEST_FAULT: fault,
+      SUBSCRIPTION_COORDINATOR_TEST_IDENTITY_PLAN: JSON.stringify({
+        verifiers: caseIdentity.verifiers.map(({ runId, principalId, threadId, firstWatchId, secondWatchId }) => ({ runId, principalId, threadId, firstWatchId, secondWatchId })),
+        harnesses: caseIdentity.harnesses.map(({ runId, sentinelPrincipalId, sentinelThreadId }) => ({ runId, sentinelPrincipalId, sentinelThreadId })),
+      }),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
   });
+  let output = '';
+  let spawnError = null;
+  let timedOut = false;
+  child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+  child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+  const done = new Promise((resolve) => {
+    child.on('error', (error) => { spawnError = error; });
+    child.on('close', (code, signal) => resolve({ code, signal, get output() { return output; }, spawnError, timedOut }));
+  });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') caseCleanupErrors.push(new Error(`timeout process-group kill failed: ${error.message}`)); }
+  }, timeoutMs);
+  done.finally(() => clearTimeout(timer));
+  const record = { child, done, getOutput: () => output, caseIdentity };
+  activeCoordinator = record;
+  return record;
 }
 
 function parseIdentityDump(output) {
@@ -152,6 +210,58 @@ function cleanupAfterCoordinator(dump, label) {
   psql('SELECT pg_catalog.pg_sleep(1);');
   assertGlobalZero(`fault suite cleanup after ${label}`);
   assert(countSessionsExact(dump.applicationNames ?? []) === '0', `coordinator sessions remained after ${label} suite cleanup`);
+}
+
+function runIdentityCounts(identity) {
+  return psql(`SELECT
+ (SELECT count(*) FROM public.forum_principals WHERE id=${sqlLiteral(identity.principalId)}::uuid),
+ (SELECT count(*) FROM public.forum_threads WHERE id=${sqlLiteral(identity.threadId)}::uuid),
+ (SELECT count(*) FROM public.forum_read_states WHERE thread_id=${sqlLiteral(identity.threadId)}::uuid AND principal_id=${sqlLiteral(identity.principalId)}::uuid),
+ (SELECT count(*) FROM public.forum_watch_subscriptions WHERE id IN (${sqlLiteral(identity.firstWatchId)}::uuid,${sqlLiteral(identity.secondWatchId)}::uuid));`, true).replaceAll('|', ',');
+}
+
+function harnessIdCounts(identity) {
+  return psql(`SELECT
+ (SELECT count(*) FROM public.forum_principals WHERE id=${sqlLiteral(identity.sentinelPrincipalId)}::uuid),
+ (SELECT count(*) FROM public.forum_threads WHERE id=${sqlLiteral(identity.sentinelThreadId)}::uuid);`, true).replaceAll('|', ',');
+}
+
+function cleanupTestOwnedForeign(identity, marker, principalId, threadId) {
+  psql(`BEGIN;
+DELETE FROM public.forum_read_states WHERE thread_id=${sqlLiteral(threadId)}::uuid AND principal_id=${sqlLiteral(principalId)}::uuid;
+DELETE FROM public.forum_threads WHERE id=${sqlLiteral(threadId)}::uuid AND title=${sqlLiteral(marker)} AND "createdById"=${sqlLiteral(marker)};
+DELETE FROM public.forum_principals WHERE id=${sqlLiteral(principalId)}::uuid AND auth_subject=${sqlLiteral(marker)} AND agent_id=${sqlLiteral(marker)};
+COMMIT;`);
+}
+
+async function cleanupCasePlan(context, label) {
+  const errors = [];
+  const attempt = (step, fn) => { try { fn(); } catch (error) { errors.push(new Error(`${label} ${step}: ${error.message}`)); } };
+  if (context.record?.child?.exitCode === null) {
+    try { process.kill(-context.record.child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') errors.push(new Error(`${label} process-group kill: ${error.message}`)); }
+    await Promise.race([context.record.done, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  }
+  attempt('exact session termination', () => terminateSessionsExact(context.identity.applicationNames));
+  for (const identity of context.identity.verifiers) attempt(`verifier cleanup ${identity.runId}`, () => externalCleanup(identity));
+  for (const harness of context.identity.harnesses) attempt(`harness cleanup ${harness.runId}`, () => recoverHarnessSentinel(harness));
+  for (const identity of context.identity.verifiers) {
+    attempt(`foreign mismatch cleanup ${identity.runId}`, () => cleanupTestOwnedForeign(identity, `foreign-mismatch:${identity.runId}`, identity.principalId, identity.threadId));
+  }
+  for (const harness of context.identity.harnesses) {
+    attempt(`tampered sentinel cleanup ${harness.runId}`, () => cleanupTestOwnedForeign(harness, `foreign-sentinel:${harness.runId}`, harness.sentinelPrincipalId, harness.sentinelThreadId));
+  }
+  attempt('session settle', () => psql('SELECT pg_catalog.pg_sleep(1);'));
+  for (const identity of context.identity.verifiers) {
+    attempt(`verifier final IDs ${identity.runId}`, () => assert(runIdentityCounts(identity) === '0,0,0,0', `residue ${runIdentityCounts(identity)}`));
+  }
+  for (const harness of context.identity.harnesses) {
+    attempt(`harness final IDs ${harness.runId}`, () => assert(harnessIdCounts(harness) === '0,0', `residue ${harnessIdCounts(harness)}`));
+  }
+  attempt('session final assertion', () => assert(countSessionsExact(context.identity.applicationNames) === '0', 'case-owned sessions remained'));
+  attempt('baseline final assertion', () => assert(captureFiveTableDigest() === context.baselineDigest, 'case baseline digest changed'));
+  attempt('global zero final assertion', () => assertGlobalZero(`fault suite cleanup after ${label}`));
+  if (errors.length) caseCleanupErrors.push(...errors);
+  return errors;
 }
 
 function expect(condition, message) {
@@ -261,6 +371,17 @@ const cases = [
     },
   },
   {
+    fault: 'sentinel-marker-tamper',
+    label: 'MARKER_MISMATCH_FAIL_CLOSED',
+    verify(result) {
+      expect(result.output.includes('ownership mismatch for harness'), 'tampered sentinel ownership mismatch was not reported');
+      expect(result.output.includes('harness sentinel exact-ID residue remained'), 'ID-only sentinel assertion did not detect tampered residue');
+      expect(!result.output.includes('COORDINATOR_HARNESS_SENTINEL_FINAL_ASSERTION=PASS'), 'sentinel PASS printed despite exact-ID residue');
+      expect(!result.output.includes('SUCCESS_LOG_AFTER_FINAL_RECOVERY=YES'), 'success ordering claim printed despite tampered residue');
+      expect(!result.output.includes('SUBSCRIPTION_VERIFIER_PARALLEL_ISOLATION_TESTS=PASS'), 'overall PASS printed despite tampered residue');
+    },
+  },
+  {
     fault: 'sentinel-recovery-failure',
     label: 'SENTINEL_RECOVERY_FAILURE_PROPAGATED',
     verify(result) {
@@ -283,18 +404,131 @@ const cases = [
   },
 ];
 
-assertGlobalZero('coordinator fault suite start');
-for (const testCase of cases) {
-  const result = await runCoordinator(testCase.fault);
-  assert(result.code !== 0 && result.signal !== 'SIGKILL', `${testCase.fault}: coordinator unexpectedly exited ${result.code}/${result.signal}`);
-  const dump = parseIdentityDump(result.output);
-  assert(dump !== null, `${testCase.fault}: coordinator failure did not persist an expected-identity dump`);
-  testCase.verify(result);
-  if (testCase.verifyAfterDump) testCase.verifyAfterDump(result, dump);
-  await cleanupAfterCoordinator(dump, testCase.fault);
-  console.log(`${testCase.label}=PASS`);
+const activeContexts = new Set();
+let suitePrimaryError = null;
+let suiteFinallyReached = false;
+
+async function emergencySuiteCleanup(signal) {
+  suiteSignal = signal;
+  console.error(`FAULT_SUITE_SIGNAL_HANDLER=${signal}`);
+  for (const context of activeContexts) await cleanupCasePlan(context, `signal-${signal}`);
+  process.exit(1);
+}
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { void emergencySuiteCleanup(signal); });
+
+async function runFaultSuiteSignalTest() {
+  const child = spawn(process.execPath, [faultSuitePath], {
+    env: { ...process.env, SUBSCRIPTION_STORAGE_DATABASE_URL: databaseUrl, SUBSCRIPTION_FAULT_SUITE_SIGNAL_WORKER: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+  let output = '';
+  child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+  child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+  const done = new Promise((resolve) => child.on('close', (code, signal) => resolve({ code, signal })));
+  for (let attempt = 0; attempt < 100 && !output.includes('FAULT_SUITE_SIGNAL_WORKER_READY'); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+  assert(output.includes('FAULT_SUITE_SIGNAL_WORKER_READY'), `fault-suite signal worker was not ready:\n${output}`);
+  child.kill('SIGTERM');
+  const result = await done;
+  assert(result.code !== 0 || result.signal, 'fault-suite SIGTERM worker unexpectedly succeeded');
+  assert(output.includes('FAULT_SUITE_SIGNAL_HANDLER=SIGTERM'), `fault-suite SIGTERM handler output missing:\n${output}`);
+  assertGlobalZero('fault-suite SIGTERM worker cleanup');
+  console.log('FAULT_SUITE_SIGTERM_CLEANUP=PASS');
 }
 
+async function runExpectedSelfFailure(label, fault, trigger, timeoutMs = 240_000) {
+  const context = { identity: makeCaseIdentity(), baselineDigest: captureFiveTableDigest(), record: null };
+  activeContexts.add(context);
+  let expectedError = null;
+  let cleanupErrors = [];
+  try {
+    context.record = runCoordinator(fault, context.identity, timeoutMs);
+    const result = await context.record.done;
+    trigger(result);
+    throw new Error(`${label}: self-failure trigger unexpectedly returned`);
+  } catch (error) {
+    expectedError = error;
+  } finally {
+    cleanupErrors = await cleanupCasePlan(context, label);
+    activeContexts.delete(context);
+  }
+  assert(expectedError, `${label}: expected primary self-failure was not preserved`);
+  assert(cleanupErrors.length === 0, `${label}: cleanup failed: ${cleanupErrors.map((error) => error.message).join('; ')}`);
+  console.log(`${label}=PASS`);
+}
+
+if (process.env.SUBSCRIPTION_FAULT_SUITE_SIGNAL_WORKER === '1') {
+  const workerContext = { identity: makeCaseIdentity(), baselineDigest: captureFiveTableDigest(), record: null };
+  activeContexts.add(workerContext);
+  workerContext.record = runCoordinator('process-group-kill-failure', workerContext.identity);
+  console.log('FAULT_SUITE_SIGNAL_WORKER_READY');
+  await new Promise(() => { setInterval(() => {}, 1_000); });
+} else {
+try {
+  assertGlobalZero('coordinator fault suite start');
+  for (const testCase of cases) {
+    const context = {
+      identity: makeCaseIdentity(),
+      baselineDigest: captureFiveTableDigest(),
+      record: null,
+      primaryCaseError: null,
+      cleanupErrors: [],
+      finalAssertionErrors: [],
+    };
+    activeContexts.add(context);
+    try {
+      for (const identity of context.identity.verifiers) assert(runIdentityCounts(identity) === '0,0,0,0', `${testCase.fault}: prespawn verifier IDs collided with baseline`);
+      for (const harness of context.identity.harnesses) assert(harnessIdCounts(harness) === '0,0', `${testCase.fault}: prespawn harness IDs collided with baseline`);
+      context.record = runCoordinator(testCase.fault, context.identity);
+      const result = await context.record.done;
+      assert(result.code !== 0 && result.signal !== 'SIGKILL', `${testCase.fault}: coordinator unexpectedly exited ${result.code}/${result.signal}`);
+      const dump = parseIdentityDump(result.output);
+      assert(dump !== null, `${testCase.fault}: coordinator failure did not persist a diagnostic identity dump`);
+      testCase.verify(result);
+      if (testCase.verifyAfterDump) testCase.verifyAfterDump(result, dump);
+    } catch (error) {
+      context.primaryCaseError = error;
+    } finally {
+      context.cleanupErrors = await cleanupCasePlan(context, testCase.fault);
+      activeContexts.delete(context);
+    }
+    if (context.primaryCaseError || context.cleanupErrors.length || context.finalAssertionErrors.length) {
+      throw new AggregateError(
+        [context.primaryCaseError, ...context.cleanupErrors, ...context.finalAssertionErrors].filter(Boolean),
+        `${testCase.fault}: primary case and cleanup errors preserved`,
+      );
+    }
+    console.log(`${testCase.label}=PASS`);
+  }
+  await runExpectedSelfFailure('FAULT_SUITE_OUTPUT_PARSE_FAILURE_CLEANUP', 'sentinel-recovery-failure', () => {
+    JSON.parse('{invalid coordinator output');
+  });
+  await runExpectedSelfFailure('FAULT_SUITE_ASSERTION_FAILURE_CLEANUP', 'sentinel-recovery-failure', () => {
+    assert(false, 'injected fault-suite assertion failure');
+  });
+  await runExpectedSelfFailure('FAULT_SUITE_COORDINATOR_TIMEOUT_CLEANUP', 'process-group-kill-failure', (result) => {
+    assert(result.timedOut, 'coordinator timeout injection did not fire');
+    throw new Error(`controlled coordinator timeout: ${result.code}/${result.signal}`);
+  }, 50);
+  await runFaultSuiteSignalTest();
+} catch (error) {
+  suitePrimaryError = error;
+} finally {
+  suiteFinallyReached = true;
+  for (const context of activeContexts) await cleanupCasePlan(context, 'suite-finally');
+  try { assertGlobalZero('fault suite top-level finally'); } catch (error) { caseFinalAssertionErrors.push(error); }
+}
+
+if (suitePrimaryError || caseCleanupErrors.length || caseFinalAssertionErrors.length) {
+  const failures = [suitePrimaryError, ...caseCleanupErrors, ...caseFinalAssertionErrors].filter(Boolean);
+  console.error(`PRIMARY_CASE_ERROR=${suitePrimaryError?.message ?? 'NONE'}`);
+  caseCleanupErrors.forEach((error, index) => console.error(`CASE_CLEANUP_ERRORS[${index}]=${error.message}`));
+  caseFinalAssertionErrors.forEach((error, index) => console.error(`CASE_FINAL_ASSERTION_ERRORS[${index}]=${error.message}`));
+  console.error(new AggregateError(failures, 'fault suite combined primary, cleanup, and final assertion report').message);
+  process.exit(1);
+}
+
+assert(suiteFinallyReached, 'fault suite top-level finally was not reached');
 console.log('COORDINATOR_PARSE_FAILURE_PROPAGATION=PASS');
 console.log('COORDINATOR_RECOVERY_FAILURE_PROPAGATION=PASS');
 console.log('COORDINATOR_GLOBAL_ZERO_FINAL_ASSERTION=PASS');
@@ -305,4 +539,16 @@ console.log('RECOVERY_ERROR_PRESERVED=PASS');
 console.log('COMBINED_ERROR_REPORTING=PASS');
 console.log('CHILD_KIND_BINDING=PASS');
 console.log('AMBIGUOUS_OUTPUT_REJECTED=PASS');
+console.log('FAULT_SUITE_IDENTITY_AUTHORITY=PRESPAWN_EXPECTED_IDENTITY');
+console.log('FAULT_SUITE_TOP_LEVEL_FINALLY=PASS');
+console.log('FAULT_SUITE_PRIMARY_ERROR_PRESERVED=PASS');
+console.log('FAULT_SUITE_CLEANUP_ERROR_PRESERVED=PASS');
+console.log('FAULT_SUITE_COMBINED_ERROR_REPORTING=PASS');
+console.log('FAULT_SUITE_BASELINE_FINAL_ASSERTION=PASS');
+console.log('FAULT_SUITE_OWNED_ID_FINAL_ASSERTION=PASS');
+console.log('FAULT_SUITE_SESSION_FINAL_ASSERTION=PASS');
+console.log('FAULT_SUITE_SIGKILL_CLEANUP_GUARANTEED=NO');
+console.log('FOREIGN_MARKER_NOT_DELETED_BY_COORDINATOR=PASS');
+console.log('FAULT_SUITE_TAMPERED_FIXTURE_RECOVERED=PASS');
 console.log('SUBSCRIPTION_COORDINATOR_FAILURE_RECOVERY_TESTS=PASS');
+}

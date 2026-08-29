@@ -391,9 +391,10 @@ not change the R2 `REQUEST_CHANGES` verdict, and does not authorize merge.
 
 ### 5.3 R4 fail-closed coordinator recovery amendment
 
-The R4 amendment closed the single R3 blocker
+The R4 amendment implemented a candidate fix for the single R3 blocker
 `BLOCKER-SUB-COORDINATOR-FAILURE-RECOVERY-004` in the external coordinator and
-its evidence. It changed no migration, schema, or runtime code. The coordinator
+its evidence; the subsequent independent R4 audit found two remaining verifier
+correctness blockers, so this section does not claim closure. It changed no migration, schema, or runtime code. The coordinator
 is now the recovery identity authority (`COORDINATOR_IDENTITY_AUTHORITY =
 PRESPAWN_EXPECTED_IDENTITY`): before spawning any child it generates and holds
 the child kind (`VERIFIER` / `CLEANUP_HARNESS`), fixture run ID, Principal /
@@ -460,7 +461,7 @@ COORDINATOR_GLOBAL_ZERO_FINAL_ASSERTION = PASS
 COORDINATOR_BASELINE_FINAL_ASSERTION = PASS
 RUN_SCOPED_SESSION_FINAL_ASSERTION = PASS
 COORDINATOR_OWNED_ROWS_FINAL_ASSERTION = PASS
-COORDINATOR_HARNESS_SENTINEL_FINAL_ASSERTION = PASS
+R4_COORDINATOR_HARNESS_SENTINEL_FINAL_ASSERTION = UNSUPPORTED_MARKER_QUALIFIED_ONLY
 PROCESS_GROUP_KILL_FAILURE_PROPAGATION = PASS
 OTHER_SESSION_PRESERVATION = PASS
 CHILD_KIND_BINDING = PASS
@@ -517,6 +518,76 @@ recorded because the fail-closed coordinator demonstrated it in this round. This
 amendment does not claim `BLOCKER_CLOSED = YES`, does not change the R3
 `REQUEST_CHANGES` verdict, and does not authorize merge; an independent R4
 re-audit is required.
+
+### 5.4 R5 sentinel terminal assertion and fault-suite self-cleanup amendment
+
+The R5 amendment separates cleanup authorization from terminal existence. Normal
+coordinator recovery remains marker-qualified by prespawned expected IDs and
+ownership markers. After child processes are joined, the coordinator records an
+atomic creation receipt from an exactly-once child acknowledgement or direct
+marker-qualified database observation. Only identities proven created by this
+run receive an ID-only terminal assertion. Thus marker tampering cannot authorize
+deletion, but it also cannot hide a coordinator-created row from the terminal
+check.
+
+The real marker-tamper fault case committed a harness sentinel, changed the exact
+Principal and Thread IDs to a known foreign marker, and killed the harness.
+Marker-qualified coordinator cleanup rejected the ownership mismatch and deleted
+nothing. The receipt-gated ID-only assertion detected both surviving IDs, forced
+a nonzero coordinator result, and suppressed sentinel, success-ordering, and
+overall PASS claims. The parent fault suite then used its prespawn plan, exact
+initial absence, and known injected marker to remove only its test-owned rows.
+
+The fault suite is now the prespawn identity authority for every case. Each case
+has controlled primary-error, cleanup-error, and final-assertion collections and
+unconditional per-case `finally`; the suite has a second top-level `finally`.
+Cleanup no longer depends on parsing the coordinator diagnostic dump. Controlled
+self-failures covered coordinator-output parse failure, suite assertion failure,
+coordinator timeout, marker tamper, and a SIGTERM worker. Every path terminated
+exact process groups/sessions, restored the exact five-table baseline, removed
+all prespawned IDs, and proved no case-owned backend remained. SIGKILL remains an
+honest external-recovery boundary rather than a self-cleanup guarantee.
+
+```text
+BLOCKER_AMENDMENT_ROUND = R5
+R4_BLOCKER_AMENDMENTS_IMPLEMENTED = YES
+INDEPENDENT_R5_REAUDIT_REQUIRED = YES
+
+SENTINEL_ID_ONLY_FINAL_ASSERTION = PASS
+CREATION_RECEIPT_TRACKING = PASS
+MARKER_MISMATCH_FAIL_CLOSED = PASS
+FOREIGN_MARKER_NOT_DELETED_BY_COORDINATOR = PASS
+FAULT_SUITE_TAMPERED_FIXTURE_RECOVERED = PASS
+
+FAULT_SUITE_IDENTITY_AUTHORITY = PRESPAWN_EXPECTED_IDENTITY
+FAULT_SUITE_TOP_LEVEL_FINALLY = PASS
+FAULT_SUITE_SELF_FAILURE_CLEANUP = PASS
+FAULT_SUITE_PRIMARY_ERROR_PRESERVED = PASS
+FAULT_SUITE_CLEANUP_ERROR_PRESERVED = PASS
+FAULT_SUITE_COMBINED_ERROR_REPORTING = PASS
+FAULT_SUITE_BASELINE_FINAL_ASSERTION = PASS
+FAULT_SUITE_OWNED_ID_FINAL_ASSERTION = PASS
+FAULT_SUITE_SESSION_FINAL_ASSERTION = PASS
+FAULT_SUITE_SIGTERM_CLEANUP = PASS
+FAULT_SUITE_SIGKILL_CLEANUP_GUARANTEED = NO
+
+COORDINATOR_PARSE_FAILURE_PROPAGATION = PASS
+COORDINATOR_RECOVERY_FAILURE_PROPAGATION = PASS
+COORDINATOR_GLOBAL_ZERO_FINAL_ASSERTION = PASS
+COORDINATOR_BASELINE_FINAL_ASSERTION = PASS
+PROCESS_GROUP_KILL_FAILURE_PROPAGATION = PASS
+CHILD_KIND_BINDING = PASS
+SUCCESS_LOG_AFTER_FINAL_RECOVERY = YES
+
+PARALLEL_VERIFIER_RUN_ISOLATION = PASS
+FIVE_TABLES_EMPTY = PASS
+SIGKILL_CLEANUP_GUARANTEED = NO
+HOST_CRASH_CLEANUP_GUARANTEED = NO
+```
+
+These are R5 amendment self-test results only. They do not claim any blocker is
+independently closed, do not change `SUBSCRIPTION_STORAGE_REVIEW` to `ACCEPT`, do
+not make the PR ready, and do not authorize merge.
 
 ## 6. Clean, snapshot, rerun, and legacy-data evidence
 
@@ -670,9 +741,11 @@ RUNTIME_SCOPE_CREEP = NO
 BLOCKER_AMENDMENT_IMPLEMENTED = YES
 R2_BLOCKER_AMENDMENTS_IMPLEMENTED = YES
 R3_BLOCKER_AMENDMENT_IMPLEMENTED = YES
+R4_BLOCKER_AMENDMENTS_IMPLEMENTED = YES
 INDEPENDENT_REAUDIT_REQUIRED = YES
 INDEPENDENT_R3_REAUDIT_REQUIRED = YES
 INDEPENDENT_R4_REAUDIT_REQUIRED = YES
+INDEPENDENT_R5_REAUDIT_REQUIRED = YES
 MERGE_ALLOWED = NO
 NEXT_TASK = 复审 审计
 ```
