@@ -389,6 +389,135 @@ HOST_CRASH_CLEANUP_GUARANTEED = NO
 This amendment does not claim that the blockers are independently closed, does
 not change the R2 `REQUEST_CHANGES` verdict, and does not authorize merge.
 
+### 5.3 R4 fail-closed coordinator recovery amendment
+
+The R4 amendment closed the single R3 blocker
+`BLOCKER-SUB-COORDINATOR-FAILURE-RECOVERY-004` in the external coordinator and
+its evidence. It changed no migration, schema, or runtime code. The coordinator
+is now the recovery identity authority (`COORDINATOR_IDENTITY_AUTHORITY =
+PRESPAWN_EXPECTED_IDENTITY`): before spawning any child it generates and holds
+the child kind (`VERIFIER` / `CLEANUP_HARNESS`), fixture run ID, Principal /
+Thread / first and second Watch IDs, ownership marker, expected
+`application_name` values, harness run ID, harness sentinel IDs, and harness
+ownership marker, and passes them to children through explicit test-only
+environment variables (`SUBSCRIPTION_VERIFIER_COORDINATOR_*`,
+`SUBSCRIPTION_CLEANUP_HARNESS_COORDINATOR_*`). The independent verifier and
+harness execution paths still default to their own `randomUUID` identities.
+
+Child stdout metadata is now used only for validation: each field must appear
+exactly once, be a well-formed UUID where applicable, bind marker to run ID,
+keep fixture IDs distinct, never mix verifier and harness metadata prefixes,
+and equal the coordinator-expected identity field for field. Missing, partial,
+duplicated, forged (wrong run ID, wrong marker, non-UUID, duplicate IDs,
+foreign-run IDs), or mixed-kind metadata records `METADATA_VALIDATION = FAIL`
+and forces a nonzero exit, while the coordinator still performs
+marker-qualified recovery from its own prespawned expected identity.
+
+All silent recovery catches were removed. The coordinator collects
+`PRIMARY_ERROR`, `RECOVERY_ERRORS[]`, and `FINAL_ASSERTION_ERRORS[]` into an
+`AggregateError`-style report; any collected error forces a nonzero exit;
+external cleanup retries once; later cleanup errors never replace the primary
+test error and the primary error never masks cleanup failures. Top-level
+success claims print only after every child has exited, every expected fixture
+is marker-recovered, every harness sentinel is recovered, baseline cleanup
+completed, the exact baseline is restored, the global five-table final
+assertion passes, no run-scoped database backend residue remains, and no
+recovery error exists (`SUCCESS_LOG_AFTER_FINAL_RECOVERY = YES`).
+
+The `finally` block now always executes database-backed final assertions on
+every path: per-child owned ReadState / Watch / Thread / Principal rows = 0,
+harness sentinel rows = 0, known harness child residue = 0, coordinator-created
+`application_name` sessions = 0, exact five-table baseline restoration (PK set
+plus stable content digest compared byte-for-byte with the start-state digest),
+and global zero of the five subscription tables. Process-group kill failure now
+escalates through exact run-scoped `application_name` backend termination and an
+exact-pid kill, verifies the child/backend actually ended, and propagates any
+failure; unknown verifier sessions are never matched by broad regex, and a
+live foreign control session is proven preserved across recovery
+(`OTHER_SESSION_PRESERVATION = PASS`).
+
+A new fault suite `test:subscription-coordinator-failure-recovery` ran against
+the same disposable PostgreSQL 16.14 database and drove the real coordinator
+through one injected failure per case: child pre-metadata exit; partial
+metadata; duplicate metadata; mixed-kind output; forged metadata in five
+variants; injected process-group kill failure with backend fallback; transient
+external cleanup failure recovered by retry; permanent external cleanup
+failure; marker mismatch against a foreign-marked fixture; sentinel recovery
+failure; and a deliberately skipped child cleanup. Every case exited nonzero
+with the original error preserved, never printed a global-zero PASS while
+residue existed, never deleted foreign-marker rows, and left a recoverable,
+exactly-identified end state.
+
+```text
+BLOCKER_AMENDMENT_ROUND = R4
+R3_BLOCKER_AMENDMENT_IMPLEMENTED = YES
+INDEPENDENT_R4_REAUDIT_REQUIRED = YES
+
+COORDINATOR_IDENTITY_AUTHORITY = PRESPAWN_EXPECTED_IDENTITY
+COORDINATOR_PARSE_FAILURE_PROPAGATION = PASS
+COORDINATOR_RECOVERY_FAILURE_PROPAGATION = PASS
+COORDINATOR_GLOBAL_ZERO_FINAL_ASSERTION = PASS
+COORDINATOR_BASELINE_FINAL_ASSERTION = PASS
+RUN_SCOPED_SESSION_FINAL_ASSERTION = PASS
+COORDINATOR_OWNED_ROWS_FINAL_ASSERTION = PASS
+COORDINATOR_HARNESS_SENTINEL_FINAL_ASSERTION = PASS
+PROCESS_GROUP_KILL_FAILURE_PROPAGATION = PASS
+OTHER_SESSION_PRESERVATION = PASS
+CHILD_KIND_BINDING = PASS
+AMBIGUOUS_OUTPUT_REJECTED = PASS
+PRIMARY_ERROR_PRESERVED = PASS
+RECOVERY_ERROR_PRESERVED = PASS
+COMBINED_ERROR_REPORTING = PASS
+SILENT_RECOVERY_CATCHES = REMOVED
+SUCCESS_LOG_AFTER_FINAL_RECOVERY = YES
+
+CHILD_PRE_METADATA_EXIT_RECOVERY = PASS
+PARTIAL_METADATA_REJECTED = PASS
+DUPLICATE_METADATA_REJECTED = PASS
+FORGED_METADATA_REJECTED = PASS
+TRANSIENT_CLEANUP_FAILURE_RECOVERED_WITH_RETRY = PASS
+PERMANENT_CLEANUP_FAILURE_PROPAGATED = PASS
+MARKER_MISMATCH_NO_CROSS_MARKER_DELETE = PASS
+SENTINEL_RECOVERY_FAILURE_PROPAGATED = PASS
+DELIBERATE_RESIDUE_CAUGHT_BY_FINAL_ASSERTION = PASS
+SUBSCRIPTION_COORDINATOR_FAILURE_RECOVERY_TESTS = PASS
+
+PARALLEL_VERIFIER_RUN_ISOLATION = PASS
+CROSS_RUN_DELETE_PROTECTION = PASS
+CROSS_RUN_SESSION_TERMINATION_PROTECTION = PASS
+PER_RUN_GLOBAL_ZERO_ASSUMPTION_REMOVED = YES
+MAIN_FIXTURE_IDENTITY = UNIQUE_PER_RUN
+BASELINE_CAPTURE = EXACT
+BASELINE_PRESERVATION = PASS
+NONEMPTY_EXACT_BASELINE_PRESERVATION = PASS
+LOOKALIKE_MARKER_BASELINE_PRESERVATION = PASS
+EARLY_EXIT_ERROR_PRESERVATION = PASS
+FIXTURE_PARSE_ERROR_CONTROLLED = PASS
+SIGINT_CLEANUP = PASS
+SIGTERM_CLEANUP = PASS
+SIGHUP_CLEANUP = PASS
+UNCAUGHT_EXCEPTION_CLEANUP = PASS
+UNHANDLED_REJECTION_CLEANUP = PASS
+HARNESS_SIGKILL_CLEANUP_GUARANTEED = NO
+HARNESS_INTERRUPTION_RESIDUE_IDENTIFIABLE = PASS
+HARNESS_EXTERNAL_RECOVERY = PASS
+
+SUBSCRIPTION_CATALOG_REGRESSION = PASS
+SUBSCRIPTION_BEHAVIOR_REGRESSION = PASS
+WATCH_CONCURRENCY_REGRESSION = PASS
+READ_CURSOR_CONCURRENCY_REGRESSION = PASS
+FIVE_TABLES_EMPTY = PASS
+
+SIGKILL_CLEANUP_GUARANTEED = NO
+HOST_CRASH_CLEANUP_GUARANTEED = NO
+```
+
+`HARNESS_EXTERNAL_RECOVERY = PASS` remains an amendment candidate that is only
+recorded because the fail-closed coordinator demonstrated it in this round. This
+amendment does not claim `BLOCKER_CLOSED = YES`, does not change the R3
+`REQUEST_CHANGES` verdict, and does not authorize merge; an independent R4
+re-audit is required.
+
 ## 6. Clean, snapshot, rerun, and legacy-data evidence
 
 ```text
@@ -487,6 +616,7 @@ npm test = PASS
 npm run verify:subscription-storage = PASS
 npm run test:subscription-verifier-cleanup = PASS
 npm run test:subscription-verifier-parallel-isolation = PASS
+npm run test:subscription-coordinator-failure-recovery = PASS
 TESTS = 294
 SUITES = 39
 PASSED = 294
@@ -539,8 +669,10 @@ RUNTIME_CODE_CHANGED = NO
 RUNTIME_SCOPE_CREEP = NO
 BLOCKER_AMENDMENT_IMPLEMENTED = YES
 R2_BLOCKER_AMENDMENTS_IMPLEMENTED = YES
+R3_BLOCKER_AMENDMENT_IMPLEMENTED = YES
 INDEPENDENT_REAUDIT_REQUIRED = YES
 INDEPENDENT_R3_REAUDIT_REQUIRED = YES
+INDEPENDENT_R4_REAUDIT_REQUIRED = YES
 MERGE_ALLOWED = NO
 NEXT_TASK = 复审 审计
 ```

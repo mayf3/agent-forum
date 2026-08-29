@@ -11,6 +11,12 @@ if (!databaseUrl) {
   process.exit(2);
 }
 
+// Test-only fault: exit before any metadata output so the external coordinator
+// must recover from the absence of child stdout identity instead of trusting it.
+if (process.env.SUBSCRIPTION_VERIFIER_TEST_FAULT === 'pre-metadata-exit') {
+  process.exit(3);
+}
+
 const targetTables = [
   'forum_participations',
   'forum_watch_subscriptions',
@@ -34,7 +40,44 @@ function fixtureUuid(name) {
   return value;
 }
 
-const fixtureRunId = randomUUID();
+// Coordinator mode identity: the external parallel-isolation coordinator
+// prespawns this run's identity and passes it through explicit test-only
+// environment variables. Without them the independent verifier path keeps
+// generating its own random UUIDs.
+const coordinatorIdentityFields = {
+  RUN_ID: 'SUBSCRIPTION_VERIFIER_COORDINATOR_RUN_ID',
+  PRINCIPAL_ID: 'SUBSCRIPTION_VERIFIER_COORDINATOR_PRINCIPAL_ID',
+  THREAD_ID: 'SUBSCRIPTION_VERIFIER_COORDINATOR_THREAD_ID',
+  FIRST_WATCH_ID: 'SUBSCRIPTION_VERIFIER_COORDINATOR_FIRST_WATCH_ID',
+  SECOND_WATCH_ID: 'SUBSCRIPTION_VERIFIER_COORDINATOR_SECOND_WATCH_ID',
+};
+
+function readCoordinatorIdentity() {
+  const present = Object.values(coordinatorIdentityFields).filter((name) => process.env[name] !== undefined);
+  if (present.length === 0) return null;
+  const missing = Object.values(coordinatorIdentityFields).filter((name) => process.env[name] === undefined);
+  if (missing.length > 0) {
+    throw new Error(`coordinator identity environment variables must be set together; missing ${missing.join(', ')}`);
+  }
+  const values = {};
+  for (const [field, envName] of Object.entries(coordinatorIdentityFields)) {
+    const value = process.env[envName];
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+      throw new Error(`invalid coordinator ${field} UUID: ${value}`);
+    }
+    if (process.env[`SUBSCRIPTION_VERIFIER_TEST_${field}`] !== undefined) {
+      throw new Error(`both coordinator identity and test-only override provided for ${field}`);
+    }
+    values[field] = value;
+  }
+  if (new Set([values.PRINCIPAL_ID, values.THREAD_ID, values.FIRST_WATCH_ID, values.SECOND_WATCH_ID]).size !== 4) {
+    throw new Error('coordinator identity fixture IDs are not distinct');
+  }
+  return values;
+}
+
+const coordinatorIdentity = readCoordinatorIdentity();
+const fixtureRunId = coordinatorIdentity?.RUN_ID ?? randomUUID();
 const ownershipMarker = `subscription-verifier:${fixtureRunId}`;
 const decoySchema = `subscription_decoy_${fixtureRunId.replaceAll('-', '')}`;
 const fixtureNames = [
@@ -48,7 +91,7 @@ const fixtureNames = [
   'MAIN_NOTIFICATION_1_ID', 'MAIN_NOTIFICATION_2_ID',
   'MAIN_NOTIFICATION_3_ID', 'MAIN_NOTIFICATION_4_ID',
 ];
-const fixtures = Object.fromEntries(fixtureNames.map((name) => [name, fixtureUuid(name)]));
+const fixtures = Object.fromEntries(fixtureNames.map((name) => [name, coordinatorIdentity?.[name] ?? fixtureUuid(name)]));
 const principalId = fixtures.PRINCIPAL_ID;
 const threadId = fixtures.THREAD_ID;
 const firstWatchId = fixtures.FIRST_WATCH_ID;
@@ -547,13 +590,53 @@ if (!Number.isSafeInteger(holdAfterSetupMs) || holdAfterSetupMs < 0 || holdAfter
   throw new Error(`invalid test-only HOLD_AFTER_SETUP_MS: ${process.env.SUBSCRIPTION_VERIFIER_TEST_HOLD_AFTER_SETUP_MS}`);
 }
 
-console.log(`FIXTURE_RUN_ID=${fixtureRunId}`);
-console.log(`FIXTURE_OWNERSHIP_MARKER=${ownershipMarker}`);
-console.log(`FIXTURE_PRINCIPAL_ID=${principalId}`);
-console.log(`FIXTURE_THREAD_ID=${threadId}`);
-console.log(`FIXTURE_FIRST_WATCH_ID=${firstWatchId}`);
-console.log(`FIXTURE_SECOND_WATCH_ID=${secondWatchId}`);
-console.log(`MAIN_FIXTURE_IDENTITY=UNIQUE_PER_RUN`);
+const fixtureMetadataLines = {
+  FIXTURE_RUN_ID: fixtureRunId,
+  FIXTURE_OWNERSHIP_MARKER: ownershipMarker,
+  FIXTURE_PRINCIPAL_ID: principalId,
+  FIXTURE_THREAD_ID: threadId,
+  FIXTURE_FIRST_WATCH_ID: firstWatchId,
+  FIXTURE_SECOND_WATCH_ID: secondWatchId,
+};
+
+// Test-only metadata fault modes: the verifier still uses its real coordinator
+// identity for every database operation, but the echoed metadata is absent,
+// partial, duplicated, forged, or mixed with foreign-kind prefixes so the
+// coordinator must reject it and recover from its own expected identity.
+if (faultMode === 'partial-metadata') {
+  console.log(`FIXTURE_RUN_ID=${fixtureRunId}`);
+  console.log(`FIXTURE_OWNERSHIP_MARKER=${ownershipMarker}`);
+  process.exit(3);
+}
+if (faultMode === 'duplicate-metadata') {
+  for (const [name, value] of Object.entries(fixtureMetadataLines)) console.log(`${name}=${value}`);
+  console.log(`FIXTURE_RUN_ID=${fixtureRunId}`);
+  process.exit(3);
+}
+let printedMetadataLines = fixtureMetadataLines;
+if (faultMode === 'forged-metadata') {
+  const foreignRunId = randomUUID();
+  const forgedVariants = {
+    'wrong-run-id': { ...fixtureMetadataLines, FIXTURE_RUN_ID: foreignRunId, FIXTURE_OWNERSHIP_MARKER: `subscription-verifier:${foreignRunId}` },
+    'wrong-marker': { ...fixtureMetadataLines, FIXTURE_OWNERSHIP_MARKER: `subscription-verifier:${randomUUID()}` },
+    'non-uuid': { ...fixtureMetadataLines, FIXTURE_PRINCIPAL_ID: 'not-a-uuid' },
+    'duplicate-ids': { ...fixtureMetadataLines, FIXTURE_THREAD_ID: principalId },
+    'foreign-run': {
+      FIXTURE_RUN_ID: foreignRunId,
+      FIXTURE_OWNERSHIP_MARKER: `subscription-verifier:${foreignRunId}`,
+      FIXTURE_PRINCIPAL_ID: randomUUID(),
+      FIXTURE_THREAD_ID: randomUUID(),
+      FIXTURE_FIRST_WATCH_ID: randomUUID(),
+      FIXTURE_SECOND_WATCH_ID: randomUUID(),
+    },
+  };
+  const forgedVariant = process.env.SUBSCRIPTION_VERIFIER_TEST_FORGED_VARIANT ?? '';
+  printedMetadataLines = forgedVariants[forgedVariant];
+  if (!printedMetadataLines) throw new Error(`unknown forged metadata variant: ${forgedVariant}`);
+}
+for (const [name, value] of Object.entries(printedMetadataLines)) console.log(`${name}=${value}`);
+if (faultMode === 'mixed-metadata') console.log(`HARNESS_RUN_ID=${randomUUID()}`);
+console.log('MAIN_FIXTURE_IDENTITY=UNIQUE_PER_RUN');
 const baseline = captureBaseline();
 console.log('BASELINE_CAPTURE=EXACT');
 
