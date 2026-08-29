@@ -35,12 +35,16 @@ model ForumThread {
   currentRevision    Int?            @map("current_revision")
   creatorPrincipal   ForumPrincipal? @relation("ForumThreadCreatorPrincipal", fields: [creatorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_threads_creator_principal_fk")
 
-  participants ForumThreadParticipant[]
-  messages     ForumThreadMessage[]
-  snapshots    ForumContextSnapshot[]
-  outcomes     ForumOutcome[]
-  views        ForumThreadView[]
-  auditEvents  ForumAuditEvent[]
+  participants       ForumThreadParticipant[]
+  messages           ForumThreadMessage[]
+  snapshots          ForumContextSnapshot[]
+  outcomes           ForumOutcome[]
+  views              ForumThreadView[]
+  auditEvents        ForumAuditEvent[]
+  participationFacts ForumParticipation[]
+  watchSubscriptions ForumWatchSubscription[]
+  readStates         ForumReadState[]
+  notificationFacts  ForumNotificationFact[]
 
   @@index([status])
   @@index([type])
@@ -115,7 +119,9 @@ model ForumThreadMessage {
   discussionRevision Int?            @map("discussion_revision")
   authorPrincipal    ForumPrincipal? @relation("ForumMessageAuthorPrincipal", fields: [authorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_messages_author_principal_fk")
 
-  reactions ForumReaction[]
+  reactions         ForumReaction[]
+  mentionFacts      ForumMention[]
+  notificationFacts ForumNotificationFact[]
 
   @@index([threadId, seq])
   @@index([threadId, createdAt])
@@ -204,6 +210,11 @@ model ForumPrincipal {
   submittedReports             ForumReport[]             @relation("ForumReportReporterPrincipal")
   handledReports               ForumReport[]             @relation("ForumReportHandledByPrincipal")
   actedReactions               ForumReaction[]           @relation("ForumReactionActorPrincipal")
+  participationFacts           ForumParticipation[]
+  watchSubscriptions           ForumWatchSubscription[]
+  readStates                   ForumReadState[]
+  mentionsReceived             ForumMention[]
+  notificationFacts            ForumNotificationFact[]
 
   @@index([status])
   @@index([principalType])
@@ -267,16 +278,17 @@ model ForumReport {
 // AC#4: reuses existing forum.read/forum.write scopes — no new scope.
 
 model ForumReaction {
-  id               String             @id @default(uuid()) @db.Uuid
-  messageId        String             @map("message_id") @db.Uuid
-  message          ForumThreadMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  threadId         String             @map("thread_id") @db.Uuid // denormalized for query convenience
-  principalId      String             @map("principal_id")
-  principalName    String             @map("principal_name")
-  emoji            String
-  createdAt        DateTime           @default(now()) @map("created_at")
-  actorPrincipalId String?            @map("actor_principal_id") @db.Uuid
-  actorPrincipal   ForumPrincipal?    @relation("ForumReactionActorPrincipal", fields: [actorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_reactions_actor_principal_fk")
+  id                String                  @id @default(uuid()) @db.Uuid
+  messageId         String                  @map("message_id") @db.Uuid
+  message           ForumThreadMessage      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  threadId          String                  @map("thread_id") @db.Uuid // denormalized for query convenience
+  principalId       String                  @map("principal_id")
+  principalName     String                  @map("principal_name")
+  emoji             String
+  createdAt         DateTime                @default(now()) @map("created_at")
+  actorPrincipalId  String?                 @map("actor_principal_id") @db.Uuid
+  actorPrincipal    ForumPrincipal?         @relation("ForumReactionActorPrincipal", fields: [actorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_reactions_actor_principal_fk")
+  notificationFacts ForumNotificationFact[]
 
   @@unique([messageId, principalId, emoji])
   @@index([messageId])
@@ -326,6 +338,9 @@ model MigrationLegacyEvidence {
   candidatePrincipal ForumPrincipal?          @relation("MigrationEvidenceCandidatePrincipal", fields: [candidatePrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   fieldDecisions     MigrationFieldDecision[]
   quarantine         MigrationQuarantine?
+  participationFacts ForumParticipation[]
+  watchSubscriptions ForumWatchSubscription[]
+  readStates         ForumReadState[]
 
   @@unique([migrationRunId, sourceTable, sourceRowReference])
   @@map("forum_migration_legacy_evidence")
@@ -382,6 +397,101 @@ model MigrationValidationResult {
 
   @@unique([migrationRunId, checkId])
   @@map("forum_migration_validation_results")
+}
+
+// ─── Phase 2 subscription storage (empty; no runtime readers/writers) ──────
+
+model ForumParticipation {
+  id                 String    @id @default(uuid()) @db.Uuid
+  threadId           String    @map("thread_id") @db.Uuid
+  principalId        String    @map("principal_id") @db.Uuid
+  presentationRole   String?   @map("presentation_role")
+  presentationStatus String?   @map("presentation_status")
+  joinedAt           DateTime? @map("joined_at") @db.Timestamptz(3)
+  leftAt             DateTime? @map("left_at") @db.Timestamptz(3)
+  factState          String    @map("fact_state")
+  provenance         String
+  legacyEvidenceId   String?   @map("legacy_evidence_id") @db.Uuid
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  thread         ForumThread              @relation(fields: [threadId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  principal      ForumPrincipal           @relation(fields: [principalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  legacyEvidence MigrationLegacyEvidence? @relation(fields: [legacyEvidenceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([threadId, principalId])
+  @@map("forum_participations")
+}
+
+model ForumWatchSubscription {
+  id               String    @id @default(uuid()) @db.Uuid
+  threadId         String    @map("thread_id") @db.Uuid
+  principalId      String    @map("principal_id") @db.Uuid
+  state            String
+  source           String
+  provenance       String
+  startedAt        DateTime? @map("started_at") @db.Timestamptz(3)
+  endedAt          DateTime? @map("ended_at") @db.Timestamptz(3)
+  legacyEvidenceId String?   @map("legacy_evidence_id") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  thread         ForumThread              @relation(fields: [threadId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  principal      ForumPrincipal           @relation(fields: [principalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  legacyEvidence MigrationLegacyEvidence? @relation(fields: [legacyEvidenceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@map("forum_watch_subscriptions")
+}
+
+model ForumReadState {
+  threadId         String    @map("thread_id") @db.Uuid
+  principalId      String    @map("principal_id") @db.Uuid
+  state            String
+  lastReadSeq      Int?      @map("last_read_seq")
+  lastReadAt       DateTime? @map("last_read_at") @db.Timestamptz(3)
+  provenance       String
+  legacyEvidenceId String?   @map("legacy_evidence_id") @db.Uuid
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  thread         ForumThread              @relation(fields: [threadId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  principal      ForumPrincipal           @relation(fields: [principalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  legacyEvidence MigrationLegacyEvidence? @relation(fields: [legacyEvidenceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([threadId, principalId])
+  @@map("forum_read_states")
+}
+
+model ForumMention {
+  id                   String   @id @default(uuid()) @db.Uuid
+  messageId            String   @map("message_id") @db.Uuid
+  mentionedPrincipalId String   @map("mentioned_principal_id") @db.Uuid
+  sourceAgentId        String?  @map("source_agent_id")
+  createdAt            DateTime @map("created_at") @db.Timestamptz(3)
+
+  message            ForumThreadMessage @relation(fields: [messageId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  mentionedPrincipal ForumPrincipal     @relation(fields: [mentionedPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([messageId, mentionedPrincipalId])
+  @@map("forum_mentions")
+}
+
+model ForumNotificationFact {
+  id                   String   @id @default(uuid()) @db.Uuid
+  recipientPrincipalId String   @map("recipient_principal_id") @db.Uuid
+  threadId             String   @map("thread_id") @db.Uuid
+  messageId            String?  @map("message_id") @db.Uuid
+  reactionId           String?  @map("reaction_id") @db.Uuid
+  reason               String
+  sourceEventKey       String   @map("source_event_key")
+  createdAt            DateTime @map("created_at") @db.Timestamptz(3)
+
+  recipientPrincipal ForumPrincipal      @relation(fields: [recipientPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  thread             ForumThread         @relation(fields: [threadId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  message            ForumThreadMessage? @relation(fields: [messageId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reaction           ForumReaction?      @relation(fields: [reactionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([recipientPrincipalId, sourceEventKey])
+  @@map("forum_notification_facts")
 }
 
 // ─── Forum Audit Event (append-only evidence storage) ──────────────────────
