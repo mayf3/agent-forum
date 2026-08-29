@@ -325,6 +325,7 @@ INSERT INTO public.forum_threads (id,title,"createdById","createdByName","create
   (${sqlLiteral(sentinelThreadId)},${sqlLiteral(sentinelMarker)},${sqlLiteral(sentinelMarker)},'sentinel',now(),now());
 COMMIT;
 `);
+  console.log('HARNESS_SENTINEL_INSERT_COMMITTED=YES');
   if (harnessFault === 'assertion') throw new Error('injected harness assertion failure');
   if (pauseWithChild) {
     const coordinatorChildEnv = {};
@@ -336,6 +337,7 @@ COMMIT;
       coordinatorChildEnv.SUBSCRIPTION_VERIFIER_COORDINATOR_SECOND_WATCH_ID = harnessChildCoordinatorIdentity.SECOND_WATCH_ID;
     }
     const held = await runVerifierUntilSetup({}, coordinatorChildEnv);
+    console.log('HARNESS_CHILD_INSERT_COMMITTED=YES');
     console.log(`HARNESS_CHILD_PID=${held.child.pid}`);
     console.log(`HARNESS_CHILD_FIXTURE_RUN_ID=${held.fixture.runId}`);
     console.log(`HARNESS_CHILD_FIXTURE_OWNERSHIP_MARKER=${held.fixture.marker}`);
