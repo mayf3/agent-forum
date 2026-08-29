@@ -16,6 +16,7 @@ const verifierPath = fileURLToPath(new URL('./verify-subscription-storage.mjs', 
 const harnessPath = fileURLToPath(new URL('./test-subscription-verifier-cleanup.mjs', import.meta.url));
 const targetTables = ['forum_participations', 'forum_watch_subscriptions', 'forum_read_states', 'forum_mentions', 'forum_notification_facts'];
 const allChildren = new Set();
+const childRecords = new Map();
 const baseline = {
   marker: 'subscription-verifier:customer-data',
   principal1: randomUUID(), principal2: randomUUID(), thread: randomUUID(), message: randomUUID(),
@@ -117,6 +118,7 @@ function start(script, extraEnv = {}) {
   const child = spawn(process.execPath, [script], {
     env: { ...process.env, SUBSCRIPTION_STORAGE_DATABASE_URL: databaseUrl, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
   });
   allChildren.add(child);
   let output = '';
@@ -135,6 +137,7 @@ function start(script, extraEnv = {}) {
       resolve({ child, code, signal, output, spawnError });
     });
   });
+  childRecords.set(child, { child, done, getOutput: () => output });
   const waitFor = (text) => new Promise((resolve, reject) => {
     if (output.includes(text)) return resolve(output);
     const timer = setTimeout(() => {
@@ -246,29 +249,6 @@ function recoverHarnessSentinel(harness) {
   psql(`BEGIN;
 DELETE FROM public.forum_threads WHERE id=${sqlLiteral(harness.threadId)}::uuid AND title=${sqlLiteral(harness.marker)} AND "createdById"=${sqlLiteral(harness.marker)};
 DELETE FROM public.forum_principals WHERE id=${sqlLiteral(harness.principalId)}::uuid AND auth_subject=${sqlLiteral(harness.marker)} AND agent_id=${sqlLiteral(harness.marker)};
-COMMIT;`);
-}
-
-function coordinatorRecovery() {
-  psql(`
-SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity
-WHERE pid <> pg_catalog.pg_backend_pid()
-  AND application_name ~ '^subver:[0-9a-f-]{36}:(first|second)$';
-BEGIN;
-DELETE FROM public.forum_read_states r USING public.forum_principals p, public.forum_threads t
-WHERE p.id=r.principal_id AND t.id=r.thread_id AND p.auth_subject=p.agent_id
-  AND p.auth_subject ~ '^subscription-verifier:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-  AND t.title=t."createdById" AND t.title=p.auth_subject;
-DELETE FROM public.forum_watch_subscriptions w USING public.forum_principals p, public.forum_threads t
-WHERE p.id=w.principal_id AND t.id=w.thread_id AND p.auth_subject=p.agent_id
-  AND p.auth_subject ~ '^subscription-verifier:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-  AND t.title=t."createdById" AND t.title=p.auth_subject;
-DELETE FROM public.forum_threads WHERE title="createdById"
-  AND (title ~ '^subscription-verifier:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-    OR title ~ '^subscription-verifier-harness:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$');
-DELETE FROM public.forum_principals WHERE auth_subject=agent_id
-  AND (auth_subject ~ '^subscription-verifier:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-    OR auth_subject ~ '^subscription-verifier-harness:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$');
 COMMIT;`);
 }
 
@@ -409,9 +389,16 @@ try {
   console.log('HARNESS_EXTERNAL_RECOVERY=PASS');
   console.log('SUBSCRIPTION_VERIFIER_PARALLEL_ISOLATION_TESTS=PASS');
 } finally {
-  for (const child of allChildren) {
-    if (child.exitCode === null) child.kill('SIGKILL');
+  const running = [...childRecords.values()].filter(({ child }) => child.exitCode === null);
+  for (const { child } of running) {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') console.error(`process-group kill failed: ${error.message}`); }
   }
-  try { coordinatorRecovery(); } catch (error) { console.error(`coordinator recovery failed: ${error.message}`); }
+  await Promise.allSettled(running.map(({ done }) => done));
+  for (const { getOutput } of childRecords.values()) {
+    const output = getOutput();
+    try { externalCleanup(parseFixture(output)); } catch {}
+    try { externalCleanup(parseHarnessChild(output)); } catch {}
+    try { recoverHarnessSentinel(parseHarness(output)); } catch {}
+  }
   try { cleanupBaseline(); } catch (error) { console.error(`baseline cleanup failed: ${error.message}`); }
 }
