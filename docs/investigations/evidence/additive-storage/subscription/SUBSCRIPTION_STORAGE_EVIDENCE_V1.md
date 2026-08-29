@@ -160,15 +160,26 @@ RAW_SQL_OBJECTS = 12
 ```
 
 The ordinary behavior and decoy probes run in one transaction and finish with
-`ROLLBACK`. The two-session concurrency probes necessarily expose a committed
-synthetic parent fixture and winning transaction to the waiting session. They
-run only on disposable databases. Every verifier run generates unique fixture
-IDs and persists an exact ownership marker on both parent rows. Setup commits
-Principal, Thread, and ReadState atomically; cleanup deletes only exact IDs whose
-parent markers prove ownership. Catchable failures and signals receive
-best-effort cleanup. SIGKILL, host crash, forced container deletion, and a
-permanent database outage cannot guarantee finally or signal-handler execution.
-Any SIGKILL residue remains safely identifiable by its unique ownership marker.
+`ROLLBACK`. Every transaction-only fixture ID, unique parent label, event key,
+and decoy schema is run-unique. Because catalog decoy probes temporarily rename
+shared public objects, only the rollback-only main transaction is serialized by
+a fixed transaction-scoped advisory lock; the later two-session probes remain
+parallel across verifier processes. The two-session concurrency probes
+necessarily expose a committed synthetic parent fixture and winning transaction
+to the waiting session. They run only on disposable databases.
+
+Each verifier captures an exact JSONB baseline of every non-verifier-owned row in
+the five tables, proves that baseline unchanged after cleanup, and asserts zero
+only for its own exact fixture IDs. Rows whose exact Principal and Thread parent
+markers identify another valid verifier run are excluded from the baseline and
+are neither treated as contamination nor deleted. Global five-table zero is
+owned only by the external coordinator before all parallel runs and after every
+run or external recovery completes. Setup commits Principal, Thread, and
+ReadState atomically; cleanup deletes only exact IDs whose parent markers prove
+ownership. Catchable failures and signals receive best-effort cleanup. SIGKILL,
+host crash, forced container deletion, and a permanent database outage cannot
+guarantee finally or signal-handler execution. Any SIGKILL residue remains
+safely identifiable by its unique ownership marker.
 
 ```text
 CONCURRENCY_FIXTURE_IDENTITY = UNIQUE_PER_RUN
@@ -293,16 +304,90 @@ SIGKILL_BOUNDARY_TEST = PASS
 PREEXISTING_PARENT_PRESERVATION = PASS
 ```
 
-SIGTERM was delivered after `SETUP_COMMITTED=YES` while both psql concurrency
-children were active; the handler blocked new child starts, terminated and joined
-both children with bounded SIGKILL escalation, then exited nonzero after
-ownership-safe cleanup. SIGKILL was delivered at the post-setup idle boundary; as
-expected, neither `finally` nor a signal handler ran, and the committed Principal,
-Thread, and ReadState remained. The harness proved the Principal and Thread held
-the exact unique marker and that ReadState referenced those marked parents by the
-exact run IDs. It then removed the residue externally with marker-qualified
-predicates, repeated the same cleanup safely, and left unrelated preexisting
-parents unchanged. This is a tested boundary, not a SIGKILL cleanup guarantee.
+SIGINT, SIGTERM, and SIGHUP were each delivered to a separate verifier after
+`SETUP_COMMITTED=YES` while both psql concurrency children were active. Each
+handler blocked new child starts, terminated and joined only that run's children
+with bounded SIGKILL escalation, then exited nonzero after ownership-safe
+cleanup. Independent uncaught-exception and unhandled-rejection injections used
+the same guarded termination path. SIGKILL was delivered at the post-setup idle
+boundary; as expected, neither `finally` nor a signal handler ran, and the
+committed Principal, Thread, and ReadState remained. The harness proved the
+Principal and Thread held the exact unique marker and that ReadState referenced
+those marked parents by the exact run IDs. It then removed the residue externally
+with marker-qualified predicates, repeated the same cleanup safely, and left
+unrelated preexisting parents unchanged. This is a tested boundary, not a
+SIGKILL cleanup guarantee.
+
+### 5.2 R3 parallel isolation and fault-harness amendment
+
+The R3 amendment ran against a newly created PostgreSQL 16 disposable database
+with all 15 repository migrations. The external coordinator alone asserted
+five-table global zero before starting any parallel verifier and after every
+verifier, signal case, SIGKILL recovery, and harness recovery completed. It ran
+two normal verifiers concurrently; first-session and second-session failure
+verifiers beside a normal verifier; a SIGTERM verifier beside a normal verifier;
+and a SIGKILL verifier beside a normal verifier. Every pair had distinct run
+IDs, markers, committed fixture IDs, and transaction-only fixture IDs.
+
+The cleanup harness now records a unique harness run and marker, parses child
+metadata in a controlled close result, preserves raw stdout/stderr plus child
+code and signal, and always reaches marker-qualified top-level cleanup for
+catchable failures. An invalid test-only UUID proved that the original early
+verifier error remains visible together with the controlled metadata parse
+error. Harness assertion failure and SIGTERM removed the harness sentinel.
+Harness SIGKILL deliberately left an exactly identifiable sentinel and a known
+child verifier's marked Principal, Thread, and ReadState. The external
+coordinator used the emitted harness run/marker and child fixture metadata to
+terminate the orphan child, recover the child fixture by its exact marker, and
+remove the sentinel by exact IDs plus exact harness marker; no claim is made that
+a killed harness can run its own finally block.
+
+```text
+BLOCKER_AMENDMENT_ROUND = R3
+R2_BLOCKER_AMENDMENTS_IMPLEMENTED = YES
+INDEPENDENT_R3_REAUDIT_REQUIRED = YES
+
+PARALLEL_VERIFIER_RUN_ISOLATION = PASS
+CROSS_RUN_DELETE_PROTECTION = PASS
+CROSS_RUN_SESSION_TERMINATION_PROTECTION = PASS
+PER_RUN_GLOBAL_ZERO_ASSUMPTION_REMOVED = YES
+MAIN_FIXTURE_IDENTITY = UNIQUE_PER_RUN
+PER_RUN_FIXTURE_CLEAN = PASS
+OWNED_ROWS_AFTER_CLEANUP = 0
+BASELINE_CAPTURE = EXACT
+BASELINE_PRESERVATION = PASS
+BASELINE_ROWS_PRESERVED = PASS
+NONEMPTY_EXACT_BASELINE_PRESERVATION = PASS
+LOOKALIKE_MARKER_BASELINE_PRESERVATION = PASS
+PARALLEL_FIXTURE_OVERLAP_BARRIER = PASS
+COORDINATOR_FAILURE_RECOVERY = MARKER_QUALIFIED
+GLOBAL_ZERO_ASSERTION_OWNER = EXTERNAL_COORDINATOR
+
+EARLY_EXIT_ERROR_PRESERVATION = PASS
+FIXTURE_PARSE_ERROR_CONTROLLED = PASS
+HARNESS_FINALLY_REACHED = PASS
+SIGINT_CLEANUP = PASS
+SIGTERM_CLEANUP = PASS
+SIGHUP_CLEANUP = PASS
+UNCAUGHT_EXCEPTION_CLEANUP = PASS
+UNHANDLED_REJECTION_CLEANUP = PASS
+HARNESS_SIGKILL_CLEANUP_GUARANTEED = NO
+HARNESS_INTERRUPTION_RESIDUE_IDENTIFIABLE = PASS
+HARNESS_EXTERNAL_RECOVERY = PASS
+
+SUBSCRIPTION_CATALOG_REGRESSION = PASS
+SUBSCRIPTION_BEHAVIOR_REGRESSION = PASS
+WATCH_CONCURRENCY_REGRESSION = PASS
+READ_CURSOR_CONCURRENCY_REGRESSION = PASS
+FIVE_TABLES_EMPTY = PASS
+
+CONCURRENCY_FIXTURE_CLEANUP = CLEANUP_BEST_EFFORT_DISPOSABLE_ONLY
+SIGKILL_CLEANUP_GUARANTEED = NO
+HOST_CRASH_CLEANUP_GUARANTEED = NO
+```
+
+This amendment does not claim that the blockers are independently closed, does
+not change the R2 `REQUEST_CHANGES` verdict, and does not authorize merge.
 
 ## 6. Clean, snapshot, rerun, and legacy-data evidence
 
@@ -399,7 +484,9 @@ npm run prisma:generate = PASS
 npm run typecheck = PASS
 npm run build = PASS
 npm test = PASS
+npm run verify:subscription-storage = PASS
 npm run test:subscription-verifier-cleanup = PASS
+npm run test:subscription-verifier-parallel-isolation = PASS
 TESTS = 294
 SUITES = 39
 PASSED = 294
@@ -451,8 +538,11 @@ SCHEMA_CHANGED = NO
 RUNTIME_CODE_CHANGED = NO
 RUNTIME_SCOPE_CREEP = NO
 BLOCKER_AMENDMENT_IMPLEMENTED = YES
+R2_BLOCKER_AMENDMENTS_IMPLEMENTED = YES
 INDEPENDENT_REAUDIT_REQUIRED = YES
-NEXT_TASK = 订阅 审计
+INDEPENDENT_R3_REAUDIT_REQUIRED = YES
+MERGE_ALLOWED = NO
+NEXT_TASK = 复审 审计
 ```
 
 No password, token, Authorization header, secret, or raw sensitive legacy row is

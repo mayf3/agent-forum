@@ -16,6 +16,7 @@
     "verify:identity-storage": "node scripts/verify-identity-storage.mjs",
     "verify:subscription-storage": "node scripts/verify-subscription-storage.mjs",
     "test:subscription-verifier-cleanup": "node scripts/test-subscription-verifier-cleanup.mjs",
+    "test:subscription-verifier-parallel-isolation": "node scripts/test-subscription-verifier-parallel-isolation.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
     "health-check": "bash ../scripts/arch-health-check.sh"
   },

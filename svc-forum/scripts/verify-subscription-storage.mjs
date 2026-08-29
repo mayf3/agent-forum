@@ -21,6 +21,74 @@ const targetTables = [
 
 const psqlArgs = ['--no-psqlrc', '--set', 'ON_ERROR_STOP=1', '--dbname', databaseUrl];
 
+function sqlLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function fixtureUuid(name) {
+  const injected = process.env[`SUBSCRIPTION_VERIFIER_TEST_${name}`];
+  const value = injected || randomUUID();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new Error(`invalid test-only ${name} UUID: ${value}`);
+  }
+  return value;
+}
+
+const fixtureRunId = randomUUID();
+const ownershipMarker = `subscription-verifier:${fixtureRunId}`;
+const decoySchema = `subscription_decoy_${fixtureRunId.replaceAll('-', '')}`;
+const fixtureNames = [
+  'PRINCIPAL_ID', 'THREAD_ID', 'FIRST_WATCH_ID', 'SECOND_WATCH_ID',
+  'MAIN_PRINCIPAL_1_ID', 'MAIN_PRINCIPAL_2_ID', 'MAIN_THREAD_ID',
+  'MAIN_MESSAGE_ID', 'MAIN_REACTION_ID', 'MAIN_PARTICIPATION_1_ID',
+  'MAIN_PARTICIPATION_2_ID', 'MAIN_PARTICIPATION_3_ID',
+  'MAIN_WATCH_1_ID', 'MAIN_WATCH_2_ID', 'MAIN_WATCH_3_ID',
+  'MAIN_WATCH_4_ID', 'MAIN_WATCH_5_ID', 'MAIN_WATCH_6_ID',
+  'MAIN_MENTION_1_ID', 'MAIN_MENTION_2_ID',
+  'MAIN_NOTIFICATION_1_ID', 'MAIN_NOTIFICATION_2_ID',
+  'MAIN_NOTIFICATION_3_ID', 'MAIN_NOTIFICATION_4_ID',
+];
+const fixtures = Object.fromEntries(fixtureNames.map((name) => [name, fixtureUuid(name)]));
+const principalId = fixtures.PRINCIPAL_ID;
+const threadId = fixtures.THREAD_ID;
+const firstWatchId = fixtures.FIRST_WATCH_ID;
+const secondWatchId = fixtures.SECOND_WATCH_ID;
+const q = Object.fromEntries(Object.entries({
+  fixtureRunId,
+  ownershipMarker,
+  principalId,
+  threadId,
+  firstWatchId,
+  secondWatchId,
+  mainPrincipal1Id: fixtures.MAIN_PRINCIPAL_1_ID,
+  mainPrincipal2Id: fixtures.MAIN_PRINCIPAL_2_ID,
+  mainThreadId: fixtures.MAIN_THREAD_ID,
+  mainMessageId: fixtures.MAIN_MESSAGE_ID,
+  mainReactionId: fixtures.MAIN_REACTION_ID,
+  mainParticipation1Id: fixtures.MAIN_PARTICIPATION_1_ID,
+  mainParticipation2Id: fixtures.MAIN_PARTICIPATION_2_ID,
+  mainParticipation3Id: fixtures.MAIN_PARTICIPATION_3_ID,
+  mainWatch1Id: fixtures.MAIN_WATCH_1_ID,
+  mainWatch2Id: fixtures.MAIN_WATCH_2_ID,
+  mainWatch3Id: fixtures.MAIN_WATCH_3_ID,
+  mainWatch4Id: fixtures.MAIN_WATCH_4_ID,
+  mainWatch5Id: fixtures.MAIN_WATCH_5_ID,
+  mainWatch6Id: fixtures.MAIN_WATCH_6_ID,
+  mainMention1Id: fixtures.MAIN_MENTION_1_ID,
+  mainMention2Id: fixtures.MAIN_MENTION_2_ID,
+  mainNotification1Id: fixtures.MAIN_NOTIFICATION_1_ID,
+  mainNotification2Id: fixtures.MAIN_NOTIFICATION_2_ID,
+  mainNotification3Id: fixtures.MAIN_NOTIFICATION_3_ID,
+  mainNotification4Id: fixtures.MAIN_NOTIFICATION_4_ID,
+  mainSubject1: `${ownershipMarker}:main-subject-1`,
+  mainSubject2: `${ownershipMarker}:main-subject-2`,
+  mainAgent1: `${ownershipMarker}:main-agent-1`,
+  mainAgent2: `${ownershipMarker}:main-agent-2`,
+  mainEvent1: `${ownershipMarker}:event-1`,
+  mainEvent2: `${ownershipMarker}:event-2`,
+  mainEvent3: `${ownershipMarker}:event-3`,
+}).map(([key, value]) => [key, sqlLiteral(value)]));
+
 function runPsql(sql, label) {
   const result = spawnSync('psql', psqlArgs, {
     input: sql,
@@ -33,26 +101,63 @@ function runPsql(sql, label) {
   if (result.status !== 0) throw new Error(`${label} failed with exit status ${result.status}`);
 }
 
+function captureBaseline() {
+  const result = spawnSync('psql', [...psqlArgs, '--tuples-only', '--no-align'], {
+    input: String.raw`
+\set ON_ERROR_STOP on
+SET statement_timeout='60s';
+WITH baseline AS (
+  SELECT 'forum_participations' AS table_name, to_jsonb(x) AS row_value
+  FROM public.forum_participations x
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.forum_principals p, public.forum_threads t
+    WHERE p.id=x.principal_id AND t.id=x.thread_id
+      AND p.auth_subject=p.agent_id AND p.auth_subject ~ '^subscription-verifier:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      AND t.title=t."createdById" AND t.title=p.auth_subject)
+  UNION ALL
+  SELECT 'forum_watch_subscriptions', to_jsonb(x)
+  FROM public.forum_watch_subscriptions x
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.forum_principals p, public.forum_threads t
+    WHERE p.id=x.principal_id AND t.id=x.thread_id
+      AND p.auth_subject=p.agent_id AND p.auth_subject ~ '^subscription-verifier:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      AND t.title=t."createdById" AND t.title=p.auth_subject)
+  UNION ALL
+  SELECT 'forum_read_states', to_jsonb(x)
+  FROM public.forum_read_states x
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.forum_principals p, public.forum_threads t
+    WHERE p.id=x.principal_id AND t.id=x.thread_id
+      AND p.auth_subject=p.agent_id AND p.auth_subject ~ '^subscription-verifier:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      AND t.title=t."createdById" AND t.title=p.auth_subject)
+  UNION ALL SELECT 'forum_mentions', to_jsonb(x) FROM public.forum_mentions x
+  UNION ALL SELECT 'forum_notification_facts', to_jsonb(x) FROM public.forum_notification_facts x
+)
+SELECT jsonb_build_object(
+  'capture','exact',
+  'rows',coalesce(jsonb_agg(jsonb_build_object('table',table_name,'row',row_value)
+    ORDER BY table_name, row_value::text),'[]'::jsonb)
+)::text FROM baseline;
+`,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  if (result.error) throw new Error(`exact baseline capture: ${result.error.message}`);
+  if (result.status !== 0) throw new Error(`exact baseline capture failed with exit status ${result.status}: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
 const mainSql = String.raw`
 \set ON_ERROR_STOP on
 SET lock_timeout = '5s';
 SET statement_timeout = '60s';
 SET search_path = pg_catalog, public;
 
-DO $$
-DECLARE table_name text; n bigint;
-BEGIN
-  FOREACH table_name IN ARRAY ARRAY[${targetTables.map((name) => `'${name}'`).join(',')}]
-  LOOP
-    EXECUTE format('SELECT count(*) FROM public.%I', table_name) INTO n;
-    IF n <> 0 THEN
-      RAISE EXCEPTION 'public.% must contain zero rows before verification, found %', table_name, n;
-    END IF;
-  END LOOP;
-  RAISE NOTICE 'FIVE_TABLES_ZERO_ROWS_BEFORE=PASS';
-END $$;
-
 BEGIN;
+-- Catalog decoy probes temporarily rename shared public objects; serialize only
+-- this rollback-only main transaction. Per-run fixtures remain unique, and the
+-- committed two-session concurrency probes run in parallel after this lock ends.
+SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('subscription-storage-main-verifier-v1', 0));
 
 CREATE FUNCTION pg_temp.expect_error(label text, command text, expected_state text)
 RETURNS void LANGUAGE plpgsql AS $fn$
@@ -304,95 +409,95 @@ SELECT pg_temp.expect_catalog_pass('SQL-029..SQL-040 and five exact tables');
 
 -- Transaction-only fixtures.
 INSERT INTO public.forum_principals (id,auth_subject,agent_id,"updatedAt") VALUES
- ('71000000-0000-0000-0000-000000000001','subscription-verifier-subject-1','subscription-verifier-agent-1',now()),
- ('71000000-0000-0000-0000-000000000002','subscription-verifier-subject-2','subscription-verifier-agent-2',now());
+ (${q.mainPrincipal1Id},${q.mainSubject1},${q.mainAgent1},now()),
+ (${q.mainPrincipal2Id},${q.mainSubject2},${q.mainAgent2},now());
 INSERT INTO public.forum_threads (id,title,"createdById","createdByName","createdAt","updatedAt") VALUES
- ('72000000-0000-0000-0000-000000000001','subscription verifier','verifier','verifier',now(),now());
+ (${q.mainThreadId},'subscription verifier','verifier','verifier',now(),now());
 INSERT INTO public.forum_messages (id,"threadId",seq,"authorId","authorName",content,"createdAt") VALUES
- ('73000000-0000-0000-0000-000000000001','72000000-0000-0000-0000-000000000001',1,'verifier','verifier','probe',now());
+ (${q.mainMessageId},${q.mainThreadId},1,'verifier','verifier','probe',now());
 INSERT INTO public.forum_reactions (id,message_id,thread_id,principal_id,principal_name,emoji,created_at) VALUES
- ('74000000-0000-0000-0000-000000000001','73000000-0000-0000-0000-000000000001','72000000-0000-0000-0000-000000000001','legacy-verifier','verifier','+',now());
+ (${q.mainReactionId},${q.mainMessageId},${q.mainThreadId},'legacy-verifier','verifier','+',now());
 
 -- Participation closed sets, uniqueness, nullable presentation shape, and parent FKs.
 INSERT INTO public.forum_participations
  (id,thread_id,principal_id,presentation_role,presentation_status,joined_at,left_at,fact_state,provenance,updated_at)
-VALUES ('75000000-0000-0000-0000-000000000001','72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000001',NULL,NULL,NULL,NULL,'unknown','migration',now());
-SELECT pg_temp.expect_success('participation unknown to partial', $$UPDATE public.forum_participations SET fact_state='partial',presentation_role='observer',provenance='runtime' WHERE id='75000000-0000-0000-0000-000000000001'$$);
-SELECT pg_temp.expect_success('participation ON CONFLICT partial to known', $$INSERT INTO public.forum_participations (id,thread_id,principal_id,fact_state,provenance,updated_at) VALUES ('75000000-0000-0000-0000-000000000002','72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000001','known','runtime',now()) ON CONFLICT (thread_id,principal_id) DO UPDATE SET fact_state=EXCLUDED.fact_state,updated_at=EXCLUDED.updated_at$$);
-SELECT pg_temp.expect_error('participation fact_state outside closed set', $$UPDATE public.forum_participations SET fact_state='guessed' WHERE id='75000000-0000-0000-0000-000000000001'$$,'23514');
-SELECT pg_temp.expect_error('participation provenance outside closed set', $$UPDATE public.forum_participations SET provenance='import' WHERE id='75000000-0000-0000-0000-000000000001'$$,'23514');
-SELECT pg_temp.expect_error('duplicate participation business key', $$INSERT INTO public.forum_participations (id,thread_id,principal_id,fact_state,provenance,updated_at) VALUES ('75000000-0000-0000-0000-000000000003','72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000001','known','runtime',now())$$,'23505');
-SELECT pg_temp.expect_error('participation invalid thread FK', $$UPDATE public.forum_participations SET thread_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='75000000-0000-0000-0000-000000000001'$$,'23503');
-SELECT pg_temp.expect_error('participation invalid principal FK', $$UPDATE public.forum_participations SET principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='75000000-0000-0000-0000-000000000001'$$,'23503');
-SELECT pg_temp.expect_error('participation invalid evidence FK', $$UPDATE public.forum_participations SET legacy_evidence_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='75000000-0000-0000-0000-000000000001'$$,'23503');
+VALUES (${q.mainParticipation1Id},${q.mainThreadId},${q.mainPrincipal1Id},NULL,NULL,NULL,NULL,'unknown','migration',now());
+SELECT pg_temp.expect_success('participation unknown to partial', $$UPDATE public.forum_participations SET fact_state='partial',presentation_role='observer',provenance='runtime' WHERE id=${q.mainParticipation1Id}$$);
+SELECT pg_temp.expect_success('participation ON CONFLICT partial to known', $$INSERT INTO public.forum_participations (id,thread_id,principal_id,fact_state,provenance,updated_at) VALUES (${q.mainParticipation2Id},${q.mainThreadId},${q.mainPrincipal1Id},'known','runtime',now()) ON CONFLICT (thread_id,principal_id) DO UPDATE SET fact_state=EXCLUDED.fact_state,updated_at=EXCLUDED.updated_at$$);
+SELECT pg_temp.expect_error('participation fact_state outside closed set', $$UPDATE public.forum_participations SET fact_state='guessed' WHERE id=${q.mainParticipation1Id}$$,'23514');
+SELECT pg_temp.expect_error('participation provenance outside closed set', $$UPDATE public.forum_participations SET provenance='import' WHERE id=${q.mainParticipation1Id}$$,'23514');
+SELECT pg_temp.expect_error('duplicate participation business key', $$INSERT INTO public.forum_participations (id,thread_id,principal_id,fact_state,provenance,updated_at) VALUES (${q.mainParticipation3Id},${q.mainThreadId},${q.mainPrincipal1Id},'known','runtime',now())$$,'23505');
+SELECT pg_temp.expect_error('participation invalid thread FK', $$UPDATE public.forum_participations SET thread_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainParticipation1Id}$$,'23503');
+SELECT pg_temp.expect_error('participation invalid principal FK', $$UPDATE public.forum_participations SET principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainParticipation1Id}$$,'23503');
+SELECT pg_temp.expect_error('participation invalid evidence FK', $$UPDATE public.forum_participations SET legacy_evidence_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainParticipation1Id}$$,'23503');
 
 -- Watch interval shape and partial active uniqueness, including ON CONFLICT transition.
 INSERT INTO public.forum_watch_subscriptions
  (id,thread_id,principal_id,state,source,provenance,started_at,ended_at,updated_at)
-VALUES ('76000000-0000-0000-0000-000000000001','72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000001','active','explicit','runtime',now(),NULL,now());
-SELECT pg_temp.expect_error('second active watch', $$INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,started_at,updated_at) VALUES ('76000000-0000-0000-0000-000000000002','72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000001','active','mention','runtime',now(),now())$$,'23505');
-SELECT pg_temp.expect_success('watch ON CONFLICT active to inactive', $$INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,started_at,updated_at) VALUES ('76000000-0000-0000-0000-000000000003','72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000001','active','author','runtime',now(),now()) ON CONFLICT (thread_id,principal_id) WHERE state='active' AND ended_at IS NULL DO UPDATE SET state='inactive',ended_at=now(),updated_at=now()$$);
-SELECT pg_temp.expect_success('new active after inactive interval', $$INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,started_at,updated_at) VALUES ('76000000-0000-0000-0000-000000000004','72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000001','active','unknown','migration',NULL,now())$$);
-SELECT pg_temp.expect_success('multiple inactive intervals allowed', $$INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,started_at,ended_at,updated_at) VALUES ('76000000-0000-0000-0000-000000000005','72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000001','inactive','explicit','runtime',NULL,now(),now())$$);
-SELECT pg_temp.expect_error('watch state outside closed set', $$UPDATE public.forum_watch_subscriptions SET state='paused' WHERE id='76000000-0000-0000-0000-000000000004'$$,'23514');
-SELECT pg_temp.expect_error('active watch with ended_at', $$UPDATE public.forum_watch_subscriptions SET ended_at=now() WHERE id='76000000-0000-0000-0000-000000000004'$$,'23514');
-SELECT pg_temp.expect_error('inactive watch without ended_at', $$INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,updated_at) VALUES ('76000000-0000-0000-0000-000000000006','72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002','inactive','migration','migration',now())$$,'23514');
-SELECT pg_temp.expect_error('watch source outside closed set', $$UPDATE public.forum_watch_subscriptions SET source='implicit' WHERE id='76000000-0000-0000-0000-000000000004'$$,'23514');
-SELECT pg_temp.expect_error('watch provenance outside closed set', $$UPDATE public.forum_watch_subscriptions SET provenance='import' WHERE id='76000000-0000-0000-0000-000000000004'$$,'23514');
-SELECT pg_temp.expect_error('watch invalid thread FK', $$UPDATE public.forum_watch_subscriptions SET thread_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='76000000-0000-0000-0000-000000000004'$$,'23503');
-SELECT pg_temp.expect_error('watch invalid principal FK', $$UPDATE public.forum_watch_subscriptions SET principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='76000000-0000-0000-0000-000000000004'$$,'23503');
-SELECT pg_temp.expect_error('watch invalid evidence FK', $$UPDATE public.forum_watch_subscriptions SET legacy_evidence_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='76000000-0000-0000-0000-000000000004'$$,'23503');
+VALUES (${q.mainWatch1Id},${q.mainThreadId},${q.mainPrincipal1Id},'active','explicit','runtime',now(),NULL,now());
+SELECT pg_temp.expect_error('second active watch', $$INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,started_at,updated_at) VALUES (${q.mainWatch2Id},${q.mainThreadId},${q.mainPrincipal1Id},'active','mention','runtime',now(),now())$$,'23505');
+SELECT pg_temp.expect_success('watch ON CONFLICT active to inactive', $$INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,started_at,updated_at) VALUES (${q.mainWatch3Id},${q.mainThreadId},${q.mainPrincipal1Id},'active','author','runtime',now(),now()) ON CONFLICT (thread_id,principal_id) WHERE state='active' AND ended_at IS NULL DO UPDATE SET state='inactive',ended_at=now(),updated_at=now()$$);
+SELECT pg_temp.expect_success('new active after inactive interval', $$INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,started_at,updated_at) VALUES (${q.mainWatch4Id},${q.mainThreadId},${q.mainPrincipal1Id},'active','unknown','migration',NULL,now())$$);
+SELECT pg_temp.expect_success('multiple inactive intervals allowed', $$INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,started_at,ended_at,updated_at) VALUES (${q.mainWatch5Id},${q.mainThreadId},${q.mainPrincipal1Id},'inactive','explicit','runtime',NULL,now(),now())$$);
+SELECT pg_temp.expect_error('watch state outside closed set', $$UPDATE public.forum_watch_subscriptions SET state='paused' WHERE id=${q.mainWatch4Id}$$,'23514');
+SELECT pg_temp.expect_error('active watch with ended_at', $$UPDATE public.forum_watch_subscriptions SET ended_at=now() WHERE id=${q.mainWatch4Id}$$,'23514');
+SELECT pg_temp.expect_error('inactive watch without ended_at', $$INSERT INTO public.forum_watch_subscriptions (id,thread_id,principal_id,state,source,provenance,updated_at) VALUES (${q.mainWatch6Id},${q.mainThreadId},${q.mainPrincipal2Id},'inactive','migration','migration',now())$$,'23514');
+SELECT pg_temp.expect_error('watch source outside closed set', $$UPDATE public.forum_watch_subscriptions SET source='implicit' WHERE id=${q.mainWatch4Id}$$,'23514');
+SELECT pg_temp.expect_error('watch provenance outside closed set', $$UPDATE public.forum_watch_subscriptions SET provenance='import' WHERE id=${q.mainWatch4Id}$$,'23514');
+SELECT pg_temp.expect_error('watch invalid thread FK', $$UPDATE public.forum_watch_subscriptions SET thread_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainWatch4Id}$$,'23503');
+SELECT pg_temp.expect_error('watch invalid principal FK', $$UPDATE public.forum_watch_subscriptions SET principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainWatch4Id}$$,'23503');
+SELECT pg_temp.expect_error('watch invalid evidence FK', $$UPDATE public.forum_watch_subscriptions SET legacy_evidence_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainWatch4Id}$$,'23503');
 
 -- Read shapes and every frozen monotonic transition. Same cursor with an earlier timestamp is deliberately accepted.
-SELECT pg_temp.expect_error('read unknown plus cursor', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES ('72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002','unknown',1,NULL,'runtime',now())$$,'23514');
-SELECT pg_temp.expect_error('read unknown plus timestamp', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES ('72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002','unknown',NULL,now(),'runtime',now())$$,'23514');
-SELECT pg_temp.expect_error('read known positive without timestamp', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES ('72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002','known',1,NULL,'runtime',now())$$,'23514');
-SELECT pg_temp.expect_error('read known negative cursor', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES ('72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002','known',-1,now(),'runtime',now())$$,'23514');
-SELECT pg_temp.expect_error('read state outside closed shape', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES ('72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002','other',NULL,NULL,'runtime',now())$$,'23514');
-SELECT pg_temp.expect_error('read provenance outside closed set on insert', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES ('72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002','unknown',NULL,NULL,'import',now())$$,'23514');
+SELECT pg_temp.expect_error('read unknown plus cursor', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES (${q.mainThreadId},${q.mainPrincipal2Id},'unknown',1,NULL,'runtime',now())$$,'23514');
+SELECT pg_temp.expect_error('read unknown plus timestamp', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES (${q.mainThreadId},${q.mainPrincipal2Id},'unknown',NULL,now(),'runtime',now())$$,'23514');
+SELECT pg_temp.expect_error('read known positive without timestamp', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES (${q.mainThreadId},${q.mainPrincipal2Id},'known',1,NULL,'runtime',now())$$,'23514');
+SELECT pg_temp.expect_error('read known negative cursor', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES (${q.mainThreadId},${q.mainPrincipal2Id},'known',-1,now(),'runtime',now())$$,'23514');
+SELECT pg_temp.expect_error('read state outside closed shape', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES (${q.mainThreadId},${q.mainPrincipal2Id},'other',NULL,NULL,'runtime',now())$$,'23514');
+SELECT pg_temp.expect_error('read provenance outside closed set on insert', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES (${q.mainThreadId},${q.mainPrincipal2Id},'unknown',NULL,NULL,'import',now())$$,'23514');
 INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at)
-VALUES ('72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000001','unknown',NULL,NULL,'migration',now()),
-       ('72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002','unknown',NULL,NULL,'runtime',now());
-SELECT pg_temp.expect_success('read unknown to unknown', $$UPDATE public.forum_read_states SET updated_at=now() WHERE principal_id='71000000-0000-0000-0000-000000000001'$$);
-SELECT pg_temp.expect_success('read unknown to known zero', $$UPDATE public.forum_read_states SET state='known',last_read_seq=0,last_read_at=NULL,provenance='runtime',updated_at=now() WHERE principal_id='71000000-0000-0000-0000-000000000001'$$);
-SELECT pg_temp.expect_error('read known zero to unknown', $$UPDATE public.forum_read_states SET state='unknown',last_read_seq=NULL,last_read_at=NULL,updated_at=now() WHERE principal_id='71000000-0000-0000-0000-000000000001'$$,'23514');
-SELECT pg_temp.expect_success('read unknown to known positive', $$UPDATE public.forum_read_states SET state='known',last_read_seq=3,last_read_at=now(),updated_at=now() WHERE principal_id='71000000-0000-0000-0000-000000000002'$$);
-SELECT pg_temp.expect_success('read cursor advance to five', $$UPDATE public.forum_read_states SET last_read_seq=5,last_read_at=TIMESTAMPTZ '2026-08-27 12:00:00+00',updated_at=now() WHERE principal_id='71000000-0000-0000-0000-000000000001'$$);
-SELECT pg_temp.expect_success('read known same cursor', $$UPDATE public.forum_read_states SET last_read_seq=5,last_read_at=TIMESTAMPTZ '2026-08-27 12:00:00+00',updated_at=now() WHERE principal_id='71000000-0000-0000-0000-000000000001'$$);
-SELECT pg_temp.expect_success('same cursor earlier timestamp accepted', $$UPDATE public.forum_read_states SET last_read_at=TIMESTAMPTZ '2026-08-26 12:00:00+00',updated_at=now() WHERE principal_id='71000000-0000-0000-0000-000000000001'$$);
-SELECT pg_temp.expect_success('read known higher cursor', $$UPDATE public.forum_read_states SET last_read_seq=6,last_read_at=now(),updated_at=now() WHERE principal_id='71000000-0000-0000-0000-000000000001'$$);
-SELECT pg_temp.expect_error('read cursor regression', $$UPDATE public.forum_read_states SET last_read_seq=4,last_read_at=now(),updated_at=now() WHERE principal_id='71000000-0000-0000-0000-000000000001'$$,'23514');
-SELECT pg_temp.expect_error('known positive to unknown direct', $$UPDATE public.forum_read_states SET state='unknown',last_read_seq=NULL,last_read_at=NULL,updated_at=now() WHERE principal_id='71000000-0000-0000-0000-000000000001'$$,'23514');
-SELECT pg_temp.expect_error('known to unknown ON CONFLICT', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES ('72000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000001','unknown',NULL,NULL,'runtime',now()) ON CONFLICT (thread_id,principal_id) DO UPDATE SET state=EXCLUDED.state,last_read_seq=EXCLUDED.last_read_seq,last_read_at=EXCLUDED.last_read_at$$,'23514');
-SELECT pg_temp.expect_error('known to unknown MERGE', $$MERGE INTO public.forum_read_states r USING (VALUES ('72000000-0000-0000-0000-000000000001'::uuid,'71000000-0000-0000-0000-000000000001'::uuid)) s(thread_id,principal_id) ON r.thread_id=s.thread_id AND r.principal_id=s.principal_id WHEN MATCHED THEN UPDATE SET state='unknown',last_read_seq=NULL,last_read_at=NULL$$,'23514');
-SELECT pg_temp.expect_error('read invalid thread FK', $$UPDATE public.forum_read_states SET thread_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE principal_id='71000000-0000-0000-0000-000000000002'$$,'23503');
-SELECT pg_temp.expect_error('read invalid principal FK', $$UPDATE public.forum_read_states SET principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE principal_id='71000000-0000-0000-0000-000000000002'$$,'23503');
-SELECT pg_temp.expect_error('read invalid evidence FK', $$UPDATE public.forum_read_states SET legacy_evidence_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE principal_id='71000000-0000-0000-0000-000000000002'$$,'23503');
+VALUES (${q.mainThreadId},${q.mainPrincipal1Id},'unknown',NULL,NULL,'migration',now()),
+       (${q.mainThreadId},${q.mainPrincipal2Id},'unknown',NULL,NULL,'runtime',now());
+SELECT pg_temp.expect_success('read unknown to unknown', $$UPDATE public.forum_read_states SET updated_at=now() WHERE principal_id=${q.mainPrincipal1Id}$$);
+SELECT pg_temp.expect_success('read unknown to known zero', $$UPDATE public.forum_read_states SET state='known',last_read_seq=0,last_read_at=NULL,provenance='runtime',updated_at=now() WHERE principal_id=${q.mainPrincipal1Id}$$);
+SELECT pg_temp.expect_error('read known zero to unknown', $$UPDATE public.forum_read_states SET state='unknown',last_read_seq=NULL,last_read_at=NULL,updated_at=now() WHERE principal_id=${q.mainPrincipal1Id}$$,'23514');
+SELECT pg_temp.expect_success('read unknown to known positive', $$UPDATE public.forum_read_states SET state='known',last_read_seq=3,last_read_at=now(),updated_at=now() WHERE principal_id=${q.mainPrincipal2Id}$$);
+SELECT pg_temp.expect_success('read cursor advance to five', $$UPDATE public.forum_read_states SET last_read_seq=5,last_read_at=TIMESTAMPTZ '2026-08-27 12:00:00+00',updated_at=now() WHERE principal_id=${q.mainPrincipal1Id}$$);
+SELECT pg_temp.expect_success('read known same cursor', $$UPDATE public.forum_read_states SET last_read_seq=5,last_read_at=TIMESTAMPTZ '2026-08-27 12:00:00+00',updated_at=now() WHERE principal_id=${q.mainPrincipal1Id}$$);
+SELECT pg_temp.expect_success('same cursor earlier timestamp accepted', $$UPDATE public.forum_read_states SET last_read_at=TIMESTAMPTZ '2026-08-26 12:00:00+00',updated_at=now() WHERE principal_id=${q.mainPrincipal1Id}$$);
+SELECT pg_temp.expect_success('read known higher cursor', $$UPDATE public.forum_read_states SET last_read_seq=6,last_read_at=now(),updated_at=now() WHERE principal_id=${q.mainPrincipal1Id}$$);
+SELECT pg_temp.expect_error('read cursor regression', $$UPDATE public.forum_read_states SET last_read_seq=4,last_read_at=now(),updated_at=now() WHERE principal_id=${q.mainPrincipal1Id}$$,'23514');
+SELECT pg_temp.expect_error('known positive to unknown direct', $$UPDATE public.forum_read_states SET state='unknown',last_read_seq=NULL,last_read_at=NULL,updated_at=now() WHERE principal_id=${q.mainPrincipal1Id}$$,'23514');
+SELECT pg_temp.expect_error('known to unknown ON CONFLICT', $$INSERT INTO public.forum_read_states (thread_id,principal_id,state,last_read_seq,last_read_at,provenance,updated_at) VALUES (${q.mainThreadId},${q.mainPrincipal1Id},'unknown',NULL,NULL,'runtime',now()) ON CONFLICT (thread_id,principal_id) DO UPDATE SET state=EXCLUDED.state,last_read_seq=EXCLUDED.last_read_seq,last_read_at=EXCLUDED.last_read_at$$,'23514');
+SELECT pg_temp.expect_error('known to unknown MERGE', $$MERGE INTO public.forum_read_states r USING (VALUES (${q.mainThreadId}::uuid,${q.mainPrincipal1Id}::uuid)) s(thread_id,principal_id) ON r.thread_id=s.thread_id AND r.principal_id=s.principal_id WHEN MATCHED THEN UPDATE SET state='unknown',last_read_seq=NULL,last_read_at=NULL$$,'23514');
+SELECT pg_temp.expect_error('read invalid thread FK', $$UPDATE public.forum_read_states SET thread_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE principal_id=${q.mainPrincipal2Id}$$,'23503');
+SELECT pg_temp.expect_error('read invalid principal FK', $$UPDATE public.forum_read_states SET principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE principal_id=${q.mainPrincipal2Id}$$,'23503');
+SELECT pg_temp.expect_error('read invalid evidence FK', $$UPDATE public.forum_read_states SET legacy_evidence_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE principal_id=${q.mainPrincipal2Id}$$,'23503');
 
 -- Mention and notification uniqueness, reason, and every direct parent FK.
 INSERT INTO public.forum_mentions (id,message_id,mentioned_principal_id,source_agent_id,created_at)
-VALUES ('77000000-0000-0000-0000-000000000001','73000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002',NULL,now());
-SELECT pg_temp.expect_error('duplicate mention business key', $$INSERT INTO public.forum_mentions VALUES ('77000000-0000-0000-0000-000000000002','73000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002','agent',now())$$,'23505');
-SELECT pg_temp.expect_error('mention invalid message FK', $$UPDATE public.forum_mentions SET message_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='77000000-0000-0000-0000-000000000001'$$,'23503');
-SELECT pg_temp.expect_error('mention invalid principal FK', $$UPDATE public.forum_mentions SET mentioned_principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='77000000-0000-0000-0000-000000000001'$$,'23503');
+VALUES (${q.mainMention1Id},${q.mainMessageId},${q.mainPrincipal2Id},NULL,now());
+SELECT pg_temp.expect_error('duplicate mention business key', $$INSERT INTO public.forum_mentions VALUES (${q.mainMention2Id},${q.mainMessageId},${q.mainPrincipal2Id},'agent',now())$$,'23505');
+SELECT pg_temp.expect_error('mention invalid message FK', $$UPDATE public.forum_mentions SET message_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainMention1Id}$$,'23503');
+SELECT pg_temp.expect_error('mention invalid principal FK', $$UPDATE public.forum_mentions SET mentioned_principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainMention1Id}$$,'23503');
 INSERT INTO public.forum_notification_facts
  (id,recipient_principal_id,thread_id,message_id,reaction_id,reason,source_event_key,created_at)
-VALUES ('78000000-0000-0000-0000-000000000001','71000000-0000-0000-0000-000000000002','72000000-0000-0000-0000-000000000001','73000000-0000-0000-0000-000000000001',NULL,'mention','event-1',now());
-SELECT pg_temp.expect_success('notification nullable message and reaction', $$INSERT INTO public.forum_notification_facts (id,recipient_principal_id,thread_id,reason,source_event_key,created_at) VALUES ('78000000-0000-0000-0000-000000000002','71000000-0000-0000-0000-000000000001','72000000-0000-0000-0000-000000000001','watch','event-2',now())$$);
-SELECT pg_temp.expect_success('notification reaction reason and FK', $$INSERT INTO public.forum_notification_facts VALUES ('78000000-0000-0000-0000-000000000003','71000000-0000-0000-0000-000000000001','72000000-0000-0000-0000-000000000001',NULL,'74000000-0000-0000-0000-000000000001','reaction','event-3',now())$$);
-SELECT pg_temp.expect_error('duplicate notification business key', $$INSERT INTO public.forum_notification_facts (id,recipient_principal_id,thread_id,reason,source_event_key,created_at) VALUES ('78000000-0000-0000-0000-000000000004','71000000-0000-0000-0000-000000000002','72000000-0000-0000-0000-000000000001','watch','event-1',now())$$,'23505');
-SELECT pg_temp.expect_error('notification reason outside closed set', $$UPDATE public.forum_notification_facts SET reason='reply' WHERE id='78000000-0000-0000-0000-000000000001'$$,'23514');
-SELECT pg_temp.expect_error('notification invalid recipient FK', $$UPDATE public.forum_notification_facts SET recipient_principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='78000000-0000-0000-0000-000000000001'$$,'23503');
-SELECT pg_temp.expect_error('notification invalid thread FK', $$UPDATE public.forum_notification_facts SET thread_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='78000000-0000-0000-0000-000000000001'$$,'23503');
-SELECT pg_temp.expect_error('notification invalid message FK', $$UPDATE public.forum_notification_facts SET message_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='78000000-0000-0000-0000-000000000001'$$,'23503');
-SELECT pg_temp.expect_error('notification invalid reaction FK', $$UPDATE public.forum_notification_facts SET reaction_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id='78000000-0000-0000-0000-000000000001'$$,'23503');
+VALUES (${q.mainNotification1Id},${q.mainPrincipal2Id},${q.mainThreadId},${q.mainMessageId},NULL,'mention',${q.mainEvent1},now());
+SELECT pg_temp.expect_success('notification nullable message and reaction', $$INSERT INTO public.forum_notification_facts (id,recipient_principal_id,thread_id,reason,source_event_key,created_at) VALUES (${q.mainNotification2Id},${q.mainPrincipal1Id},${q.mainThreadId},'watch',${q.mainEvent2},now())$$);
+SELECT pg_temp.expect_success('notification reaction reason and FK', $$INSERT INTO public.forum_notification_facts VALUES (${q.mainNotification3Id},${q.mainPrincipal1Id},${q.mainThreadId},NULL,${q.mainReactionId},'reaction',${q.mainEvent3},now())$$);
+SELECT pg_temp.expect_error('duplicate notification business key', $$INSERT INTO public.forum_notification_facts (id,recipient_principal_id,thread_id,reason,source_event_key,created_at) VALUES (${q.mainNotification4Id},${q.mainPrincipal2Id},${q.mainThreadId},'watch',${q.mainEvent1},now())$$,'23505');
+SELECT pg_temp.expect_error('notification reason outside closed set', $$UPDATE public.forum_notification_facts SET reason='reply' WHERE id=${q.mainNotification1Id}$$,'23514');
+SELECT pg_temp.expect_error('notification invalid recipient FK', $$UPDATE public.forum_notification_facts SET recipient_principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainNotification1Id}$$,'23503');
+SELECT pg_temp.expect_error('notification invalid thread FK', $$UPDATE public.forum_notification_facts SET thread_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainNotification1Id}$$,'23503');
+SELECT pg_temp.expect_error('notification invalid message FK', $$UPDATE public.forum_notification_facts SET message_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainNotification1Id}$$,'23503');
+SELECT pg_temp.expect_error('notification invalid reaction FK', $$UPDATE public.forum_notification_facts SET reaction_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainNotification1Id}$$,'23503');
 
 -- Wrong-schema, wrong-target, and wrong-function-OID decoys.
-CREATE SCHEMA subscription_decoy;
-CREATE TABLE subscription_decoy.forum_read_states (thread_id uuid, principal_id uuid, state text, last_read_seq integer, last_read_at timestamptz, provenance text, updated_at timestamptz);
-ALTER TABLE subscription_decoy.forum_read_states ADD CONSTRAINT forum_read_states_provenance_ck CHECK (provenance IN ('runtime','migration'));
-CREATE FUNCTION subscription_decoy.forum_read_cursor_monotonic_guard() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
-CREATE TRIGGER forum_read_cursor_monotonic_guard_tg BEFORE UPDATE ON subscription_decoy.forum_read_states FOR EACH ROW EXECUTE FUNCTION subscription_decoy.forum_read_cursor_monotonic_guard();
+CREATE SCHEMA ${decoySchema};
+CREATE TABLE ${decoySchema}.forum_read_states (thread_id uuid, principal_id uuid, state text, last_read_seq integer, last_read_at timestamptz, provenance text, updated_at timestamptz);
+ALTER TABLE ${decoySchema}.forum_read_states ADD CONSTRAINT forum_read_states_provenance_ck CHECK (provenance IN ('runtime','migration'));
+CREATE FUNCTION ${decoySchema}.forum_read_cursor_monotonic_guard() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
+CREATE TRIGGER forum_read_cursor_monotonic_guard_tg BEFORE UPDATE ON ${decoySchema}.forum_read_states FOR EACH ROW EXECUTE FUNCTION ${decoySchema}.forum_read_cursor_monotonic_guard();
 SELECT pg_temp.expect_catalog_pass('decoys coexist without satisfying public identities');
 SAVEPOINT wrong_schema_check;
 ALTER TABLE public.forum_read_states RENAME CONSTRAINT forum_read_states_provenance_ck TO forum_read_states_provenance_ck_hidden;
@@ -404,65 +509,43 @@ SELECT pg_temp.expect_catalog_fail('wrong-schema function cannot substitute');
 ROLLBACK TO SAVEPOINT wrong_schema_function;
 SAVEPOINT wrong_function_oid;
 DROP TRIGGER forum_read_cursor_monotonic_guard_tg ON public.forum_read_states;
-CREATE TRIGGER forum_read_cursor_monotonic_guard_tg BEFORE UPDATE ON public.forum_read_states FOR EACH ROW EXECUTE FUNCTION subscription_decoy.forum_read_cursor_monotonic_guard();
+CREATE TRIGGER forum_read_cursor_monotonic_guard_tg BEFORE UPDATE ON public.forum_read_states FOR EACH ROW EXECUTE FUNCTION ${decoySchema}.forum_read_cursor_monotonic_guard();
 SELECT pg_temp.expect_catalog_fail('same trigger name with wrong function OID cannot substitute');
 ROLLBACK TO SAVEPOINT wrong_function_oid;
 SAVEPOINT wrong_target;
 ALTER TRIGGER forum_read_cursor_monotonic_guard_tg ON public.forum_read_states RENAME TO forum_read_cursor_monotonic_guard_tg_hidden;
 SELECT pg_temp.expect_catalog_fail('same trigger name on wrong target cannot substitute');
 ROLLBACK TO SAVEPOINT wrong_target;
-DROP SCHEMA subscription_decoy CASCADE;
+DROP SCHEMA ${decoySchema} CASCADE;
 SELECT pg_temp.expect_catalog_pass('catalog restored after decoys');
 
 ROLLBACK;
 
 DO $$
-DECLARE table_name text; n bigint;
 BEGIN
-  FOREACH table_name IN ARRAY ARRAY[${targetTables.map((name) => `'${name}'`).join(',')}]
-  LOOP
-    EXECUTE format('SELECT count(*) FROM public.%I', table_name) INTO n;
-    IF n <> 0 THEN RAISE EXCEPTION 'public.% must contain zero rows after rollback, found %', table_name, n; END IF;
-  END LOOP;
-  IF pg_catalog.to_regnamespace('subscription_decoy') IS NOT NULL THEN RAISE EXCEPTION 'subscription decoy schema survived rollback'; END IF;
+  IF EXISTS (SELECT 1 FROM public.forum_participations WHERE id IN (${q.mainParticipation1Id}::uuid,${q.mainParticipation2Id}::uuid,${q.mainParticipation3Id}::uuid))
+     OR EXISTS (SELECT 1 FROM public.forum_watch_subscriptions WHERE id IN (${q.mainWatch1Id}::uuid,${q.mainWatch2Id}::uuid,${q.mainWatch3Id}::uuid,${q.mainWatch4Id}::uuid,${q.mainWatch5Id}::uuid,${q.mainWatch6Id}::uuid))
+     OR EXISTS (SELECT 1 FROM public.forum_read_states WHERE thread_id=${q.mainThreadId}::uuid AND principal_id IN (${q.mainPrincipal1Id}::uuid,${q.mainPrincipal2Id}::uuid))
+     OR EXISTS (SELECT 1 FROM public.forum_mentions WHERE id IN (${q.mainMention1Id}::uuid,${q.mainMention2Id}::uuid))
+     OR EXISTS (SELECT 1 FROM public.forum_notification_facts WHERE id IN (${q.mainNotification1Id}::uuid,${q.mainNotification2Id}::uuid,${q.mainNotification3Id}::uuid,${q.mainNotification4Id}::uuid)) THEN
+    RAISE EXCEPTION 'transaction-only fixture survived main rollback';
+  END IF;
+  IF pg_catalog.to_regnamespace(${sqlLiteral(decoySchema)}) IS NOT NULL THEN RAISE EXCEPTION 'subscription decoy schema survived rollback'; END IF;
   RAISE NOTICE 'FIVE_EXACT_TABLE_SHAPES=PASS';
   RAISE NOTICE 'FIFTEEN_VALIDATED_FKS_RESTRICT_RESTRICT=PASS';
   RAISE NOTICE 'FOUR_BUSINESS_KEYS_AND_WATCH_PARTIAL_UNIQUE=PASS';
   RAISE NOTICE 'SQL_029_THROUGH_SQL_040_EXACT_CATALOG=PASS';
   RAISE NOTICE 'TRANSACTIONAL_BEHAVIOR_AND_SQLSTATES=PASS';
-  RAISE NOTICE 'FIVE_TABLES_ZERO_ROWS_AFTER_MAIN_ROLLBACK=PASS';
+  RAISE NOTICE 'PER_RUN_MAIN_FIXTURE_CLEAN=PASS';
 END $$;
 `;
 
-function sqlLiteral(value) {
-  return `'${String(value).replaceAll("'", "''")}'`;
-}
-
-function fixtureUuid(name) {
-  const injected = process.env[`SUBSCRIPTION_VERIFIER_TEST_${name}`];
-  const value = injected || randomUUID();
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
-    throw new Error(`invalid test-only ${name} UUID: ${value}`);
-  }
-  return value;
-}
-
-const fixtureRunId = randomUUID();
-const ownershipMarker = `subscription-verifier:${fixtureRunId}`;
-const principalId = fixtureUuid('PRINCIPAL_ID');
-const threadId = fixtureUuid('THREAD_ID');
-const firstWatchId = fixtureUuid('FIRST_WATCH_ID');
-const secondWatchId = fixtureUuid('SECOND_WATCH_ID');
 const faultMode = process.env.SUBSCRIPTION_VERIFIER_TEST_FAULT ?? '';
 const pauseAfterSetup = process.env.SUBSCRIPTION_VERIFIER_TEST_PAUSE_AFTER_SETUP === '1';
-const q = Object.fromEntries(Object.entries({
-  fixtureRunId,
-  ownershipMarker,
-  principalId,
-  threadId,
-  firstWatchId,
-  secondWatchId,
-}).map(([key, value]) => [key, sqlLiteral(value)]));
+const holdAfterSetupMs = Number.parseInt(process.env.SUBSCRIPTION_VERIFIER_TEST_HOLD_AFTER_SETUP_MS ?? '0', 10);
+if (!Number.isSafeInteger(holdAfterSetupMs) || holdAfterSetupMs < 0 || holdAfterSetupMs > 30_000) {
+  throw new Error(`invalid test-only HOLD_AFTER_SETUP_MS: ${process.env.SUBSCRIPTION_VERIFIER_TEST_HOLD_AFTER_SETUP_MS}`);
+}
 
 console.log(`FIXTURE_RUN_ID=${fixtureRunId}`);
 console.log(`FIXTURE_OWNERSHIP_MARKER=${ownershipMarker}`);
@@ -470,6 +553,9 @@ console.log(`FIXTURE_PRINCIPAL_ID=${principalId}`);
 console.log(`FIXTURE_THREAD_ID=${threadId}`);
 console.log(`FIXTURE_FIRST_WATCH_ID=${firstWatchId}`);
 console.log(`FIXTURE_SECOND_WATCH_ID=${secondWatchId}`);
+console.log(`MAIN_FIXTURE_IDENTITY=UNIQUE_PER_RUN`);
+const baseline = captureBaseline();
+console.log('BASELINE_CAPTURE=EXACT');
 
 const setupSql = String.raw`
 \set ON_ERROR_STOP on
@@ -586,16 +672,25 @@ WHERE id=${q.threadId}::uuid AND title=${q.ownershipMarker} AND "createdById"=${
 DELETE FROM public.forum_principals
 WHERE id=${q.principalId}::uuid AND auth_subject=${q.ownershipMarker} AND agent_id=${q.ownershipMarker};
 COMMIT;
-DO $$ DECLARE table_name text; n bigint; BEGIN
-  FOREACH table_name IN ARRAY ARRAY[${targetTables.map((name) => `'${name}'`).join(',')}] LOOP
-    EXECUTE format('SELECT count(*) FROM public.%I',table_name) INTO n;
-    IF n <> 0 THEN RAISE EXCEPTION 'public.% must contain zero rows after concurrency cleanup, found %',table_name,n; END IF;
-  END LOOP;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM public.forum_principals WHERE id=${q.principalId}::uuid)
+     OR EXISTS (SELECT 1 FROM public.forum_threads WHERE id=${q.threadId}::uuid)
+     OR EXISTS (SELECT 1 FROM public.forum_read_states WHERE thread_id=${q.threadId}::uuid AND principal_id=${q.principalId}::uuid)
+     OR EXISTS (SELECT 1 FROM public.forum_watch_subscriptions WHERE id IN (${q.firstWatchId}::uuid,${q.secondWatchId}::uuid)) THEN
+    RAISE EXCEPTION 'owned fixture residue remained after cleanup';
+  END IF;
   RAISE NOTICE 'CLEANUP_OWNERSHIP_VERIFIED=PASS';
-  RAISE NOTICE 'CONCURRENCY_CLEANUP_AND_FIVE_TABLES_ZERO=PASS';
+  RAISE NOTICE 'PER_RUN_FIXTURE_CLEAN=PASS';
+  RAISE NOTICE 'OWNED_ROWS_AFTER_CLEANUP=0';
   RAISE NOTICE 'SUBSCRIPTION_STORAGE=PASS';
 END $$;
 `;
+
+function assertBaselinePreserved() {
+  const after = captureBaseline();
+  if (after !== baseline) throw new Error('exact non-verifier baseline changed during verifier run');
+  console.log('BASELINE_PRESERVATION=PASS');
+}
 
 const activeChildren = new Set();
 const activeChildClosures = new Map();
@@ -682,6 +777,7 @@ async function terminate(reason, error) {
   }
   try {
     cleanupOwnedFixture();
+    assertBaselinePreserved();
     console.error('CATCHABLE_SIGNAL_CLEANUP=PASS');
   } catch (cleanupError) {
     console.error(`catchable termination cleanup failed: ${cleanupError.message}`);
@@ -759,9 +855,21 @@ try {
   }
   setupCommitted = true;
   console.log('SETUP_COMMITTED=YES');
+  if (faultMode === 'uncaught-exception') {
+    setImmediate(() => { throw new Error('injected verifier uncaught exception'); });
+    await new Promise(() => {});
+  }
+  if (faultMode === 'unhandled-rejection') {
+    setImmediate(() => { void Promise.reject(new Error('injected verifier unhandled rejection')); });
+    await new Promise(() => {});
+  }
   if (pauseAfterSetup) {
     console.log('TEST_PAUSE_AFTER_SETUP=READY');
     await new Promise(() => { setInterval(() => {}, 1_000); });
+  }
+  if (holdAfterSetupMs > 0) {
+    console.log('TEST_HOLD_AFTER_SETUP=READY');
+    await new Promise((resolve) => setTimeout(resolve, holdAfterSetupMs));
   }
   await runConcurrentProbe();
 } catch (error) {
@@ -770,9 +878,10 @@ try {
   if (!terminating) {
     try {
       cleanupOwnedFixture();
+      assertBaselinePreserved();
     } catch (cleanupError) {
       failure = failure
-        ? new Error(`${failure.message}; cleanup also failed: ${cleanupError.message}`)
+        ? new Error(`${failure.message}; cleanup/baseline verification also failed: ${cleanupError.message}`)
         : cleanupError;
     }
   }

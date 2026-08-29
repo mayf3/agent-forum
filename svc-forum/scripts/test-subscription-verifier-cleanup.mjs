@@ -15,9 +15,22 @@ if (!databaseUrl) {
 const verifierPath = fileURLToPath(new URL('./verify-subscription-storage.mjs', import.meta.url));
 const oldPrincipalId = '81000000-0000-0000-0000-000000000001';
 const oldThreadId = '82000000-0000-0000-0000-000000000001';
+const harnessRunId = randomUUID();
+const harnessOwnershipMarker = `subscription-verifier-harness:${harnessRunId}`;
 const sentinelPrincipalId = randomUUID();
 const sentinelThreadId = randomUUID();
-const sentinelMarker = `subscription-verifier-test-sentinel:${randomUUID()}`;
+const sentinelMarker = harnessOwnershipMarker;
+const activeChildren = new Set();
+const knownFixtures = new Map();
+const harnessFault = process.env.SUBSCRIPTION_CLEANUP_HARNESS_FAULT ?? '';
+const pauseAfterSentinel = process.env.SUBSCRIPTION_CLEANUP_HARNESS_PAUSE_AFTER_SENTINEL === '1';
+const pauseWithChild = process.env.SUBSCRIPTION_CLEANUP_HARNESS_PAUSE_WITH_CHILD === '1';
+let harnessCleanupStarted = false;
+
+console.log(`HARNESS_RUN_ID=${harnessRunId}`);
+console.log(`HARNESS_OWNERSHIP_MARKER=${harnessOwnershipMarker}`);
+console.log(`HARNESS_SENTINEL_PRINCIPAL_ID=${sentinelPrincipalId}`);
+console.log(`HARNESS_SENTINEL_THREAD_ID=${sentinelThreadId}`);
 
 function sqlLiteral(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
@@ -29,13 +42,13 @@ function psql(sql, tuplesOnly = false) {
   return execFileSync('psql', args, { input: sql, encoding: 'utf8' }).trim();
 }
 
-function parseFixture(output) {
+function parseFixture(stdout) {
   const value = (name) => {
-    const match = output.match(new RegExp(`^${name}=(.+)$`, 'm'));
-    if (!match) throw new Error(`verifier output omitted ${name}`);
-    return match[1].trim();
+    const matches = [...stdout.matchAll(new RegExp(`^${name}=(.+)$`, 'gm'))];
+    if (matches.length !== 1) throw new Error(`verifier output omitted or duplicated ${name}`);
+    return matches[0][1].trim();
   };
-  return {
+  const fixture = {
     runId: value('FIXTURE_RUN_ID'),
     marker: value('FIXTURE_OWNERSHIP_MARKER'),
     principalId: value('FIXTURE_PRINCIPAL_ID'),
@@ -43,19 +56,42 @@ function parseFixture(output) {
     firstWatchId: value('FIXTURE_FIRST_WATCH_ID'),
     secondWatchId: value('FIXTURE_SECOND_WATCH_ID'),
   };
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  for (const [name, value] of Object.entries(fixture)) {
+    if (name !== 'marker' && !uuid.test(value)) throw new Error(`invalid fixture metadata ${name}: ${value}`);
+  }
+  if (fixture.marker !== `subscription-verifier:${fixture.runId}`) throw new Error('fixture marker/run mismatch');
+  if (new Set([fixture.principalId, fixture.threadId, fixture.firstWatchId, fixture.secondWatchId]).size !== 4) {
+    throw new Error('fixture metadata IDs are not distinct');
+  }
+  return fixture;
 }
 
 function runVerifier(extraEnv = {}) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const child = spawn(process.execPath, [verifierPath], {
       env: { ...process.env, SUBSCRIPTION_STORAGE_DATABASE_URL: databaseUrl, ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let output = '';
-    child.stdout.on('data', (chunk) => { output += chunk; });
-    child.stderr.on('data', (chunk) => { output += chunk; });
-    child.on('error', reject);
-    child.on('close', (code, signal) => resolve({ code, signal, output, fixture: parseFixture(output) }));
+    activeChildren.add(child);
+    let stdout = '';
+    let stderr = '';
+    let spawnError;
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', (error) => { spawnError = error; });
+    child.on('close', (code, signal) => {
+      activeChildren.delete(child);
+      let fixture;
+      let fixtureParseError;
+      try {
+        fixture = parseFixture(stdout);
+        knownFixtures.set(fixture.runId, fixture);
+      } catch (error) {
+        fixtureParseError = error;
+      }
+      resolve({ code, signal, stdout, stderr, output: `${stdout}${stderr}`, fixture, fixtureParseError, spawnError });
+    });
   });
 }
 
@@ -70,19 +106,23 @@ function runVerifierUntilSetup(extraEnv = {}) {
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    activeChildren.add(child);
     let output = '';
     let settled = false;
     const inspect = (chunk) => {
       output += chunk;
       if (!settled && output.includes('TEST_PAUSE_AFTER_SETUP=READY')) {
         settled = true;
-        resolve({ child, fixture: parseFixture(output), getOutput: () => output });
+        const fixture = parseFixture(output);
+        knownFixtures.set(fixture.runId, fixture);
+        resolve({ child, fixture, getOutput: () => output });
       }
     };
     child.stdout.on('data', (chunk) => inspect(chunk.toString()));
     child.stderr.on('data', (chunk) => inspect(chunk.toString()));
     child.on('error', reject);
     child.on('close', (code, signal) => {
+      activeChildren.delete(child);
       if (!settled) reject(new Error(`verifier exited before setup pause: code=${code} signal=${signal}\n${output}`));
     });
   });
@@ -98,19 +138,23 @@ function runVerifierUntilLocks() {
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    activeChildren.add(child);
     let output = '';
     let settled = false;
     const inspect = (chunk) => {
       output += chunk;
       if (!settled && output.includes('CONCURRENCY_LOCKS_READY') && output.includes('SECOND_SESSION_STARTED=YES')) {
         settled = true;
-        resolve({ child, fixture: parseFixture(output), getOutput: () => output });
+        const fixture = parseFixture(output);
+        knownFixtures.set(fixture.runId, fixture);
+        resolve({ child, fixture, getOutput: () => output });
       }
     };
     child.stdout.on('data', (chunk) => inspect(chunk.toString()));
     child.stderr.on('data', (chunk) => inspect(chunk.toString()));
     child.on('error', reject);
     child.on('close', (code, signal) => {
+      activeChildren.delete(child);
       if (!settled) reject(new Error(`verifier exited before active-child signal boundary: code=${code} signal=${signal}\n${output}`));
     });
   });
@@ -156,6 +200,7 @@ WHERE id=${sqlLiteral(sentinelThreadId)}::uuid
 async function expectFault(fault, label, expectedOutput) {
   const result = await runVerifier({ SUBSCRIPTION_VERIFIER_TEST_FAULT: fault });
   assert(result.code !== 0, `${label}: verifier unexpectedly succeeded`);
+  assert(result.fixture && !result.fixtureParseError, `${label}: fixture metadata unavailable: ${result.fixtureParseError?.message}`);
   if (expectedOutput) {
     assert(result.output.includes(expectedOutput), `${label}: expected fault output ${expectedOutput} was absent:\n${result.output}`);
   }
@@ -187,17 +232,77 @@ COMMIT;
 `);
 }
 
+function emergencyHarnessCleanup(signal) {
+  if (harnessCleanupStarted) return;
+  harnessCleanupStarted = true;
+  console.error(`HARNESS_RECEIVED_${signal}=YES`);
+  for (const child of activeChildren) {
+    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
+  }
+  for (const fixture of knownFixtures.values()) {
+    try {
+      psql(`SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE pid <> pg_catalog.pg_backend_pid() AND application_name IN ('subver:' || ${sqlLiteral(fixture.runId)} || ':first','subver:' || ${sqlLiteral(fixture.runId)} || ':second');`);
+      externalCleanup(fixture);
+    } catch (error) {
+      console.error(`signal recovery failed for ${fixture.runId}: ${error.message}`);
+    }
+  }
+  try {
+    psql(`BEGIN;
+DELETE FROM public.forum_threads WHERE id=${sqlLiteral(sentinelThreadId)}::uuid AND title=${sqlLiteral(harnessOwnershipMarker)} AND "createdById"=${sqlLiteral(harnessOwnershipMarker)};
+DELETE FROM public.forum_threads WHERE id=${sqlLiteral(oldThreadId)}::uuid AND title='old fixed verifier thread' AND "createdById"='old-fixed-owner';
+DELETE FROM public.forum_principals WHERE id=${sqlLiteral(sentinelPrincipalId)}::uuid AND auth_subject=${sqlLiteral(harnessOwnershipMarker)} AND agent_id=${sqlLiteral(harnessOwnershipMarker)};
+DELETE FROM public.forum_principals WHERE id=${sqlLiteral(oldPrincipalId)}::uuid AND auth_subject='old-fixed-verifier-principal' AND agent_id='old-fixed-verifier-agent';
+COMMIT;`);
+  } catch (error) {
+    console.error(`harness signal sentinel cleanup failed: ${error.message}`);
+  }
+  process.exit(1);
+}
+
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => emergencyHarnessCleanup(signal));
+}
+
 try {
   psql(`
 BEGIN;
 INSERT INTO public.forum_principals (id,auth_subject,agent_id,"updatedAt") VALUES
-  (${sqlLiteral(sentinelPrincipalId)},${sqlLiteral(sentinelMarker)},${sqlLiteral(sentinelMarker)},now()),
-  (${sqlLiteral(oldPrincipalId)},'old-fixed-verifier-principal','old-fixed-verifier-agent',now());
+  (${sqlLiteral(sentinelPrincipalId)},${sqlLiteral(sentinelMarker)},${sqlLiteral(sentinelMarker)},now());
 INSERT INTO public.forum_threads (id,title,"createdById","createdByName","createdAt","updatedAt") VALUES
-  (${sqlLiteral(sentinelThreadId)},${sqlLiteral(sentinelMarker)},${sqlLiteral(sentinelMarker)},'sentinel',now(),now()),
-  (${sqlLiteral(oldThreadId)},'old fixed verifier thread','old-fixed-owner','old-fixed-owner',now(),now());
+  (${sqlLiteral(sentinelThreadId)},${sqlLiteral(sentinelMarker)},${sqlLiteral(sentinelMarker)},'sentinel',now(),now());
 COMMIT;
 `);
+  if (harnessFault === 'assertion') throw new Error('injected harness assertion failure');
+  if (pauseWithChild) {
+    const held = await runVerifierUntilSetup();
+    console.log(`HARNESS_CHILD_PID=${held.child.pid}`);
+    console.log(`HARNESS_CHILD_FIXTURE_RUN_ID=${held.fixture.runId}`);
+    console.log(`HARNESS_CHILD_FIXTURE_OWNERSHIP_MARKER=${held.fixture.marker}`);
+    console.log(`HARNESS_CHILD_FIXTURE_PRINCIPAL_ID=${held.fixture.principalId}`);
+    console.log(`HARNESS_CHILD_FIXTURE_THREAD_ID=${held.fixture.threadId}`);
+    console.log(`HARNESS_CHILD_FIXTURE_FIRST_WATCH_ID=${held.fixture.firstWatchId}`);
+    console.log(`HARNESS_CHILD_FIXTURE_SECOND_WATCH_ID=${held.fixture.secondWatchId}`);
+    console.log('HARNESS_PAUSE_WITH_CHILD=READY');
+    await new Promise(() => { setInterval(() => {}, 1_000); });
+  }
+  if (pauseAfterSentinel) {
+    console.log('HARNESS_PAUSE_AFTER_SENTINEL=READY');
+    await new Promise(() => { setInterval(() => {}, 1_000); });
+  }
+  psql(`BEGIN;
+INSERT INTO public.forum_principals (id,auth_subject,agent_id,"updatedAt") VALUES (${sqlLiteral(oldPrincipalId)},'old-fixed-verifier-principal','old-fixed-verifier-agent',now());
+INSERT INTO public.forum_threads (id,title,"createdById","createdByName","createdAt","updatedAt") VALUES (${sqlLiteral(oldThreadId)},'old fixed verifier thread','old-fixed-owner','old-fixed-owner',now(),now());
+COMMIT;`);
+
+  const earlyExit = await runVerifier({ SUBSCRIPTION_VERIFIER_TEST_PRINCIPAL_ID: 'not-a-uuid' });
+  assert(earlyExit.code !== 0, 'invalid test-only UUID verifier unexpectedly succeeded');
+  assert(earlyExit.output.includes('invalid test-only PRINCIPAL_ID UUID: not-a-uuid'), `early exit lost original verifier error:\n${earlyExit.output}`);
+  assert(!earlyExit.fixture, 'early exit unexpectedly produced fixture metadata');
+  assert(earlyExit.fixtureParseError?.message.includes('FIXTURE_RUN_ID'), 'early exit did not report controlled missing fixture metadata');
+  assertSentinelPreserved('early exit parse failure');
+  console.log('EARLY_EXIT_ERROR_PRESERVATION=PASS');
+  console.log('FIXTURE_PARSE_ERROR_CONTROLLED=PASS');
 
   const fixedRegression = await runVerifier();
   assert(fixedRegression.code === 0, `fixed-ID regression verifier failed:\n${fixedRegression.output}`);
@@ -239,17 +344,21 @@ SELECT count(*) FROM public.forum_threads WHERE id=${sqlLiteral(oldThreadId)}::u
   await expectFault('lock-timeout', 'LOCK_TIMEOUT_CLEANUP', 'lock timeout');
   await expectFault('statement-timeout', 'STATEMENT_TIMEOUT_CLEANUP', 'statement timeout');
 
-  const sigterm = await runVerifierUntilLocks();
-  const sigtermExit = waitForExit(sigterm.child, sigterm.getOutput);
-  sigterm.child.kill('SIGTERM');
-  sigterm.child.kill('SIGHUP');
-  const sigtermResult = await sigtermExit;
-  assert(sigtermResult.code !== 0 || sigtermResult.signal, 'SIGTERM verifier unexpectedly exited successfully');
-  assert(sigtermResult.output.includes('CATCHABLE_SIGNAL_CLEANUP=PASS'), `SIGTERM handler did not report cleanup:\n${sigtermResult.output}`);
-  assertRunClean(sigterm.fixture, 'SIGTERM');
-  assertSentinelPreserved('SIGTERM');
-  console.log('SIGTERM_CLEANUP=PASS');
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    const signaled = await runVerifierUntilLocks();
+    const signaledExit = waitForExit(signaled.child, signaled.getOutput);
+    signaled.child.kill(signal);
+    const signalResult = await signaledExit;
+    assert(signalResult.code !== 0 || signalResult.signal, `${signal} verifier unexpectedly exited successfully`);
+    assert(signalResult.output.includes('CATCHABLE_SIGNAL_CLEANUP=PASS'), `${signal} handler did not report cleanup:\n${signalResult.output}`);
+    assertRunClean(signaled.fixture, signal);
+    assertSentinelPreserved(signal);
+    console.log(`${signal}_CLEANUP=PASS`);
+  }
   console.log('CLEANUP_REENTRANCY_GUARD=PASS');
+
+  await expectFault('uncaught-exception', 'UNCAUGHT_EXCEPTION_CLEANUP', 'injected verifier uncaught exception');
+  await expectFault('unhandled-rejection', 'UNHANDLED_REJECTION_CLEANUP', 'injected verifier unhandled rejection');
 
   const sigkill = await runVerifierUntilSetup();
   const sigkillExit = waitForExit(sigkill.child, sigkill.getOutput);
@@ -276,6 +385,18 @@ WHERE p.id=${sqlLiteral(sigkill.fixture.principalId)}::uuid
   console.log('CLEANUP_IDEMPOTENT_FOR_OWNED_FIXTURES=PASS');
   console.log('SUBSCRIPTION_VERIFIER_CLEANUP_FAULT_TESTS=PASS');
 } finally {
+  harnessCleanupStarted = true;
+  for (const child of activeChildren) {
+    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
+  }
+  for (const fixture of knownFixtures.values()) {
+    try {
+      psql(`SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE pid <> pg_catalog.pg_backend_pid() AND application_name IN ('subver:' || ${sqlLiteral(fixture.runId)} || ':first','subver:' || ${sqlLiteral(fixture.runId)} || ':second');`);
+      externalCleanup(fixture);
+    } catch (error) {
+      console.error(`harness external recovery failed for ${fixture.runId}: ${error.message}`);
+    }
+  }
   psql(`
 BEGIN;
 DELETE FROM public.forum_threads WHERE id=${sqlLiteral(sentinelThreadId)}::uuid
@@ -289,3 +410,9 @@ DELETE FROM public.forum_principals WHERE id=${sqlLiteral(oldPrincipalId)}::uuid
 COMMIT;
 `);
 }
+
+assert(harnessCleanupStarted, 'harness top-level finally was not reached');
+assert(psql(`SELECT count(*) FROM public.forum_principals WHERE id=${sqlLiteral(sentinelPrincipalId)}::uuid OR auth_subject=${sqlLiteral(harnessOwnershipMarker)};`, true) === '0', 'harness sentinel Principal remained');
+assert(psql(`SELECT count(*) FROM public.forum_threads WHERE id=${sqlLiteral(sentinelThreadId)}::uuid OR title=${sqlLiteral(harnessOwnershipMarker)};`, true) === '0', 'harness sentinel Thread remained');
+console.log('HARNESS_FINALLY_REACHED=PASS');
+console.log('HARNESS_OWNED_SENTINEL_CLEANUP=PASS');
