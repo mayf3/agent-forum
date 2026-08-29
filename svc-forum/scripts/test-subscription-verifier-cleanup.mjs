@@ -15,10 +15,61 @@ if (!databaseUrl) {
 const verifierPath = fileURLToPath(new URL('./verify-subscription-storage.mjs', import.meta.url));
 const oldPrincipalId = '81000000-0000-0000-0000-000000000001';
 const oldThreadId = '82000000-0000-0000-0000-000000000001';
-const harnessRunId = randomUUID();
+
+// Coordinator mode identity: the external parallel-isolation coordinator
+// prespawns the harness run/sentinel identity and optionally the held child's
+// fixture identity through explicit test-only environment variables. Without
+// them the independent harness path keeps generating its own random UUIDs.
+const harnessCoordinatorFields = {
+  RUN_ID: 'SUBSCRIPTION_CLEANUP_HARNESS_COORDINATOR_RUN_ID',
+  SENTINEL_PRINCIPAL_ID: 'SUBSCRIPTION_CLEANUP_HARNESS_COORDINATOR_SENTINEL_PRINCIPAL_ID',
+  SENTINEL_THREAD_ID: 'SUBSCRIPTION_CLEANUP_HARNESS_COORDINATOR_SENTINEL_THREAD_ID',
+};
+const harnessChildCoordinatorFields = {
+  RUN_ID: 'SUBSCRIPTION_CLEANUP_HARNESS_COORDINATOR_CHILD_RUN_ID',
+  PRINCIPAL_ID: 'SUBSCRIPTION_CLEANUP_HARNESS_COORDINATOR_CHILD_PRINCIPAL_ID',
+  THREAD_ID: 'SUBSCRIPTION_CLEANUP_HARNESS_COORDINATOR_CHILD_THREAD_ID',
+  FIRST_WATCH_ID: 'SUBSCRIPTION_CLEANUP_HARNESS_COORDINATOR_CHILD_FIRST_WATCH_ID',
+  SECOND_WATCH_ID: 'SUBSCRIPTION_CLEANUP_HARNESS_COORDINATOR_CHILD_SECOND_WATCH_ID',
+};
+
+function readUuidGroup(fields, label) {
+  const present = Object.values(fields).filter((name) => process.env[name] !== undefined);
+  if (present.length === 0) return null;
+  const missing = Object.values(fields).filter((name) => process.env[name] === undefined);
+  if (missing.length > 0) {
+    throw new Error(`${label} environment variables must be set together; missing ${missing.join(', ')}`);
+  }
+  const values = {};
+  for (const [field, envName] of Object.entries(fields)) {
+    const value = process.env[envName];
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+      throw new Error(`invalid ${label} ${field} UUID: ${value}`);
+    }
+    values[field] = value;
+  }
+  return values;
+}
+
+const harnessCoordinatorIdentity = readUuidGroup(harnessCoordinatorFields, 'coordinator harness identity');
+const harnessChildCoordinatorIdentity = readUuidGroup(harnessChildCoordinatorFields, 'coordinator harness child identity');
+if (harnessChildCoordinatorIdentity
+  && new Set([
+    harnessChildCoordinatorIdentity.PRINCIPAL_ID,
+    harnessChildCoordinatorIdentity.THREAD_ID,
+    harnessChildCoordinatorIdentity.FIRST_WATCH_ID,
+    harnessChildCoordinatorIdentity.SECOND_WATCH_ID,
+  ]).size !== 4) {
+  throw new Error('coordinator harness child identity fixture IDs are not distinct');
+}
+if (harnessCoordinatorIdentity && harnessCoordinatorIdentity.SENTINEL_PRINCIPAL_ID === harnessCoordinatorIdentity.SENTINEL_THREAD_ID) {
+  throw new Error('coordinator harness sentinel IDs are not distinct');
+}
+
+const harnessRunId = harnessCoordinatorIdentity?.RUN_ID ?? randomUUID();
 const harnessOwnershipMarker = `subscription-verifier-harness:${harnessRunId}`;
-const sentinelPrincipalId = randomUUID();
-const sentinelThreadId = randomUUID();
+const sentinelPrincipalId = harnessCoordinatorIdentity?.SENTINEL_PRINCIPAL_ID ?? randomUUID();
+const sentinelThreadId = harnessCoordinatorIdentity?.SENTINEL_THREAD_ID ?? randomUUID();
 const sentinelMarker = harnessOwnershipMarker;
 const activeChildren = new Set();
 const knownFixtures = new Map();
@@ -95,13 +146,14 @@ function runVerifier(extraEnv = {}) {
   });
 }
 
-function runVerifierUntilSetup(extraEnv = {}) {
+function runVerifierUntilSetup(extraEnv = {}, coordinatorChildEnv = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [verifierPath], {
       env: {
         ...process.env,
         SUBSCRIPTION_STORAGE_DATABASE_URL: databaseUrl,
         SUBSCRIPTION_VERIFIER_TEST_PAUSE_AFTER_SETUP: '1',
+        ...coordinatorChildEnv,
         ...extraEnv,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -275,7 +327,15 @@ COMMIT;
 `);
   if (harnessFault === 'assertion') throw new Error('injected harness assertion failure');
   if (pauseWithChild) {
-    const held = await runVerifierUntilSetup();
+    const coordinatorChildEnv = {};
+    if (harnessChildCoordinatorIdentity) {
+      coordinatorChildEnv.SUBSCRIPTION_VERIFIER_COORDINATOR_RUN_ID = harnessChildCoordinatorIdentity.RUN_ID;
+      coordinatorChildEnv.SUBSCRIPTION_VERIFIER_COORDINATOR_PRINCIPAL_ID = harnessChildCoordinatorIdentity.PRINCIPAL_ID;
+      coordinatorChildEnv.SUBSCRIPTION_VERIFIER_COORDINATOR_THREAD_ID = harnessChildCoordinatorIdentity.THREAD_ID;
+      coordinatorChildEnv.SUBSCRIPTION_VERIFIER_COORDINATOR_FIRST_WATCH_ID = harnessChildCoordinatorIdentity.FIRST_WATCH_ID;
+      coordinatorChildEnv.SUBSCRIPTION_VERIFIER_COORDINATOR_SECOND_WATCH_ID = harnessChildCoordinatorIdentity.SECOND_WATCH_ID;
+    }
+    const held = await runVerifierUntilSetup({}, coordinatorChildEnv);
     console.log(`HARNESS_CHILD_PID=${held.child.pid}`);
     console.log(`HARNESS_CHILD_FIXTURE_RUN_ID=${held.fixture.runId}`);
     console.log(`HARNESS_CHILD_FIXTURE_OWNERSHIP_MARKER=${held.fixture.marker}`);
