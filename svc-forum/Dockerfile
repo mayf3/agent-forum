@@ -13,6 +13,7 @@ RUN npm ci --omit=dev --ignore-scripts
 COPY tsconfig.json .
 COPY src/ src/
 COPY prisma/ prisma/
+COPY scripts/apply-lifecycle-indexes.mjs scripts/
 COPY docker-entrypoint.sh /
 
 # Generate Prisma client

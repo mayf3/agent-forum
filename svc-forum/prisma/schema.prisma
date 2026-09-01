@@ -8,32 +8,33 @@ datasource db {
 }
 
 model ForumThread {
-  id                 String          @id @default(uuid()) @db.Uuid
+  id                 String               @id @default(uuid()) @db.Uuid
   title              String
-  type               String          @default("discussion")
-  status             String          @default("open")
+  type               String               @default("discussion")
+  status             String               @default("open")
   contextType        String?
   contextId          String?
   pipeline           String?
   layer              String?
-  tags               String[]        @default([])
-  pinned             Boolean         @default(false)
-  featured           Boolean         @default(false)
-  messageCount       Int             @default(0)
-  viewCount          Int             @default(0)
+  tags               String[]             @default([])
+  pinned             Boolean              @default(false)
+  featured           Boolean              @default(false)
+  messageCount       Int                  @default(0)
+  viewCount          Int                  @default(0)
   lastMessageAt      DateTime?
   createdById        String
   createdByName      String
-  createdByType      String          @default("agent")
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
+  createdByType      String               @default("agent")
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
   resolvedAt         DateTime?
   resolvedById       String?
   resolvedByName     String?
-  creatorPrincipalId String?         @map("creator_principal_id") @db.Uuid
-  visibilityState    String?         @map("visibility_state")
-  currentRevision    Int?            @map("current_revision")
-  creatorPrincipal   ForumPrincipal? @relation("ForumThreadCreatorPrincipal", fields: [creatorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_threads_creator_principal_fk")
+  creatorPrincipalId String?              @map("creator_principal_id") @db.Uuid
+  visibilityState    String?              @map("visibility_state")
+  currentRevision    Int?                 @map("current_revision")
+  creatorPrincipal   ForumPrincipal?      @relation("ForumThreadCreatorPrincipal", fields: [creatorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_threads_creator_principal_fk")
+  currentRevisionRow ForumThreadRevision? @relation("ForumThreadCurrentRevision", fields: [id, currentRevision], references: [threadId, revision], onDelete: Restrict, onUpdate: Restrict, map: "forum_threads_current_revision_fk")
 
   participants       ForumThreadParticipant[]
   messages           ForumThreadMessage[]
@@ -45,6 +46,7 @@ model ForumThread {
   watchSubscriptions ForumWatchSubscription[]
   readStates         ForumReadState[]
   notificationFacts  ForumNotificationFact[]
+  revisions          ForumThreadRevision[]    @relation("ForumThreadRevisions")
 
   @@index([status])
   @@index([type])
@@ -215,6 +217,8 @@ model ForumPrincipal {
   readStates                   ForumReadState[]
   mentionsReceived             ForumMention[]
   notificationFacts            ForumNotificationFact[]
+  openedThreadRevisions        ForumThreadRevision[]     @relation("ForumThreadRevisionOpenedBy")
+  resolvedThreadRevisions      ForumThreadRevision[]     @relation("ForumThreadRevisionResolvedBy")
 
   @@index([status])
   @@index([principalType])
@@ -492,6 +496,28 @@ model ForumNotificationFact {
 
   @@unique([recipientPrincipalId, sourceEventKey])
   @@map("forum_notification_facts")
+}
+
+// ─── Phase 2 lifecycle storage (empty; no runtime readers/writers) ───────
+
+model ForumThreadRevision {
+  id                    String    @id @default(uuid()) @db.Uuid
+  threadId              String    @map("thread_id") @db.Uuid
+  revision              Int
+  discussionState       String    @map("discussion_state")
+  openedAt              DateTime  @map("opened_at") @db.Timestamptz(3)
+  openedByPrincipalId   String    @map("opened_by_principal_id") @db.Uuid
+  resolvedAt            DateTime? @map("resolved_at") @db.Timestamptz(3)
+  resolvedByPrincipalId String?   @map("resolved_by_principal_id") @db.Uuid
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  thread              ForumThread     @relation("ForumThreadRevisions", fields: [threadId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  openedByPrincipal   ForumPrincipal  @relation("ForumThreadRevisionOpenedBy", fields: [openedByPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  resolvedByPrincipal ForumPrincipal? @relation("ForumThreadRevisionResolvedBy", fields: [resolvedByPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  currentForThreads   ForumThread[]   @relation("ForumThreadCurrentRevision")
+
+  @@unique([threadId, revision])
+  @@map("forum_thread_revisions")
 }
 
 // ─── Forum Audit Event (append-only evidence storage) ──────────────────────
