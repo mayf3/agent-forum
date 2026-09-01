@@ -267,12 +267,23 @@ threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWrite
 }));
 
 // DELETE /api/threads/:threadId — soft delete thread (moderator/admin only)
-// Legacy moderation removal. New moderation flows should prefer hide (with a
-// required reason) + restore; both keep history and are audited.
+// Legacy moderation removal. New moderation flows should prefer hide + restore;
+// both keep history and are audited. Deletion is terminal, so it always
+// requires a non-empty reason (CTR-DELETE-001) — same shape as moderation hide.
 threadsRouter.delete('/:threadId', authRequired, requireGovernanceScopes(), requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const existing = await db.findThreadById(threadId);
   if (!existing) throw new HttpError(404, 'Thread not found');
+
+  // 删除是不可逆的终态治理动作，必须留理由（与 moderation.ts hide 同一校验
+  // 模式）：缺失 / 非字符串 / 空串 / 纯空白一律 400。
+  const reason: string | undefined =
+    typeof req.body?.reason === 'string' && req.body.reason.trim()
+      ? req.body.reason.trim()
+      : undefined;
+  if (!reason) {
+    throw new HttpError(400, 'reason is required to delete a thread');
+  }
 
   // Unified state-machine guard: deleted is terminal and reachable from any
   // non-deleted status (no route may write status outside this table).
@@ -281,6 +292,8 @@ threadsRouter.delete('/:threadId', authRequired, requireGovernanceScopes(), requ
   const user = req.user!;
 
   // Single transaction: audit append → status flip → participant notices.
+  // The required reason flows into BOTH the audit event payload and the
+  // moderator_notice fan-out payload via spec.reason.
   const { result } = await applyGovernanceAction(
     {
       actor: {
@@ -298,6 +311,7 @@ threadsRouter.delete('/:threadId', authRequired, requireGovernanceScopes(), requ
       revision: existing.currentRevision ?? null,
       fromStatus: existing.status,
       toStatus: 'deleted',
+      reason,
       notifyReason: 'moderator_notice',
     },
     (tx) => tx.forumThread.update({ where: { id: threadId }, data: { status: 'deleted' } }),

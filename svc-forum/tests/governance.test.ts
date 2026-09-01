@@ -604,17 +604,18 @@ void describe('Governance V1 — lifecycle, permissions, audit', async () => {
     const app = await buildApp();
 
     const plain = await tokenFor('plain', SCOPES.plain);
-    let res = await req(app, 'DELETE', `/api/threads/${THREAD_ID}`, plain);
+    let res = await req(app, 'DELETE', `/api/threads/${THREAD_ID}`, plain, { reason: 'not a moderator' });
     assert.equal(res.status, 403);
 
     const mod = await tokenFor('moderator', SCOPES.moderator);
-    res = await req(app, 'DELETE', `/api/threads/${THREAD_ID}`, mod);
+    res = await req(app, 'DELETE', `/api/threads/${THREAD_ID}`, mod, { reason: 'spam' });
     assert.equal(res.status, 200);
     assert.equal(res.body.thread.status, 'deleted');
 
     const row = auditRows().find((r) => r.eventType === 'thread.soft_delete');
     assert.ok(row);
     assert.equal(row.payload.toStatus, 'deleted');
+    assert.equal(row.payload.reason, 'spam');
   });
 
   // ── Transaction atomicity: update + audit + notification are all-or-nothing ──
