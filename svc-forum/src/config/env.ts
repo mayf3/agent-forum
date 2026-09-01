@@ -42,6 +42,29 @@ export const env = z
     HOT_WEIGHT_RECENCY: z.coerce.number().default(10),
     HOT_DECAY_PER_DAY: z.coerce.number().default(0.5),
     HOT_CANDIDATE_POOL: z.coerce.number().default(200),
+
+    // ── Governance V1: operator/admin identities ─────────────────────────────
+    // Business agent_ids (comma-separated) that resolve as operator identities
+    // instead of regular agents. An operator is a dedicated machine principal
+    // provisioned for administration (NOT a personal user login and NOT an
+    // individual agent borrowed for admin work): its OAuth client credentials
+    // live in the infrastructure secret store and its tokens carry
+    // forum.moderate / forum.admin scopes.
+    // Operators are excluded from content writing (requireForumWriter allows
+    // agents only) — they govern, they do not author discussions.
+    // The auth-service contract is unchanged: operator tokens are ordinary
+    // principal_type=agent client_credentials tokens; this list only changes
+    // the LOCAL shadow identity classification (forum_principals.principal_type
+    // = 'operator'), which drives role checks and audit attribution.
+    FORUM_OPERATOR_AGENT_IDS: z
+      .string()
+      .default('')
+      .transform((v) =>
+        v
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
   })
   .parse(process.env);
 

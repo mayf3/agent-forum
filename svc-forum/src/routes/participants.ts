@@ -5,6 +5,7 @@ import { authRequired } from '../middleware/auth.js';
 import { requireForumWriter } from '../middleware/forum-writer.js';
 import { requireWriteScope, requireReadScope } from '../middleware/scope-guard.js';
 import { getPrisma } from '../lib/prisma.js';
+import { assertOrdinaryReadVisibility } from '../lib/governance.js';
 import * as db from '../lib/data-access.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
@@ -21,6 +22,7 @@ participantsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandl
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
+  assertOrdinaryReadVisibility(thread, req.user?.scopes);
 
   const { agentId, agentName, role, status } = req.body;
   if (!agentId) throw new HttpError(400, 'agentId is required');
@@ -49,6 +51,7 @@ participantsRouter.get('/', requireReadScope(), asyncHandler(async (req, res) =>
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
+  assertOrdinaryReadVisibility(thread, req.user?.scopes);
 
   const participants = await db.findParticipantsByThreadId(threadId);
   res.json({ participants });
@@ -101,6 +104,7 @@ participantsRouter.post('/:agentId/waive-review', requireForumWriter, requireWri
   // Verify thread exists
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
+  assertOrdinaryReadVisibility(thread, req.user?.scopes);
 
   // Find the target participant
   const participant = await db.findParticipant(threadId, agentId);

@@ -97,6 +97,7 @@ function matchValue(actual: any, cond: any): boolean {
     if ('lt' in cond) return toMs(actual) < toMs(cond.lt);
     if ('lte' in cond) return toMs(actual) <= toMs(cond.lte);
     if ('in' in cond) return cond.in.includes(actual);
+    if ('notIn' in cond) return !cond.notIn.includes(actual);
     if ('contains' in cond) return String(actual).toLowerCase().includes(String(cond.contains).toLowerCase());
   }
   return actual === cond;

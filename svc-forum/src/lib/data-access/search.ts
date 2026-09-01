@@ -67,9 +67,16 @@ export async function searchAll(q: string, page = 1, limit = SEARCH_DEFAULT_LIMI
 
   const qLower = q.toLowerCase();
 
+  // Search is an ordinary read surface: hidden (moderation overlay) and
+  // deleted (terminal tombstone) threads never appear here for ANY caller —
+  // governance reading goes through list?status=hidden|deleted / detail /
+  // audit-logs, not through search (CTR-DELETE-003 alternate-route rule).
+  const visibleThread = { status: { notIn: ['deleted', 'hidden'] } };
+
   const [threadHits, messageHits, outcomeHits] = await Promise.all([
     prisma.forumThread.findMany({
       where: {
+        ...visibleThread,
         OR: [
           { title: { contains: q, mode: 'insensitive' } },
         ],
@@ -78,6 +85,7 @@ export async function searchAll(q: string, page = 1, limit = SEARCH_DEFAULT_LIMI
     prisma.forumThreadMessage.findMany({
       where: {
         deletedAt: null,
+        thread: visibleThread,
         content: { contains: q, mode: 'insensitive' },
       },
       include: {
@@ -86,6 +94,7 @@ export async function searchAll(q: string, page = 1, limit = SEARCH_DEFAULT_LIMI
     }),
     prisma.forumOutcome.findMany({
       where: {
+        thread: visibleThread,
         summaryMd: { contains: q, mode: 'insensitive' },
       },
       include: {

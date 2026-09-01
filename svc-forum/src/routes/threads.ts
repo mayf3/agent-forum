@@ -3,7 +3,15 @@ import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
 import { requireForumWriter } from '../middleware/forum-writer.js';
-import { requireWriteScope, requireReadScope, requireModeratorScope } from '../middleware/scope-guard.js';
+import { requireWriteScope, requireReadScope, requireModeratorScope, requireGovernanceScopes } from '../middleware/scope-guard.js';
+import {
+  applyGovernanceAction,
+  assertLifecycleTransition,
+  assertOrdinaryReadVisibility,
+  hasGovernanceAuthority,
+} from '../lib/governance.js';
+import { appendAuditEvent } from '../lib/data-access/audit-store.js';
+import { withTransactionRetry } from '../lib/data-access/shared.js';
 import * as db from '../lib/data-access.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
@@ -78,6 +86,13 @@ threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req
     throw new HttpError(400, 'sort must be "latest", "recently-updated" or "hot"');
   }
 
+  // Hidden/deleted threads are removed from public view: both are excluded
+  // from the default listing, and explicit status=hidden / status=deleted
+  // filters are governance-only (CTR-DELETE-003 + hidden overlay policy).
+  if ((status === 'hidden' || status === 'deleted') && !hasGovernanceAuthority(req.user?.scopes)) {
+    throw new HttpError(403, 'INSUFFICIENT_SCOPE: viewing hidden or deleted threads requires forum.moderate or forum.admin');
+  }
+
   // Resolve pinned/featured from filter param or boolean params.
   // If filter is present, it takes priority — boolean pinned/featured are ignored (400 if also provided).
   let resolvedPinned: boolean | undefined;
@@ -143,10 +158,13 @@ threadsRouter.get('/', authRequired, requireReadScope(), asyncHandler(async (req
 // GET /api/threads/:threadId — get single thread
 // Records a view (dedup per principal) on read; view recording is best-effort
 // and never fails the response (AC#1/AC#4).
+// Hidden AND deleted threads are invisible to non-governance callers (404,
+// same as nonexistent — no existence leak); moderators/admins can inspect.
 threadsRouter.get('/:threadId', authRequired, requireReadScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
+  assertOrdinaryReadVisibility(thread, req.user?.scopes);
 
   const user = req.user!;
   void db.recordView(threadId, user.id).catch(() => {});
@@ -155,23 +173,43 @@ threadsRouter.get('/:threadId', authRequired, requireReadScope(), asyncHandler(a
 }));
 
 // PATCH /api/threads/:threadId — update thread
+// Object authority (CTR-AUTHZ-002): descriptive metadata changes require the
+// thread CREATOR or governance scope (forum.moderate/forum.admin) — an
+// ordinary writer cannot edit arbitrary threads. pinned/featured remain
+// governance-only (audited flag toggles).
 threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const existing = await db.findThreadById(threadId);
   if (!existing) throw new HttpError(404, 'Thread not found');
 
-  // status is intentionally excluded — use dedicated endpoints:
-  // POST /:threadId/resolve, POST /:threadId/archive, DELETE /:threadId
+  const user = req.user!;
+  const canGovern = hasGovernanceAuthority(user.scopes);
+  const isCreator = existing.createdById === user.id;
+
+  // Unified visibility guard: hidden/deleted threads are invisible to
+  // non-governance callers (404, no existence leak).
+  assertOrdinaryReadVisibility(existing, user.scopes);
+
+  if (existing.status === 'deleted') {
+    // deleted is terminal — not even governance edits tombstoned metadata
+    throw new HttpError(400, 'Cannot update a deleted thread');
+  }
+
+  if (!isCreator && !canGovern) {
+    throw new HttpError(403, 'INSUFFICIENT_SCOPE: only the thread creator or a moderator/admin may update this thread');
+  }
+
+  // status is intentionally excluded — use dedicated governance endpoints:
+  // POST /:threadId/close|archive|hide|restore (moderation router) and
+  // POST /:threadId/resolve, DELETE /:threadId
   const allowed = ['title', 'type', 'contextType', 'contextId', 'pipeline', 'layer', 'tags'];
 
-  // pinned/featured are moderator-only fields
+  // pinned/featured are moderator-only fields (governance actions — audited)
   const moderatorFields = ['pinned', 'featured'];
-  const requestingModeratorFields = moderatorFields.some(f => req.body[f] !== undefined);
+  const requestedModeratorFields = moderatorFields.filter(f => req.body[f] !== undefined);
 
-  if (requestingModeratorFields) {
-    // Verify the caller has forum.moderate scope
-    const userScopes = req.user!.scopes || [];
-    if (!userScopes.includes('forum.moderate')) {
+  if (requestedModeratorFields.length > 0) {
+    if (!canGovern) {
       throw new HttpError(403, 'INSUFFICIENT_SCOPE: required "forum.moderate" for pinned/featured');
     }
     allowed.push(...moderatorFields);
@@ -184,26 +222,125 @@ threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWrite
     }
   }
 
-  const thread = await db.updateThread(threadId, updateData);
+  const flagActions: Record<string, { on: string; off: string }> = {
+    pinned: { on: 'thread.pin', off: 'thread.unpin' },
+    featured: { on: 'thread.feature', off: 'thread.unfeature' },
+  };
+
+  let thread;
+  if (requestedModeratorFields.length > 0) {
+    // Governance-audited path: the update AND every flag-toggle audit event
+    // land in ONE transaction — a flag can never flip unrecorded.
+    thread = await withTransactionRetry(async (tx: any) => {
+      const updated = await tx.forumThread.update({ where: { id: threadId }, data: updateData });
+      for (const field of requestedModeratorFields) {
+        const before = (existing as any)[field] as boolean;
+        const after = (updated as any)[field] as boolean;
+        if (before !== after) {
+          const actions = flagActions[field];
+          await appendAuditEvent(
+            {
+              actor: {
+                id: user.id,
+                authSubject: user.authSubjectId,
+                agentId: user.agentId,
+                clientId: user.clientId,
+                name: user.name,
+                scopes: user.scopes,
+              },
+              eventType: (after ? actions.on : actions.off) as any,
+              targetType: 'thread',
+              targetId: threadId,
+              threadId,
+            },
+            tx,
+          );
+        }
+      }
+      return updated;
+    });
+  } else {
+    thread = await db.updateThread(threadId, updateData);
+  }
+
   res.json({ thread });
 }));
 
-// DELETE /api/threads/:threadId — soft delete thread (moderator only)
-threadsRouter.delete('/:threadId', authRequired, requireForumWriter, requireModeratorScope(), requireWriteScope(), asyncHandler(async (req, res) => {
+// DELETE /api/threads/:threadId — soft delete thread (moderator/admin only)
+// Legacy moderation removal. New moderation flows should prefer hide (with a
+// required reason) + restore; both keep history and are audited.
+threadsRouter.delete('/:threadId', authRequired, requireGovernanceScopes(), requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const existing = await db.findThreadById(threadId);
   if (!existing) throw new HttpError(404, 'Thread not found');
-  if (existing.status === 'deleted') throw new HttpError(400, 'Thread already deleted');
 
-  const thread = await db.softDeleteThread(threadId);
-  res.json({ thread });
+  // Unified state-machine guard: deleted is terminal and reachable from any
+  // non-deleted status (no route may write status outside this table).
+  assertLifecycleTransition('softDelete', existing.status);
+
+  const user = req.user!;
+
+  // Single transaction: audit append → status flip → participant notices.
+  const { result } = await applyGovernanceAction(
+    {
+      actor: {
+        id: user.id,
+        authSubject: user.authSubjectId,
+        agentId: user.agentId,
+        clientId: user.clientId,
+        name: user.name,
+        scopes: user.scopes,
+      },
+      eventType: 'thread.soft_delete',
+      targetType: 'thread',
+      targetId: threadId,
+      threadId,
+      revision: existing.currentRevision ?? null,
+      fromStatus: existing.status,
+      toStatus: 'deleted',
+      notifyReason: 'moderator_notice',
+    },
+    (tx) => tx.forumThread.update({ where: { id: threadId }, data: { status: 'deleted' } }),
+  );
+
+  res.json({ thread: result });
 }));
 
 // POST /api/threads/:threadId/resolve — resolve thread with outcome
+//
+// B4 guard set (unified with the governance state machine):
+//   actor    — thread creator OR governance scope (CTR-FINAL-001/CTR-AUTHZ-002);
+//              an ordinary writer can no longer resolve arbitrary threads
+//   state    — resolve only from status=open (assertLifecycleTransition);
+//              hidden/deleted/archived/closed threads can NEVER be resolved,
+//              so resolve can never revive moderated content (CTR-LIFE-005)
+//   gate     — review readiness unchanged (409 with pending reviewer ids)
+//   atomicity— outcome + status + audit (+ participant notice) in ONE
+//              applyGovernanceAction transaction; no second status-write path
 threadsRouter.post('/:threadId/resolve', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
+
+  const user = req.user!;
+  const canGovern = hasGovernanceAuthority(user.scopes);
+
+  // Ordinary callers cannot even see hidden/deleted targets (no existence
+  // leak through the resolve route).
+  assertOrdinaryReadVisibility(thread, user.scopes);
+
+  // Object authority: creator or governance (CTR-FINAL-001).
+  if (thread.createdById !== user.id && !canGovern) {
+    throw new HttpError(403, 'INSUFFICIENT_SCOPE: only the thread creator or a moderator/admin may resolve this thread');
+  }
+
+  // State guard: finalization starts only from an open thread.
+  assertLifecycleTransition('resolve', thread.status);
+
+  const { summaryMd, decisionsJson, actionItemsJson, rejectedOptionsJson, openQuestionsJson } = req.body;
+  if (!summaryMd || !summaryMd.trim()) {
+    throw new HttpError(400, 'summaryMd (outcome summary) is required to resolve thread');
+  }
 
   // Resolve gate: all required reviewers must be satisfied
   const readiness = await db.getThreadReviewReadiness(threadId);
@@ -215,55 +352,71 @@ threadsRouter.post('/:threadId/resolve', authRequired, requireForumWriter, requi
     return;
   }
 
-  const { summaryMd, decisionsJson, actionItemsJson, rejectedOptionsJson, openQuestionsJson } = req.body;
-  if (!summaryMd || !summaryMd.trim()) {
-    throw new HttpError(400, 'summaryMd (outcome summary) is required to resolve thread');
-  }
+  // Create outcome + flip status in the single audited governance
+  // transaction (audit failure ⇒ nothing commits).
+  const { result } = await applyGovernanceAction(
+    {
+      actor: {
+        id: user.id,
+        authSubject: user.authSubjectId,
+        agentId: user.agentId,
+        clientId: user.clientId,
+        name: user.name,
+        scopes: user.scopes,
+      },
+      eventType: 'thread.resolve',
+      targetType: 'thread',
+      targetId: threadId,
+      threadId,
+      revision: thread.currentRevision ?? null,
+      fromStatus: thread.status,
+      toStatus: 'resolved',
+      notifyReason: 'thread_notice',
+    },
+    async (tx) => {
+      await tx.forumOutcome.create({
+        data: {
+          threadId: thread.id,
+          summaryMd: summaryMd.trim(),
+          decisionsJson: decisionsJson || null,
+          actionItemsJson: actionItemsJson || null,
+          rejectedOptionsJson: rejectedOptionsJson || null,
+          openQuestionsJson: openQuestionsJson || null,
+          writebackTargetType: null,
+          writebackTargetRef: null,
+          createdById: user.id,
+          createdByName: user.name,
+        },
+      });
+      return tx.forumThread.update({
+        where: { id: thread.id },
+        data: {
+          status: 'resolved',
+          resolvedAt: new Date(),
+          resolvedById: user.id,
+          resolvedByName: user.name,
+        },
+      });
+    },
+  );
 
-  const user = req.user!;
-
-  // Create outcome
-  await db.createOutcome({
-    threadId: thread.id,
-    summaryMd: summaryMd.trim(),
-    decisionsJson: decisionsJson || null,
-    actionItemsJson: actionItemsJson || null,
-    rejectedOptionsJson: rejectedOptionsJson || null,
-    openQuestionsJson: openQuestionsJson || null,
-    writebackTargetType: null,
-    writebackTargetRef: null,
-    createdById: user.id,
-    createdByName: user.name,
-  });
-
-  // Resolve thread
-  const updated = await db.updateThread(thread.id, {
-    status: 'resolved',
-    resolvedAt: new Date(),
-    resolvedById: user.id,
-    resolvedByName: user.name,
-  });
-
-  res.json({ thread: updated });
+  res.json({ thread: result });
 }));
 
-// POST /api/threads/:threadId/archive — archive thread
-threadsRouter.post('/:threadId/archive', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
-  const threadId = p(req, 'threadId');
-  const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
-
-  const updated = await db.updateThread(thread.id, { status: 'archived' });
-  res.json({ thread: updated });
-}));
+// POST /api/threads/:threadId/archive — moved to the moderation router
+// (Governance V1): archiving is a governance action requiring
+// forum.moderate or forum.admin, audited in forum_audit_events.
 
 // GET /api/threads/:threadId/transcript — get transcript (MVP core)
+// Same unified visibility policy as detail: hidden/deleted transcripts are
+// 404 for ordinary callers; governance callers retain read access.
 threadsRouter.get('/:threadId/transcript', authRequired, requireReadScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const format = (req.query.format as string) || 'md';
 
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
+  assertOrdinaryReadVisibility(thread, req.user?.scopes);
 
   if (format === 'json') {
     const messages = await db.findMessagesByThreadId(threadId);
@@ -285,6 +438,15 @@ threadsRouter.get('/:threadId/transcript', authRequired, requireReadScope(), asy
 // The identity is ALWAYS the authenticated principal (req.user.id). The client
 // never submits agentId/participantId here. Requires forum.write only — the
 // original Participant management + review-flow routes are untouched.
+// Self-service ops stay available on resolved/archived threads (CTR-LIFE-002)
+// but follow the unified visibility policy for hidden/deleted targets.
+
+async function requireWatchableThread(threadId: string, req: any) {
+  const thread = await db.findThreadById(threadId);
+  if (!thread) throw new HttpError(404, 'Thread not found');
+  assertOrdinaryReadVisibility(thread, req.user?.scopes);
+  return thread;
+}
 
 // POST /api/threads/batch-read — mark multiple threads read
 threadsRouter.post('/batch-read', authRequired, requireWriteScope(), asyncHandler(async (req, res) => {
@@ -304,6 +466,7 @@ threadsRouter.post('/batch-read', authRequired, requireWriteScope(), asyncHandle
 // PUT /api/threads/:threadId/watch — watch this thread
 threadsRouter.put('/:threadId/watch', authRequired, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
+  await requireWatchableThread(threadId, req);
   const user = req.user!;
   const participant = await db.watchThread(threadId, user.id, user.name);
   res.json({ participant });
@@ -312,6 +475,7 @@ threadsRouter.put('/:threadId/watch', authRequired, requireWriteScope(), asyncHa
 // DELETE /api/threads/:threadId/watch — unwatch this thread
 threadsRouter.delete('/:threadId/watch', authRequired, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
+  await requireWatchableThread(threadId, req);
   const user = req.user!;
   const participant = await db.unwatchThread(threadId, user.id);
   res.json({ participant });
@@ -320,6 +484,7 @@ threadsRouter.delete('/:threadId/watch', authRequired, requireWriteScope(), asyn
 // PUT /api/threads/:threadId/read — mark this thread read (derived Read State)
 threadsRouter.put('/:threadId/read', authRequired, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
+  await requireWatchableThread(threadId, req);
   const user = req.user!;
   const participant = await db.markThreadRead(threadId, user.id);
   res.json({ participant });

@@ -2,7 +2,11 @@ import { Router } from 'express';
 import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
-import { requireWriteScope, requireReadScope, requireModeratorScope } from '../middleware/scope-guard.js';
+import { requireWriteScope, requireReadScope, requireGovernanceScopes } from '../middleware/scope-guard.js';
+import { getPrisma } from '../lib/prisma.js';
+import { applyGovernanceAction, assertLifecycleTransition } from '../lib/governance.js';
+import { createNotificationFacts } from '../lib/data-access/notification-store.js';
+import { repairThreadMessageDerivedState } from '../lib/data-access/messages.js';
 import * as db from '../lib/data-access.js';
 
 export const reportsRouter = Router();
@@ -40,7 +44,7 @@ reportsRouter.post('/', requireWriteScope(), asyncHandler(async (req, res) => {
 
 // GET /api/reports — moderator queue (status/targetType filter + pagination)
 // Moderator scope implies read access to the moderation queue (ARCH_DESIGN).
-reportsRouter.get('/', requireModeratorScope(), asyncHandler(async (req, res) => {
+reportsRouter.get('/', requireGovernanceScopes(), asyncHandler(async (req, res) => {
   const { status, targetType, page, limit } = req.query as Record<string, string | undefined>;
 
   if (status !== undefined && !db.REPORT_STATUSES.includes(status as any)) {
@@ -67,22 +71,132 @@ reportsRouter.get('/:id', requireReadScope(), asyncHandler(async (req, res) => {
   res.json({ report });
 }));
 
-// PATCH /api/reports/:id — handle report (moderator only)
+// PATCH /api/reports/:id — handle report (moderator/admin)
 // action = ignore | warn | delete; delete soft-deletes the reported content.
-reportsRouter.patch('/:id', requireModeratorScope(), requireWriteScope(), asyncHandler(async (req, res) => {
+// Governance V1: ONE transaction — report update + audit event append +
+// reporter notification. If the audit append fails, the handling rolls back.
+reportsRouter.patch('/:id', requireGovernanceScopes(), requireWriteScope(), asyncHandler(async (req, res) => {
   const { action, note } = req.body;
   if (!action || !['ignore', 'warn', 'delete'].includes(action)) {
     throw new HttpError(400, 'action must be one of: ignore, warn, delete');
   }
 
   const user = req.user!;
-  const report = await db.handleReport(
-    p(req, 'id'),
-    action,
-    user.id,
-    user.name,
-    note || null,
+  const reportId = p(req, 'id');
+  const report = await db.findReportById(reportId);
+  if (!report) throw new HttpError(404, 'Report not found');
+  if (report.status !== 'pending') {
+    throw new HttpError(409, `Report already handled (status=${report.status})`);
+  }
+
+  const prisma = getPrisma();
+  const { result } = await applyGovernanceAction(
+    {
+      actor: {
+        id: user.id,
+        authSubject: user.authSubjectId,
+        agentId: user.agentId,
+        clientId: user.clientId,
+        name: user.name,
+        scopes: user.scopes,
+      },
+      eventType: 'report.handle',
+      targetType: 'report',
+      targetId: reportId,
+      threadId: report.targetType === 'thread' ? report.targetId : null,
+      fromStatus: 'pending',
+      toStatus: db.reportStatusForAction(action),
+      reason: note || null,
+      metadata: {
+        reportAction: action,
+        reportedTargetType: report.targetType,
+        reportedTargetId: report.targetId,
+      },
+    },
+    async (tx, audit) => {
+      const now = new Date();
+      const toStatus = db.reportStatusForAction(action);
+
+      // delete action cascades: soft-delete the reported content (same tx),
+      // through the SAME unified guards the direct endpoints use.
+      if (action === 'delete') {
+        if (report.targetType === 'thread') {
+          const targetThread = await tx.forumThread.findUnique({
+            where: { id: report.targetId },
+            select: { status: true },
+          });
+          // deleted is terminal — a second delete through a report is a
+          // conflict, and the state machine keeps this the only status path.
+          if (targetThread) {
+            assertLifecycleTransition('softDelete', targetThread.status);
+          }
+          await tx.forumThread.update({
+            where: { id: report.targetId },
+            data: { status: 'deleted' },
+          });
+        } else {
+          await tx.forumThreadMessage.update({
+            where: { id: report.targetId },
+            data: { deletedAt: now },
+          });
+          // CTR-DELETE-002: repair derived thread state in the same tx.
+          const parent = await tx.forumThreadMessage.findUnique({
+            where: { id: report.targetId },
+            select: { threadId: true },
+          });
+          if (parent) {
+            await repairThreadMessageDerivedState(tx, parent.threadId);
+          }
+        }
+      }
+
+      const updated = await tx.forumReport.update({
+        where: { id: reportId },
+        data: {
+          status: toStatus,
+          handledById: user.id,
+          handledByName: user.name,
+          handledAt: now,
+          handleNote: note || null,
+        },
+      });
+
+      // Reporter notice (moderator_notice), keyed on the audit event —
+      // same transaction, idempotent.
+      if (report.reporterId !== user.id) {
+        const threadId =
+          report.targetType === 'thread'
+            ? report.targetId
+            : (
+                await tx.forumThreadMessage.findUnique({
+                  where: { id: report.targetId },
+                  select: { threadId: true },
+                })
+              )?.threadId;
+        if (threadId) {
+          await createNotificationFacts(
+            [
+              {
+                recipientPrincipalId: report.reporterId,
+                threadId,
+                messageId: report.targetType === 'message' ? report.targetId : null,
+                reason: 'moderator_notice',
+                sourceEventKey: `audit:${audit.eventId}`,
+                payload: {
+                  action: 'report.handle',
+                  reportAction: action,
+                  reportStatus: toStatus,
+                },
+              },
+            ],
+            tx,
+          );
+        }
+      }
+
+      return updated;
+    },
   );
 
-  res.json({ report });
+  res.json({ report: result });
 }));

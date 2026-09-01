@@ -74,6 +74,8 @@ const messages = new Map<string, any>();
 const snapshots = new Map<string, any>();
 const outcomes = new Map<string, any>();
 const principals = new Map<string, any>();
+const auditLogs = new Map<string, any>();
+const notifications = new Map<string, any>();
 
 function resetDb() {
   threads.clear();
@@ -82,6 +84,8 @@ function resetDb() {
   snapshots.clear();
   outcomes.clear();
   principals.clear();
+  auditLogs.clear();
+  notifications.clear();
 }
 
 function mockUuid(): string {
@@ -252,9 +256,13 @@ function createMockPrisma() {
   const s = mockStore(snapshots);
   const o = mockStore(outcomes);
   const fp = mockStore(principals);
+  const al = mockStore(auditLogs);
+  const n = mockStore(notifications);
 
   return {
     forumPrincipal: fp,
+    forumAuditEvent: al,
+    forumNotificationFact: n,
     forumThread: {
       ...t,
       create: async ({ data }: any) => {
@@ -283,6 +291,8 @@ function createMockPrisma() {
     $transaction: async (fn: (tx: any) => any) => {
       const tx = {
         forumPrincipal: fp,
+        forumAuditEvent: al,
+        forumNotificationFact: n,
         forumThread: { ...t, create: t.create, update: t.update, count: t.count },
         forumThreadParticipant: p,
         forumThreadMessage: {
@@ -586,30 +596,40 @@ matrixSuite({
 });
 
 matrixSuite({
-  name: 'POST /api/threads/:tid/archive — archive thread',
-  routerModule: '../src/routes/threads.js',
-  routerExport: 'threadsRouter',
+  name: 'POST /api/threads/:tid/archive — archive thread (governance-only since V1)',
+  routerModule: '../src/routes/moderation.js',
+  routerExport: 'moderationRouter',
   mountPath: '/api/threads',
   method: 'POST',
   route: `/api/threads/${SEED_THREAD_ID}/archive`,
-  okStatus: 200,
+  okStatus: 403, // plain agent lacks forum.moderate/forum.admin → 403
   needsThread: true,
   extra: () => {
-    it('valid agent archive changes status', async () => {
-      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    it('plain agent cannot archive (403, status unchanged)', async () => {
+      const app = await buildApp('../src/routes/moderation.js', 'moderationRouter', '/api/threads');
       const token = await getToken('valid-agent');
       const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
-      assert.equal(res.status, 200);
-      const t = threads.get(SEED_THREAD_ID);
-      assert.equal(t?.status, 'archived');
+      assert.equal(res.status, 403);
+      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
     });
-	    it('requester cannot archive', async () => {
-	      threads.get(SEED_THREAD_ID)!.status = 'open';
-	      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
-	      const token = await signHumanToken({ role: 'requester' });
-	      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
-	      assert.equal(res.status, 401); // Human tokens rejected at auth layer
-	      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
+    it('moderator archive changes status + writes audit row', async () => {
+      threads.get(SEED_THREAD_ID)!.status = 'open';
+      const app = await buildApp('../src/routes/moderation.js', 'moderationRouter', '/api/threads');
+      const token = await signAgentToken('forum.read forum.write forum.moderate');
+      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
+      assert.equal(res.status, 200);
+      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'archived');
+      const audit = Array.from(auditLogs.values()).filter((r: any) => r.eventType === 'thread.archive');
+      assert.equal(audit.length, 1);
+      assert.equal(audit[0].payload.toStatus, 'archived');
+    });
+    it('requester cannot archive', async () => {
+      threads.get(SEED_THREAD_ID)!.status = 'open';
+      const app = await buildApp('../src/routes/moderation.js', 'moderationRouter', '/api/threads');
+      const token = await signHumanToken({ role: 'requester' });
+      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
+      assert.equal(res.status, 401); // Human tokens rejected at auth layer
+      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
     });
   },
 });

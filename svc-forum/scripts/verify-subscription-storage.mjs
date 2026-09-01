@@ -329,7 +329,8 @@ BEGIN
   PERFORM pg_temp.assert_table_shape('forum_notification_facts', ARRAY[
     'id:uuid:t:<null>','recipient_principal_id:uuid:t:<null>','thread_id:uuid:t:<null>',
     'message_id:uuid:f:<null>','reaction_id:uuid:f:<null>','reason:text:t:<null>',
-    'source_event_key:text:t:<null>','created_at:timestamp(3) with time zone:t:<null>'
+    'source_event_key:text:t:<null>','created_at:timestamp(3) with time zone:t:<null>',
+    'read_at:timestamp(3) with time zone:f:<null>','payload:jsonb:f:<null>'
   ]);
 
   -- Ordinary surrogate primary keys plus the four business key structures.
@@ -403,7 +404,7 @@ BEGIN
   PERFORM pg_temp.assert_check('forum_read_states','forum_read_states_provenance_ck',
     $d$CHECK ((provenance = ANY (ARRAY['runtime'::text, 'migration'::text])))$d$);
   PERFORM pg_temp.assert_check('forum_notification_facts','forum_notifications_reason_ck',
-    $d$CHECK ((reason = ANY (ARRAY['mention'::text, 'watch'::text, 'reaction'::text])))$d$);
+    $d$CHECK ((reason = ANY (ARRAY['mention'::text, 'watch'::text, 'reaction'::text, 'thread_notice'::text, 'moderator_notice'::text])))$d$);
 
   -- SQL-038: exactly one public, no-argument PL/pgSQL trigger function with the exact body and properties.
   SELECT count(*) INTO n FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid=p.pronamespace
@@ -528,8 +529,13 @@ INSERT INTO public.forum_notification_facts
 VALUES (${q.mainNotification1Id},${q.mainPrincipal2Id},${q.mainThreadId},${q.mainMessageId},NULL,'mention',${q.mainEvent1},now());
 SELECT pg_temp.expect_success('notification nullable message and reaction', $$INSERT INTO public.forum_notification_facts (id,recipient_principal_id,thread_id,reason,source_event_key,created_at) VALUES (${q.mainNotification2Id},${q.mainPrincipal1Id},${q.mainThreadId},'watch',${q.mainEvent2},now())$$);
 SELECT pg_temp.expect_success('notification reaction reason and FK', $$INSERT INTO public.forum_notification_facts VALUES (${q.mainNotification3Id},${q.mainPrincipal1Id},${q.mainThreadId},NULL,${q.mainReactionId},'reaction',${q.mainEvent3},now())$$);
-SELECT pg_temp.expect_error('duplicate notification business key', $$INSERT INTO public.forum_notification_facts (id,recipient_principal_id,thread_id,reason,source_event_key,created_at) VALUES (${q.mainNotification4Id},${q.mainPrincipal2Id},${q.mainThreadId},'watch',${q.mainEvent1},now())$$,'23505');
+-- Governance-extension reasons are accepted members of the closed set, and
+-- read_at/payload are usable nullable columns (unread = read_at IS NULL).
+SELECT pg_temp.expect_success('notification governance reason thread_notice with read_at and payload', $$INSERT INTO public.forum_notification_facts (id,recipient_principal_id,thread_id,reason,source_event_key,created_at,read_at,payload) VALUES (${q.mainNotification4Id},${q.mainPrincipal2Id},${q.mainThreadId},'thread_notice',${q.mainEvent3}||':gov1',now(),NULL,'{"action":"thread.close"}'::jsonb)$$);
+SELECT pg_temp.expect_success('notification governance reason moderator_notice', $$UPDATE public.forum_notification_facts SET reason='moderator_notice',read_at=now() WHERE id=${q.mainNotification4Id}$$);
+SELECT pg_temp.expect_error('duplicate notification business key', $$INSERT INTO public.forum_notification_facts (id,recipient_principal_id,thread_id,reason,source_event_key,created_at) VALUES (${q.mainNotification2Id},${q.mainPrincipal1Id},${q.mainThreadId},'watch',${q.mainEvent2},now())$$,'23505');
 SELECT pg_temp.expect_error('notification reason outside closed set', $$UPDATE public.forum_notification_facts SET reason='reply' WHERE id=${q.mainNotification1Id}$$,'23514');
+SELECT pg_temp.expect_error('notification reason outside closed set (governance misspelling)', $$UPDATE public.forum_notification_facts SET reason='thread-notice' WHERE id=${q.mainNotification1Id}$$,'23514');
 SELECT pg_temp.expect_error('notification invalid recipient FK', $$UPDATE public.forum_notification_facts SET recipient_principal_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainNotification1Id}$$,'23503');
 SELECT pg_temp.expect_error('notification invalid thread FK', $$UPDATE public.forum_notification_facts SET thread_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainNotification1Id}$$,'23503');
 SELECT pg_temp.expect_error('notification invalid message FK', $$UPDATE public.forum_notification_facts SET message_id='ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE id=${q.mainNotification1Id}$$,'23503');

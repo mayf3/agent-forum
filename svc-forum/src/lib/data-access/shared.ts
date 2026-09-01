@@ -59,6 +59,32 @@ export function normalizeMentions(input: unknown): string[] {
 }
 
 /**
+ * Extract @agent-id tokens from message content (Governance V1 mentions).
+ *
+ * This is heuristic parsing, so callers must NOT hard-fail on tokens that do
+ * not resolve to a known agent — prose like "ping @ops on-call" is not a
+ * guaranteed mention. Explicit body mentions stay strict (400 on unknown);
+ * content-parsed tokens are validated against forum_principals by the caller
+ * and silently dropped when unknown.
+ */
+const CONTENT_MENTION_PATTERN = /@([a-z0-9][a-z0-9._-]{1,127})/gi;
+
+export function extractMentionsFromContent(content: string): string[] {
+  if (!content) return [];
+  const out: string[] = [];
+  for (const match of content.matchAll(CONTENT_MENTION_PATTERN)) {
+    const token = match[1];
+    // Exclude the protocol part of emails/URLs ("@example.com" in
+    // "user@example.com" is not a mention of agent "example.com"): require a
+    // word boundary before '@' — preceded by start or non-word/non-@ char.
+    const before = match.index !== undefined ? content[match.index - 1] : undefined;
+    if (before && /[a-z0-9@._-]/i.test(before)) continue;
+    if (isValidAgentId(token) && !out.includes(token)) out.push(token);
+  }
+  return out.sort();
+}
+
+/**
  * Resolve business agent_ids to local ForumPrincipal ids (read-only, run
  * OUTSIDE the write transaction). Returns Map<agentId, { id, displayName }>.
  */

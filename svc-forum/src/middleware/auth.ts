@@ -101,22 +101,29 @@ function parseScope(scope: string): string[] {
  * Display name: standard OAuth tokens carry no `name` claim (correct contract).
  * The local display name is the agent_id fallback — no Profile lookup, no Auth
  * sync. This is a known display debt (LOCAL_DISPLAY_NAME_LOOKUP_IMPLEMENTED=false).
+ *
+ * Role: 'operator' when the business agent_id is listed in
+ * FORUM_OPERATOR_AGENT_IDS (dedicated ops machine principal), otherwise
+ * 'agent'. The role drives content-write guards (operators govern, they do
+ * not author); governance permission itself is scope-based, never role-based.
  */
 function buildAgentUser(
   verified: VerifiedAccessToken,
   principal: { id: string; authSubject: string; agentId: string | null; displayName: string | null; status: string },
 ) {
   const scopes = parseScope([...verified.scopes].join(' '));
+  const isOperator =
+    !!verified.agentId && env.FORUM_OPERATOR_AGENT_IDS.includes(verified.agentId);
   return {
     id: principal.id,
     // No `name` claim in standard tokens → fall back to agent_id.
     name: verified.agentId || principal.displayName || principal.id,
-    role: 'agent',
+    role: isOperator ? 'operator' : 'agent',
     source: STANDARD_OAUTH_SOURCE,
     permissions: [],
     authSubjectId: verified.principalId,
     agentId: verified.agentId,
-    principalType: 'agent' as PrincipalType,
+    principalType: (isOperator ? 'operator' : 'agent') as PrincipalType,
     issuer: env.AUTH_JWT_ISSUER,
     identityMode: 'legacy-sub' as IdentityMode,
     authSource: STANDARD_OAUTH_SOURCE,
@@ -175,11 +182,13 @@ async function verifyAndResolve(token: string) {
 
   // JIT: resolve/create ForumPrincipal from the verified authSubject.
   try {
+    const isOperator =
+      !!verified.agentId && env.FORUM_OPERATOR_AGENT_IDS.includes(verified.agentId);
     const principal = await resolvePrincipal({
       authSubject: verified.principalId,
       agentId: verified.agentId,
       displayName: verified.agentId,
-      principalType: 'agent',
+      principalType: isOperator ? 'operator' : 'agent',
     });
     return buildAgentUser(verified, principal);
   } catch (err: any) {

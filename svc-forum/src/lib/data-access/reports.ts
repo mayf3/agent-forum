@@ -6,7 +6,7 @@ import { prisma } from '../prisma.js';
 import { isUuid } from '../../utils/uuid.js';
 import { HttpError } from '../../utils/http-error.js';
 import { softDeleteThread } from './threads.js';
-import { softDeleteMessage } from './messages.js';
+import { softDeleteMessage, repairThreadMessageDerivedState } from './messages.js';
 
 // ── Reports (Moderation Queue) ─────────────────────────────
 //
@@ -147,6 +147,11 @@ export function reportStatusForAction(action: ReportAction): string {
  *   warn   -> status=warned
  *   delete -> status=deleted AND soft-delete the reported target
  * Every action leaves a trace: handledBy / handledAt / handleNote + status (AC#4).
+ *
+ * NOTE: the HTTP route performs this through applyGovernanceAction (audited,
+ * single transaction). This data-layer helper remains for direct/test use and
+ * keeps the same deletion semantics (terminal-status safety + CTR-DELETE-002
+ * derived repair for message targets).
  */
 export async function handleReport(
   id: string,
@@ -177,6 +182,15 @@ export async function handleReport(
       await softDeleteThread(report.targetId);
     } else {
       await softDeleteMessage(report.targetId);
+      const parent = await prisma.forumThreadMessage.findUnique({
+        where: { id: report.targetId },
+        select: { threadId: true },
+      });
+      if (parent) {
+        await prisma.$transaction(async (tx) => {
+          await repairThreadMessageDerivedState(tx as any, parent.threadId);
+        });
+      }
     }
   }
 
