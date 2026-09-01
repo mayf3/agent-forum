@@ -259,6 +259,23 @@ function createMockPrisma() {
     },
   };
 
+  // Governance V1: resolve runs through applyGovernanceAction — the prisma
+  // (and tx) client needs the audit-event and notification-fact models.
+  const auditEvents = new Map<string, any>();
+  const audit = {
+    create: async ({ data }: any) => {
+      const doc = { ...data, eventId: data.eventId || mockUuid(), createdAt: new Date() };
+      auditEvents.set(doc.eventId, doc);
+      return doc;
+    },
+  };
+  const notificationFacts = {
+    createMany: async ({ data }: any) => {
+      const list = Array.isArray(data) ? data : [data];
+      return { count: list.length };
+    },
+  };
+
   const mock: any = {
     forumThread: t,
     forumThreadParticipant: p,
@@ -266,6 +283,8 @@ function createMockPrisma() {
     forumContextSnapshot: s,
     forumOutcome: o,
     forumPrincipal: fp,
+    forumAuditEvent: audit,
+    forumNotificationFact: notificationFacts,
     $queryRaw: async () => [{ 1: 1 }],
     $transaction: async (fn: (tx: any) => any) => {
       const tx = {
@@ -285,6 +304,8 @@ function createMockPrisma() {
         forumContextSnapshot: s,
         forumOutcome: o,
         forumPrincipal: fp,
+        forumAuditEvent: audit,
+        forumNotificationFact: notificationFacts,
         $executeRaw: async () => {},
       };
       return fn(tx);

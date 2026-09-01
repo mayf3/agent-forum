@@ -60,7 +60,9 @@ export async function findMyNotifications(opts: {
       }));
       const where: Prisma.ForumThreadMessageWhereInput = {
         deletedAt: null,
-        thread: { status: { not: 'archived' } },
+        // hidden/deleted threads must not surface titles/content through the
+    // derived notification flow either (unified visibility policy).
+    thread: { status: { notIn: ['archived', 'hidden', 'deleted'] } },
         OR: or,
       };
       const [items, count] = await Promise.all([
@@ -110,7 +112,9 @@ export async function findMyNotifications(opts: {
   const whereBase: Prisma.ForumThreadMessageWhereInput = {
     deletedAt: null,
     authorId: { not: opts.principalId },
-    thread: { status: { not: 'archived' } },
+    // hidden/deleted threads must not surface titles/content through the
+    // derived notification flow either (unified visibility policy).
+    thread: { status: { notIn: ['archived', 'hidden', 'deleted'] } },
   };
 
   if (opts.reason === 'watch') {

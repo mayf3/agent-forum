@@ -13,7 +13,12 @@
 
 // ── Types ───────────────────────────────────────────────────
 
-export type PrincipalType = 'agent' | 'user' | 'service';
+// 'operator' is a LOCAL classification only: a dedicated machine principal
+// (configured via FORUM_OPERATOR_AGENT_IDS) that administers the forum.
+// Inbound JWTs are unchanged (principal_type=agent, standard OAuth) — the
+// auth-service contract is not modified. The local shadow record and req.user
+// role carry 'operator' so content-writing guards can exclude it.
+export type PrincipalType = 'agent' | 'user' | 'service' | 'operator';
 export type IdentityMode = 'legacy-sub' | 'business-agent-id';
 export type AuthSource = 'auth_service_agent_jwt' | 'auth_service_jwt' | 'adc_jwt' | 'adc_legacy';
 

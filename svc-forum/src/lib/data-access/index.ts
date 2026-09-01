@@ -1,7 +1,7 @@
 // index.ts — barrel re-export（显式匹配原始 data-access.ts 公共 API，符号集合 diff 为空）
 
 // shared.ts — 公共工具（内部事务重试工具不暴露）
-export { normalizeMentions, findPrincipalsByAgentIds } from './shared.js';
+export { normalizeMentions, extractMentionsFromContent, findPrincipalsByAgentIds } from './shared.js';
 
 // threads.ts
 export type { CreateThreadInput, ThreadFilter } from './threads.js';
@@ -44,3 +44,13 @@ export { getThreadReviewReadiness, buildTranscriptMd } from './review.js';
 // reports.ts — 举报队列（moderation queue，合并自 feat/report-entry-928ed7c6）
 export type { CreateReportInput, ReportFilter, ReportAction } from './reports.js';
 export { REPORT_REASONS, REPORT_STATUSES, REPORT_TARGET_TYPES, assertReportTargetExists, createReport, findReports, findReportById, reportStatusForAction, handleReport } from './reports.js';
+
+// audit-store.ts — Governance V1 runtime writer/reader for forum_audit_events
+// （append-only 证据表的唯一 runtime writer，provenance='runtime'）
+export type { AuditEventType, AuditTargetType, AuditActor, AppendAuditEventInput, AuditEventFilter } from './audit-store.js';
+export { AUDIT_EVENT_TYPES, AUDIT_TARGET_TYPES, appendAuditEvent, findAuditEvents } from './audit-store.js';
+
+// notification-store.ts — Governance V1 materialized notifications
+// （forum_notification_facts 的首个 runtime writer）
+export type { NotificationReason, CreateNotificationFactInput, NotificationFactFilter, NotificationFactView, NotificationFactsResult } from './notification-store.js';
+export { NOTIFICATION_REASONS, createNotificationFacts, findNotificationsForPrincipal, markNotificationFactRead, markNotificationFactsRead } from './notification-store.js';

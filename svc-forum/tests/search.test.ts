@@ -81,6 +81,16 @@ function mockStore(store: Map<string, any>) {
         for (const [k, v] of Object.entries(where)) {
           if (k === 'threadId') items = items.filter(i => i.threadId === v);
           if (k === 'deletedAt' && v === null) items = items.filter(i => !i.deletedAt);
+          if (k === 'status' && (v as any)?.notIn) {
+            items = items.filter(i => !(v as any).notIn.includes(i.status));
+          }
+          if (k === 'thread' && (v as any)?.status?.notIn) {
+            const excluded = (v as any).status.notIn;
+            items = items.filter(i => {
+              const parent = threads.get(i.threadId);
+              return !!parent && !excluded.includes(parent.status);
+            });
+          }
           if (k === 'title' && (v as any)?.contains) {
             const q = (v as any).contains.toLowerCase();
             items = items.filter(i => i.title?.toLowerCase().includes(q));
@@ -321,5 +331,27 @@ void describe('Full-Text Search', async () => {
 
     const badLimit = await request(app).get('/api/search?q=x&limit=500').set('Authorization', auth);
     assert.equal(badLimit.status, 400);
+  });
+
+  await it('search never surfaces hidden/deleted threads, their messages, or their outcomes', async () => {
+    const hiddenId = mockUuid();
+    const deletedId = mockUuid();
+    threads.set(hiddenId, { id: hiddenId, title: 'kryptonite hidden report', status: 'hidden', createdAt: new Date() });
+    threads.set(deletedId, { id: deletedId, title: 'kryptonite deleted report', status: 'deleted', createdAt: new Date() });
+    messages.set(mockUuid(), {
+      id: mockUuid(), threadId: hiddenId, deletedAt: null,
+      content: 'kryptonite hidden body', createdAt: new Date(),
+    });
+    outcomes.set(mockUuid(), {
+      id: mockUuid(), threadId: deletedId,
+      summaryMd: 'kryptonite deleted outcome', createdAt: new Date(),
+    });
+
+    const da = await import('../src/lib/data-access/index.js');
+    const result = await da.searchAll('kryptonite', 1, 20);
+    assert.equal(result.threads.length, 0);
+    assert.equal(result.messages.length, 0);
+    assert.equal(result.outcomes.length, 0);
+    assert.equal(result.pagination.total, 0);
   });
 });

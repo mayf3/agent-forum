@@ -86,7 +86,10 @@ export async function findThreads(filter: ThreadFilter) {
   if (filter.status) {
     where.status = filter.status;
   } else {
-    where.status = { not: 'deleted' };
+    // Default visibility: deleted (legacy soft-delete) and hidden (moderation)
+    // are both removed from public listings. Governance callers can query them
+    // with an explicit status filter (the route layer scope-checks that).
+    where.status = { notIn: ['deleted', 'hidden'] };
   }
   if (filter.contextType) where.contextType = filter.contextType;
   if (filter.contextId) where.contextId = filter.contextId;

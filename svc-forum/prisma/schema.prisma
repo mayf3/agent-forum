@@ -7,6 +7,16 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Thread lifecycle (Governance V1, additive-storage-aware):
+//   open → closed | archived | hidden   (governance actions, audited)
+//   closed → open (restore) | archived
+//   archived → open (restore)
+//   hidden → open (restore; reason required to hide)
+// Legacy statuses kept for history: resolved (review gate), deleted (soft delete).
+// `status` remains the runtime visibility authority in V1 — the
+// visibilityState/discussionState split from the additive-storage design is
+// future work; every governance transition is recorded in forum_audit_events
+// (append-only, provenance='runtime') with from/to status in payload.
 model ForumThread {
   id                 String               @id @default(uuid()) @db.Uuid
   title              String
@@ -479,15 +489,27 @@ model ForumMention {
   @@map("forum_mentions")
 }
 
+// ─── Governance V1 runtime extension of the subscription-storage fact table ──
+//
+// Runtime writer convergence: governance V1 notifications use this table
+// (NOT a second notification model). reason additionally carries
+// 'thread_notice' | 'moderator_notice' (CHECK widened by the governance_v1
+// migration; table was empty at widening time). readAt supports the
+// query/mark-read API; payload carries bounded context (action, from/to
+// status, reason) reserved for external delivery bridging (e.g. Feishu).
+// Idempotency: (recipientPrincipalId, sourceEventKey) stays unique —
+// governance notifications key on the originating forum_audit_events.event_id.
 model ForumNotificationFact {
-  id                   String   @id @default(uuid()) @db.Uuid
-  recipientPrincipalId String   @map("recipient_principal_id") @db.Uuid
-  threadId             String   @map("thread_id") @db.Uuid
-  messageId            String?  @map("message_id") @db.Uuid
-  reactionId           String?  @map("reaction_id") @db.Uuid
+  id                   String    @id @default(uuid()) @db.Uuid
+  recipientPrincipalId String    @map("recipient_principal_id") @db.Uuid
+  threadId             String    @map("thread_id") @db.Uuid
+  messageId            String?   @map("message_id") @db.Uuid
+  reactionId           String?   @map("reaction_id") @db.Uuid
   reason               String
-  sourceEventKey       String   @map("source_event_key")
-  createdAt            DateTime @map("created_at") @db.Timestamptz(3)
+  sourceEventKey       String    @map("source_event_key")
+  readAt               DateTime? @map("read_at") @db.Timestamptz(3)
+  payload              Json?
+  createdAt            DateTime  @map("created_at") @db.Timestamptz(3)
 
   recipientPrincipal ForumPrincipal      @relation(fields: [recipientPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   thread             ForumThread         @relation(fields: [threadId], references: [id], onDelete: Restrict, onUpdate: Restrict)
@@ -495,6 +517,9 @@ model ForumNotificationFact {
   reaction           ForumReaction?      @relation(fields: [reactionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([recipientPrincipalId, sourceEventKey])
+  @@index([recipientPrincipalId, createdAt])
+  @@index([recipientPrincipalId, readAt])
+  @@index([threadId])
   @@map("forum_notification_facts")
 }
 

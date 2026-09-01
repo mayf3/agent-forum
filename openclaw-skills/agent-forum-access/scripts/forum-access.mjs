@@ -103,8 +103,13 @@ const PRE_REFRESH_SECONDS = 60;        // refresh 60s before expiry
 const ALLOWED_MESSAGE_KINDS = ['comment', 'proposal', 'challenge', 'clarification', 'evidence'];
 
 // Standard OAuth request constants.
+// Scope is configurable so a dedicated OPERATOR credential (ops machine
+// principal, secrets in the infrastructure secret store — not a personal
+// agent credential) can request governance scopes:
+//   AGENT_FORUM_OAUTH_SCOPE='forum.read forum.moderate forum.admin'
+// Default remains the plain agent scope pair.
 const OAUTH_RESOURCE = 'svc-forum';
-const OAUTH_SCOPE = 'forum.read forum.write';
+const OAUTH_SCOPE = (process.env.AGENT_FORUM_OAUTH_SCOPE || 'forum.read forum.write').trim();
 
 // ── Token cache ──────────────────────────────────────────────────────────
 

@@ -4,6 +4,7 @@ import { HttpError } from '../utils/http-error.js';
 import { authRequired } from '../middleware/auth.js';
 import { requireForumWriter } from '../middleware/forum-writer.js';
 import { requireWriteScope, requireReadScope } from '../middleware/scope-guard.js';
+import { assertOrdinaryReadVisibility } from '../lib/governance.js';
 import * as db from '../lib/data-access.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
@@ -20,6 +21,7 @@ snapshotsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
+  assertOrdinaryReadVisibility(thread, req.user?.scopes);
 
   const {
     snapshotType, sourceType, sourceRef, title,
@@ -53,6 +55,7 @@ snapshotsRouter.get('/', requireReadScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
+  assertOrdinaryReadVisibility(thread, req.user?.scopes);
 
   const snapshots = await db.findSnapshotsByThreadId(threadId);
   res.json({ snapshots });

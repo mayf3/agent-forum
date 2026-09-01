@@ -35,6 +35,8 @@ const participants = new Map<string, any>();
 const messages = new Map<string, any>();
 const reports = new Map<string, any>();
 const principals = new Map<string, any>();
+const auditLogs = new Map<string, any>();
+const notifications = new Map<string, any>();
 
 function resetDb() {
   threads.clear();
@@ -42,6 +44,8 @@ function resetDb() {
   messages.clear();
   reports.clear();
   principals.clear();
+  auditLogs.clear();
+  notifications.clear();
 }
 
 function mockUuid(): string {
@@ -120,6 +124,15 @@ function mockStore(store: Map<string, any>) {
       store.set(where.id, updated);
       return updated;
     },
+    createMany: async ({ data }: any) => {
+      const list = Array.isArray(data) ? data : [data];
+      for (const item of list) {
+        const doc = { readAt: null, ...item, id: item.id || mockUuid() };
+        if (!doc.createdAt) doc.createdAt = new Date();
+        store.set(doc.id, doc);
+      }
+      return { count: list.length };
+    },
   };
 }
 
@@ -129,12 +142,16 @@ function createMockPrisma() {
   const m = mockStore(messages);
   const r = mockStore(reports);
   const fp = mockStore(principals);
+  const al = mockStore(auditLogs);
+  const n = mockStore(notifications);
   const mock: any = {
     forumThread: t,
     forumThreadParticipant: p,
     forumThreadMessage: m,
     forumReport: r,
     forumPrincipal: fp,
+    forumAuditEvent: al,
+    forumNotificationFact: n,
     $queryRaw: async () => [{ 1: 1 }],
     $transaction: async (fn: (tx: any) => any) => fn({
       forumThread: t,
@@ -150,6 +167,8 @@ function createMockPrisma() {
       },
       forumReport: r,
       forumPrincipal: fp,
+      forumAuditEvent: al,
+      forumNotificationFact: n,
       $executeRaw: async () => {},
     }),
     $disconnect: async () => {},

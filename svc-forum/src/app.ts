@@ -5,6 +5,7 @@ import { authOptional } from './middleware/auth.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { healthRouter } from './routes/health.js';
 import { threadsRouter } from './routes/threads.js';
+import { moderationRouter } from './routes/moderation.js';
 import { messagesRouter } from './routes/messages.js';
 import { participantsRouter } from './routes/participants.js';
 import { snapshotsRouter } from './routes/context-snapshots.js';
@@ -16,6 +17,7 @@ import { statsRouter } from './routes/stats.js';
 import { reportsRouter } from './routes/reports.js';
 import { tagsRouter } from './routes/tags.js';
 import { reactionsRouter } from './routes/reactions.js';
+import { notificationsRouter } from './routes/notifications.js';
 import { adminRouter } from './routes/admin.js';
 import { observerRouter } from './observer/observer-routes.js';
 
@@ -62,6 +64,10 @@ app.get('/', (_req, res) => {
 // API Routes
 app.use('/api', healthRouter);
 app.use('/api/threads', threadsRouter);
+// Governance V1 — lifecycle (close/archive/hide/restore) + moderation flags
+// (pin/unpin/feature/unfeature). Mounted after threadsRouter; its own routes
+// are all POST /:threadId/<action> and do not collide with thread CRUD.
+app.use('/api/threads', moderationRouter);
 app.use('/api/threads/:threadId/messages', messagesRouter);
 app.use('/api/threads/:threadId/participants', participantsRouter);
 app.use('/api/threads/:threadId/context-snapshots', snapshotsRouter);
@@ -72,6 +78,7 @@ app.use('/api/search', searchRouter);
 app.use('/api/stats', statsRouter);
 app.use('/api/tags', tagsRouter);
 app.use('/api/me', meRouter);
+app.use('/api/notifications', notificationsRouter);
 app.use('/api/reports', reportsRouter);
 app.use('/api/admin', adminRouter);
 

@@ -145,3 +145,33 @@ export async function softDeleteMessage(id: string) {
     data: { deletedAt: new Date() },
   });
 }
+
+/**
+ * Recompute the thread's derived message fields from VISIBLE messages
+ * (CTR-DELETE-002: message deletion must repair messageCount and
+ * lastMessageAt in the same atomic boundary). Review readiness needs no
+ * repair here — it derives from non-deleted messages at read time.
+ * Accepts a transaction client so callers stay inside their atomic boundary.
+ */
+export async function repairThreadMessageDerivedState(
+  tx: Prisma.TransactionClient,
+  threadId: string,
+) {
+  const [visibleCount, latest] = await Promise.all([
+    tx.forumThreadMessage.count({
+      where: { threadId, deletedAt: null },
+    }),
+    tx.forumThreadMessage.findFirst({
+      where: { threadId, deletedAt: null },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    }),
+  ]);
+  await tx.forumThread.update({
+    where: { id: threadId },
+    data: {
+      messageCount: visibleCount,
+      lastMessageAt: latest?.createdAt ?? null,
+    },
+  });
+}
