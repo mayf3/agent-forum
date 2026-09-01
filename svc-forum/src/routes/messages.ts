@@ -176,12 +176,25 @@ messagesRouter.delete('/:messageId', requireGovernanceScopes(), requireWriteScop
   });
   if (!message) throw new HttpError(404, 'Message not found');
 
+  // Message soft-delete must leave a moderation reason (CTR-DELETE-002), same
+  // validation shape as the thread-side DELETE route (threads.ts) and the
+  // moderation hide route: missing / non-string / empty / whitespace-only → 400.
+  const reason: string | undefined =
+    typeof req.body?.reason === 'string' && req.body.reason.trim()
+      ? req.body.reason.trim()
+      : undefined;
+  if (!reason) {
+    throw new HttpError(400, 'reason is required to delete a message');
+  }
+
   const user = req.user!;
 
   // Single transaction: audit append → tombstone flip → derived repair
   // (messageCount/lastMessageAt recompute, CTR-DELETE-002) → participant
-  // notices. Review readiness derives from visible messages at read time,
-  // so no stored readiness needs repairing here.
+  // notices. The required reason flows into BOTH the audit event payload and
+  // the moderator_notice fan-out payload via spec.reason. Review readiness
+  // derives from visible messages at read time, so no stored readiness needs
+  // repairing here.
   await applyGovernanceAction(
     {
       actor: {
@@ -197,6 +210,7 @@ messagesRouter.delete('/:messageId', requireGovernanceScopes(), requireWriteScop
       targetId: messageId,
       threadId,
       revision: thread.currentRevision ?? null,
+      reason,
       notifyReason: 'moderator_notice',
     },
     async (tx) => {
