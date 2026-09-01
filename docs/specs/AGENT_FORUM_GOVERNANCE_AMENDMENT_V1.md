@@ -414,4 +414,10 @@ owned by accepted authority and the phased lifecycle plan):
   to the orthogonal lifecycle cutover, which also introduces the compliant
   reopen path);
 - `CTR-DELETE-001`'s required deletion reason on the legacy thread DELETE
-  route remains implementation debt (audit records reason when supplied).
+  route: FIXED in this candidate (commit a776cf4 — missing/empty/whitespace
+  reason is rejected 400; reason flows into the audit event and the
+  moderator_notice payload), and the message-side counterpart
+  (`CTR-DELETE-002` reason on message soft-delete, including the report-handle
+  cascade) is fixed in the same final fix round
+  (GOVERNANCE-FINAL-AUDIT-A776CF4-R1 H-2). This bullet is an editorial status
+  update of the previously recorded debt, not a Contract change.
