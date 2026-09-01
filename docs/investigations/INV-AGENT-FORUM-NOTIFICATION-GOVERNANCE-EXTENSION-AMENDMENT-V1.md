@@ -46,9 +46,19 @@ ORIGINAL_INVARIANT =
 PROPOSED_EXTENSION =
 1. 新增可空列（纯 additive，不回填）：
    - read_at  TIMESTAMPTZ(3) NULL  —— 已读状态（未读 = NULL）
-   - payload  JSONB NULL           —— 有界上下文（allowlisted 键：
-     action/fromStatus/toStatus/reason），为外部投递桥接（Feishu）预留，
-     绝不存 token / Authorization 头 / 密钥 / 敏感全行
+   - payload  JSONB NULL           —— 有界上下文，按 reason 分列的有界白名单
+     （aligned to implementation per GOVERNANCE-FINAL-AUDIT-A776CF4-R1 M-2；
+     逐字对应运行时实际键集）：
+       · 治理动作参与者通知（thread_notice / moderator_notice，
+         applyGovernanceAction fan-out，governance.ts）：
+         { action, fromStatus, toStatus, reason }
+         （四键恒在场，无值时为 null）
+       · mention（messages.ts 提及通知）：
+         { mentionedAgentId, authorAgentId, authorName, threadTitle }
+       · report.handle 举报人通知（reports.ts moderator_notice）：
+         { action, reportAction, reportStatus }
+     为外部投递桥接（Feishu）预留，绝不存 token / Authorization 头 /
+     密钥 / 敏感全行；watch / reaction 派生流当前不写 payload（NULL）
 2. reason 闭集扩宽为原集合的 superset（新增 2 值）：
    CHECK (reason IN ('mention','watch','reaction',
                      'thread_notice','moderator_notice'))
