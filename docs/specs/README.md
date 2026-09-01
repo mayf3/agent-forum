@@ -44,6 +44,9 @@ A proposed adoption or proposed Spec cannot authorize implementation.
 | Spec ID | Status | Kind | Scope | Implementation authority | Supersedes |
 |---|---|---|---|---|---|
 | `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` | accepted | invariant | repository governance | none | — |
+| `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2` | proposed | invariant | repository governance v1.0.0 adoption | none | — |
 | `AGENT_FORUM_CORE_INVARIANTS_V1` | accepted | invariant | `svc-forum`, Forum access client | contracts | — |
 
 Update this index when a governing Spec is added, accepted, or superseded. The table is navigation; the exact Spec file and revision remain authoritative.
+
+`AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2` is a proposed whole-authority successor. V1 remains active until exact-Head review, authorized acceptance, atomic supersession, and merge.
