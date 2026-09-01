@@ -16,7 +16,7 @@
     "verify:identity-storage": "node scripts/verify-identity-storage.mjs",
     "verify:subscription-storage": "node scripts/verify-subscription-storage.mjs",
     "verify:lifecycle-storage": "node scripts/verify-lifecycle-storage.mjs",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
     "health-check": "bash ../scripts/arch-health-check.sh"
   },
   "dependencies": {

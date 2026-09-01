@@ -64,6 +64,19 @@ Workflow: 8265a467-f983-44af-bf56-fcef60a75996
 `scripts/arch-health-check.sh`（需求 95265979 交付，纳入版本管理）。
 grandfather 清单：`.arch-grandfather.yml`（超限文件的临时豁免，有过期时间）。
 
+### Q5: 为什么 `npm test` 是串行的（`--test-concurrency=1`）？
+并行跑测试文件时门禁非确定性（终审实测 ~22% 失败率，
+GOVERNANCE-FINAL-AUDIT-A776CF4-R1 H-1）。已定位并修复的根因：
+1. tests/reactions.test.ts 的 mock 时钟竞态（真实时钟基线 vs fake 单调时钟，
+   事件循环饥饿时反转 → 已改为 mock 时钟锚定）；
+2. 多进程高并发下的 loopback HTTP 资源竞争（jose 远程 JWKS fetch 偶发失败
+   → 401/503 错误路径、supertest 偶发 ECONNRESET）——串行执行消除该竞争类。
+已知残留：全量套件自身 ~4000 次"每请求一个临时 server + TCP 连接"的 churn
+在 macOS loopback 上仍有低概率（~4%/run）socket hang up（TIME_WAIT/SO_REUSEADDR
+端口重用碰撞假说；单文件隔离 0/40、无 tsx/undici 的 15k 请求探针 0 失败，
+仅全量套件可复现）。Follow-up：为测试引入每文件单一常驻 server（或共享
+supertest wrapper 消灭 per-request listen(0) churn）后可重新评估恢复并行。
+
 ## 管理员配置（一次性）
 
 1. GitHub Settings > Branches > main > Add rule：
