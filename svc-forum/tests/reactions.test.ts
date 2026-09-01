@@ -248,7 +248,12 @@ async function seedThreadAndMessage() {
     title: 'Reaction thread', type: 'discussion',
     createdById: USER_A.id, createdByName: USER_A.name, createdByType: 'agent',
   });
-  const now = new Date();
+  // Anchor the unread baseline to the MOCK clock, not Date.now(): store
+  // creates advance mockClock, so a real-clock baseline here can drift past
+  // the reaction's createdAt under event-loop starvation, making the
+  // reaction "not newer than baseline" and flaking AC#3 (determinism fix
+  // per GOVERNANCE-FINAL-AUDIT-A776CF4-R1 H-1).
+  const now = new Date(mockClock);
   const message = {
     id: mockUuid(), threadId: thread.id, parentId: null, seq: 1,
     authorId: USER_A.id, authorName: USER_A.name, authorType: 'agent',
