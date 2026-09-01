@@ -26,7 +26,6 @@ after(() => { if (_jwksCleanup) _jwksCleanup.close(); });
 
 const USER_A = { id: 'user-a-uuid', name: 'Agent Alpha' };
 const USER_B = { id: 'user-b-uuid', name: 'Agent Beta' };
-const MODERATOR = { id: 'mod-uuid', name: 'Moderator' };
 
 // ── In-memory database (mirrors tests/forum.test.ts mock) ──
 
@@ -281,7 +280,10 @@ void describe('Report Entry (Moderation Queue)', async () => {
       (err: any) => err.statusCode === 404,
     );
 
-    await da.softDeleteThread(thread.id);
+    // Mark the target deleted directly in the mock store — the standalone
+    // `softDeleteThread` data-access writer no longer exists (removed per
+    // DEC-GOV-003; deletion goes only through the audited governance path).
+    threads.get(thread.id)!.status = 'deleted';
     await assert.rejects(
       da.createReport({
         targetType: 'thread',
@@ -355,6 +357,19 @@ void describe('Report Entry (Moderation Queue)', async () => {
   });
 
   // ── AC#4: handling leaves queryable trace; delete cascades ──
+  // (through the audited governance route PATCH /api/reports/:id — the
+  // unguarded data-layer handleReport helper was removed per DEC-GOV-003)
+  async function buildReportsApp() {
+    const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
+    const { reportsRouter } = await import('../src/routes/reports.js');
+    app.use('/api/reports', reportsRouter);
+    const { errorHandler } = await import('../src/middleware/error-handler.js');
+    app.use(errorHandler);
+    return app;
+  }
+
   await it('AC#4 ignore/warn leaves status trace queryable by id', async () => {
     const { thread } = await seedTargets();
     const report = await da.createReport({
@@ -362,20 +377,27 @@ void describe('Report Entry (Moderation Queue)', async () => {
       reporterId: USER_B.id, reporterName: USER_B.name, reason: 'off_topic',
     });
 
-    const handled = await da.handleReport(report.id, 'warn', MODERATOR.id, MODERATOR.name, 'First warning issued');
-    assert.equal(handled.status, 'warned');
-    assert.equal(handled.handledById, MODERATOR.id);
-    assert.ok(handled.handledAt);
+    const app = await buildReportsApp();
+    const request = (await import('supertest')).default;
+    const res = await request(app)
+      .patch(`/api/reports/${report.id}`)
+      .set('Authorization', `Bearer ${await tokenWith('forum.write forum.moderate')}`)
+      .send({ action: 'warn', note: 'First warning issued' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.report.status, 'warned');
+    assert.ok(res.body.report.handledById);
+    assert.ok(res.body.report.handledAt);
 
     const fetched = await da.findReportById(report.id);
     assert.equal(fetched!.status, 'warned');
     assert.equal(fetched!.handleNote, 'First warning issued');
 
-    // Already-handled reports cannot be re-handled
-    await assert.rejects(
-      da.handleReport(report.id, 'delete', MODERATOR.id, MODERATOR.name),
-      (err: any) => err.statusCode === 409,
-    );
+    // Already-handled reports cannot be re-handled (409)
+    const again = await request(app)
+      .patch(`/api/reports/${report.id}`)
+      .set('Authorization', `Bearer ${await tokenWith('forum.write forum.moderate')}`)
+      .send({ action: 'delete', note: 'delete attempt' });
+    assert.equal(again.status, 409);
   });
 
   await it('AC#4 delete action cascades to soft-delete the reported content', async () => {
@@ -385,8 +407,14 @@ void describe('Report Entry (Moderation Queue)', async () => {
       reporterId: USER_B.id, reporterName: USER_B.name, reason: 'violation',
     });
 
-    const handled = await da.handleReport(report.id, 'delete', MODERATOR.id, MODERATOR.name, 'Removed per policy');
-    assert.equal(handled.status, 'deleted');
+    const app = await buildReportsApp();
+    const request = (await import('supertest')).default;
+    const res = await request(app)
+      .patch(`/api/reports/${report.id}`)
+      .set('Authorization', `Bearer ${await tokenWith('forum.write forum.moderate')}`)
+      .send({ action: 'delete', note: 'Removed per policy' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.report.status, 'deleted');
 
     // Report trace is preserved
     const fetched = await da.findReportById(report.id);

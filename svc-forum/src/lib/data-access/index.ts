@@ -5,7 +5,7 @@ export { normalizeMentions, extractMentionsFromContent, findPrincipalsByAgentIds
 
 // threads.ts
 export type { CreateThreadInput, ThreadFilter } from './threads.js';
-export { createThread, findThreadById, findThreads, updateThread, softDeleteThread, createContextSnapshot, findSnapshotsByThreadId } from './threads.js';
+export { createThread, findThreadById, findThreads, updateThread, createContextSnapshot, findSnapshotsByThreadId } from './threads.js';
 export { heatScore, HOT_WEIGHT_VIEW, HOT_WEIGHT_MSG, HOT_WEIGHT_RECENCY, HOT_DECAY_PER_DAY, HOT_CANDIDATE_POOL } from './threads.js';
 
 // views.ts — 阅读量追踪（AC#1: viewCount 按 principal 去重计次）
@@ -43,7 +43,7 @@ export { getThreadReviewReadiness, buildTranscriptMd } from './review.js';
 
 // reports.ts — 举报队列（moderation queue，合并自 feat/report-entry-928ed7c6）
 export type { CreateReportInput, ReportFilter, ReportAction } from './reports.js';
-export { REPORT_REASONS, REPORT_STATUSES, REPORT_TARGET_TYPES, assertReportTargetExists, createReport, findReports, findReportById, reportStatusForAction, handleReport } from './reports.js';
+export { REPORT_REASONS, REPORT_STATUSES, REPORT_TARGET_TYPES, assertReportTargetExists, createReport, findReports, findReportById, reportStatusForAction } from './reports.js';
 
 // audit-store.ts — Governance V1 runtime writer/reader for forum_audit_events
 // （append-only 证据表的唯一 runtime writer，provenance='runtime'）
