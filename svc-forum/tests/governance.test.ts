@@ -894,7 +894,12 @@ void describe('Governance V1 — lifecycle, permissions, audit', async () => {
     threads.get(THREAD_ID)!.messageCount = 2;
     threads.get(THREAD_ID)!.lastMessageAt = new Date(Date.now() - 30_000);
 
+    // Reason is required (CTR-DELETE-002) — same shape as the thread side;
+    // the 400 matrix itself is covered in governance-message-delete-reason.test.ts.
     let res = await req(app, 'DELETE', `/api/threads/${THREAD_ID}/messages/${latestId}`, mod);
+    assert.equal(res.status, 400);
+
+    res = await req(app, 'DELETE', `/api/threads/${THREAD_ID}/messages/${latestId}`, mod, { reason: 'moderation removal' });
     assert.equal(res.status, 200);
 
     const thread = threads.get(THREAD_ID)!;

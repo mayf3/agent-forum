@@ -81,6 +81,18 @@ reportsRouter.patch('/:id', requireGovernanceScopes(), requireWriteScope(), asyn
     throw new HttpError(400, 'action must be one of: ignore, warn, delete');
   }
 
+  // The `delete` action cascades into content soft-deletion (thread tombstone
+  // / message tombstone + derived repair). Deletion requires a non-empty
+  // moderation reason (CTR-DELETE-001/002) — the existing `note` field IS the
+  // handling reason (persisted as handleNote and audit payload.reason), so
+  // reuse it rather than adding a second field. Missing / non-string / empty /
+  // whitespace-only on a deleting action → 400.
+  const moderationReason: string | null =
+    typeof note === 'string' && note.trim() ? note.trim() : null;
+  if (action === 'delete' && !moderationReason) {
+    throw new HttpError(400, 'reason (note) is required to delete reported content');
+  }
+
   const user = req.user!;
   const reportId = p(req, 'id');
   const report = await db.findReportById(reportId);
@@ -106,7 +118,9 @@ reportsRouter.patch('/:id', requireGovernanceScopes(), requireWriteScope(), asyn
       threadId: report.targetType === 'thread' ? report.targetId : null,
       fromStatus: 'pending',
       toStatus: db.reportStatusForAction(action),
-      reason: note || null,
+      // The moderation reason flows into this audit event — the SAME event
+      // that covers the cascaded message/thread soft-delete below.
+      reason: moderationReason,
       metadata: {
         reportAction: action,
         reportedTargetType: report.targetType,
