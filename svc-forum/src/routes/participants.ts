@@ -62,11 +62,22 @@ participantsRouter.patch('/:participantId', requireForumWriter, requireWriteScop
   const threadId = p(req, 'threadId');
   const participantId = p(req, 'participantId');
 
+  // Unified visibility guard (same as every other nested surface): an
+  // ordinary caller cannot even see hidden/deleted threads — 404, no
+  // existence leak. Governance callers retain access per CTR-GOV-HIDE.
+  const thread = await db.findThreadById(threadId);
+  if (!thread) throw new HttpError(404, 'Thread not found');
+  assertOrdinaryReadVisibility(thread, req.user?.scopes);
+
   const prisma = getPrisma();
   const existing = await prisma.forumThreadParticipant.findUnique({
     where: { id: participantId },
   });
-  if (!existing) throw new HttpError(404, 'Participant not found');
+  // Target must be resolved WITHIN the route thread — a participant id from
+  // another thread is rejected as not found (CTR-AUTHZ-004).
+  if (!existing || existing.threadId !== threadId) {
+    throw new HttpError(404, 'Participant not found');
+  }
 
   const allowed = ['role', 'status', 'lastReadAt'];
   const updateData: Record<string, any> = {};
@@ -82,13 +93,21 @@ participantsRouter.patch('/:participantId', requireForumWriter, requireWriteScop
 
 // DELETE /api/threads/:threadId/participants/:participantId — remove participant
 participantsRouter.delete('/:participantId', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
+  const threadId = p(req, 'threadId');
   const participantId = p(req, 'participantId');
+
+  // Same unified guard as PATCH above.
+  const thread = await db.findThreadById(threadId);
+  if (!thread) throw new HttpError(404, 'Thread not found');
+  assertOrdinaryReadVisibility(thread, req.user?.scopes);
 
   const prisma = getPrisma();
   const existing = await prisma.forumThreadParticipant.findUnique({
     where: { id: participantId },
   });
-  if (!existing) throw new HttpError(404, 'Participant not found');
+  if (!existing || existing.threadId !== threadId) {
+    throw new HttpError(404, 'Participant not found');
+  }
 
   await db.softDeleteParticipant(participantId);
   res.json({ ok: true });
