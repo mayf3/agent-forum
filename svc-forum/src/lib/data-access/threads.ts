@@ -2,7 +2,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { isUuid } from '../../utils/uuid.js';
-import { HttpError } from '../../utils/http-error.js';
 
 export interface CreateThreadInput {
   title: string;
@@ -168,13 +167,11 @@ export async function updateThread(id: string, data: Prisma.ForumThreadUpdateInp
   return prisma.forumThread.update({ where: { id }, data: normalized });
 }
 
-export async function softDeleteThread(id: string) {
-  if (!isUuid(id)) throw new HttpError(404, 'Thread not found');
-  return prisma.forumThread.update({
-    where: { id },
-    data: { status: 'deleted' },
-  });
-}
+// NOTE (DEC-GOV-003, GOVERNANCE-FINAL-AUDIT-A776CF4-R1 M-3): the unguarded
+// `softDeleteThread` data-access status writer was removed. Thread soft-delete
+// exists ONLY through the audited governance path — DELETE /api/threads/:id
+// (applyGovernanceAction + assertLifecycleTransition) and the report-handle
+// cascade inside the same audited transaction.
 
 // ── Context Snapshots ──────────────────────────────────────
 

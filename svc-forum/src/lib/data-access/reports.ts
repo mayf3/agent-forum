@@ -5,8 +5,6 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { isUuid } from '../../utils/uuid.js';
 import { HttpError } from '../../utils/http-error.js';
-import { softDeleteThread } from './threads.js';
-import { softDeleteMessage, repairThreadMessageDerivedState } from './messages.js';
 
 // ── Reports (Moderation Queue) ─────────────────────────────
 //
@@ -141,58 +139,9 @@ export function reportStatusForAction(action: ReportAction): string {
   }
 }
 
-/**
- * Handle a report (moderator only, enforced by the route scope guard).
- *   ignore -> status=ignored
- *   warn   -> status=warned
- *   delete -> status=deleted AND soft-delete the reported target
- * Every action leaves a trace: handledBy / handledAt / handleNote + status (AC#4).
- *
- * NOTE: the HTTP route performs this through applyGovernanceAction (audited,
- * single transaction). This data-layer helper remains for direct/test use and
- * keeps the same deletion semantics (terminal-status safety + CTR-DELETE-002
- * derived repair for message targets).
- */
-export async function handleReport(
-  id: string,
-  action: ReportAction,
-  handledById: string,
-  handledByName: string,
-  handleNote?: string | null,
-) {
-  const report = await findReportById(id);
-  if (!report) throw new HttpError(404, 'Report not found');
-  if (report.status !== 'pending') {
-    throw new HttpError(409, `Report already handled (status=${report.status})`);
-  }
-
-  const now = new Date();
-  const updateData: Prisma.ForumReportUpdateInput = {
-    status: reportStatusForAction(action),
-    handledById,
-    handledByName,
-    handledAt: now,
-    handleNote: handleNote || null,
-  };
-
-  // AC#4 delete action cascades: soft-delete the reported content so it is no
-  // longer visible, while the report record keeps the trace.
-  if (action === 'delete') {
-    if (report.targetType === 'thread') {
-      await softDeleteThread(report.targetId);
-    } else {
-      await softDeleteMessage(report.targetId);
-      const parent = await prisma.forumThreadMessage.findUnique({
-        where: { id: report.targetId },
-        select: { threadId: true },
-      });
-      if (parent) {
-        await prisma.$transaction(async (tx) => {
-          await repairThreadMessageDerivedState(tx as any, parent.threadId);
-        });
-      }
-    }
-  }
-
-  return prisma.forumReport.update({ where: { id }, data: updateData });
-}
+// NOTE (DEC-GOV-003, GOVERNANCE-FINAL-AUDIT-A776CF4-R1 M-3): the unguarded
+// `handleReport` data-layer helper was removed — it wrote report status AND
+// soft-deleted content outside the audited governance transaction. Report
+// handling exists ONLY through PATCH /api/reports/:id (applyGovernanceAction:
+// audit append + report update + content cascade + reporter notice in one
+// atomic boundary).
