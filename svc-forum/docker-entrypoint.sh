@@ -38,5 +38,24 @@ while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
   sleep "$RETRY_DELAY"
 done
 
+echo "[entrypoint] Installing standalone lifecycle indexes (SQL-047/SQL-048)"
+attempt=1
+while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+  if node scripts/apply-lifecycle-indexes.mjs >/tmp/lifecycle-indexes.log 2>&1; then
+    tail -n 20 /tmp/lifecycle-indexes.log
+    echo "[entrypoint] Lifecycle index installation complete (attempt ${attempt})."
+    break
+  fi
+
+  tail -n 20 /tmp/lifecycle-indexes.log
+  if [ "$attempt" -eq "$MAX_ATTEMPTS" ]; then
+    echo "[entrypoint] Lifecycle index installation failed after ${MAX_ATTEMPTS} attempts. Aborting." >&2
+    exit 1
+  fi
+  echo "[entrypoint] Lifecycle index attempt ${attempt}/${MAX_ATTEMPTS} failed. Retrying in ${RETRY_DELAY}s..."
+  attempt=$((attempt + 1))
+  sleep "$RETRY_DELAY"
+done
+
 echo "[entrypoint] Starting command: $*"
 exec "$@"
