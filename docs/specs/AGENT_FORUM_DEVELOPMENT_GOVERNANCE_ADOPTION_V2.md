@@ -259,6 +259,9 @@ supersession backlinks MUST be changed atomically and independently rechecked.
 
 Vendoring MUST NOT overwrite `AGENTS.md`, `.agents/local/**`, Product Direction,
 Architecture/invariant authorities, existing local Specs, or acceptance actors.
+A repository-owned, coordinate-safe update to `.agents/local/README.md` in this
+same adoption PR is a local routing correction by the repository, not a vendored
+overwrite; every other protected local file MUST remain byte-identical.
 
 ### CTR-ADOPT2-005 — Three-axis routing and stop control
 
@@ -277,6 +280,36 @@ implement `AGENT_OPERATIONAL_LAYER_V1`.
 Adoption MUST be forward-only. Historical material MUST NOT be bulk rewritten.
 Rollback MUST revert the complete accepted update commit so lock and vendored
 bytes return to one exact prior version together.
+
+### CTR-ADOPT2-008 — Staged adoption and lifecycle-only acceptance
+
+Adoption MUST proceed through separate attributable stages: proposed candidate
+→ exact-Head independent review → authorized Owner acceptance → independent
+final-head recheck → Ready transition and merge. Local activation follows merge
+only.
+
+Independent review MUST bind to one exact proposed Head SHA. Any normative
+semantic change after an ACCEPT recommendation invalidates that recommendation;
+an invalid acceptance attempt MUST be withdrawn through a history-preserving
+correction, and the resulting semantic delta MUST NOT be relabeled as lifecycle
+metadata.
+
+Authorized Owner acceptance MUST change ONLY this field set:
+
+- V2 frontmatter: `status` (`proposed` → `accepted`) and `supersedes`
+  (`[]` → `[AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1]`);
+- V1 frontmatter: `status` (`accepted` → `superseded`) and `superseded_by`
+  (`null` → `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2`);
+- `.agents/governance.lock.json`: `adoption.status`, `adoption.accepted_by`,
+  `adoption.accepted_at`;
+- `docs/specs/README.md`: the two lifecycle rows and the candidate-state
+  navigation sentence;
+- commit metadata and the persistent PR record.
+
+Acceptance MUST NOT modify normative body text of either adoption Spec, vendored
+distribution bytes, or any other file. Acceptance attribution MUST be recorded
+in lock lifecycle fields, commit metadata, and the persistent PR record — not by
+appending a new acceptance-record section to the normative body.
 
 ## 10. Acceptance
 
@@ -304,8 +337,11 @@ bytes return to one exact prior version together.
 - Method: compare pre/post SHA-256 of all named local authority files
 - Environment: isolated candidate write surface
 - Required evidence: digest receipt and changed-path list
-- Expected result: every protected local file is unchanged
-- Failure condition: vendor or manual change alters a protected local file
+- Expected result: every protected local file is unchanged except the
+  explicitly reviewed `.agents/local/README.md` routing update made in this
+  same PR, which remains repository-owned
+- Failure condition: vendor or manual change alters any protected local file
+  other than that explicit routing update
 
 ### ACC-ADOPT2-004 — Governance V1 tools are valid and runnable
 
@@ -327,6 +363,21 @@ bytes return to one exact prior version together.
 - Expected result: only shared governance and adoption metadata change
 - Failure condition: product/runtime/configuration/Secret change appears
 
+### ACC-ADOPT2-006 — Acceptance delta is lifecycle-only and pre-defined
+
+- Contracts: `CTR-ADOPT2-008`
+- Method: define and mechanically preview the exact expected acceptance diff
+  before independent review; after authorized acceptance, diff the acceptance
+  commit against the reviewed proposed Head and run whole-authority transition
+  validation and lock schema validation
+- Environment: exact reviewed proposed Head and exact acceptance Head
+- Required evidence: expected acceptance diff, actual acceptance commit diff,
+  transition validator output, lock schema validation output
+- Expected result: the acceptance commit equals the pre-defined lifecycle-only
+  diff and contains no normative body change
+- Failure condition: any semantic delta after review, a missing supersession
+  backlink, or a change outside the permitted field set
+
 ### Contract coverage
 
 | Contract | Acceptance | Covered |
@@ -338,6 +389,7 @@ bytes return to one exact prior version together.
 | `CTR-ADOPT2-005` | `ACC-ADOPT2-004` | YES |
 | `CTR-ADOPT2-006` | `ACC-ADOPT2-005` | YES |
 | `CTR-ADOPT2-007` | `ACC-ADOPT2-005` | YES |
+| `CTR-ADOPT2-008` | `ACC-ADOPT2-006` | YES |
 
 ## 11. Alternatives and disposition
 
