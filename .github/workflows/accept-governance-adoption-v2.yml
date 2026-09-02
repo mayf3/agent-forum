@@ -347,7 +347,7 @@ jobs:
             "goal": "record owner-authorized Governance v1.0.0 adoption acceptance",
             "current_gap": "the reviewed successor is not yet atomically accepted",
             "done_when": "one fixed acceptance Head closes V1/V2 backlinks and lock metadata",
-            "route_stage": "AUTHORITY_ACCEPTANCE",
+            "route_stage": "AUTHORITY_AUTHORING",
             "authority_accepted_in_base": "NO",
             "owner_decision_required": false,
             "authority": {
@@ -363,7 +363,7 @@ jobs:
               "implementation_authority": "none",
               "atomic_spec_implementation_permitted": false
             },
-            "plan": {"complexity": "STANDARD", "level": "CHANGE_BRIEF"},
+            "plan": {"complexity": "COMPLEX", "level": "EXEC_PLAN"},
             "assurance": {
               "failure_consequence": "DURABLE_STATE",
               "level": "DURABLE",
@@ -415,7 +415,7 @@ jobs:
               "current_base_head": "e0f220f9bd4e72ece6697d2c8b4de15f614fd8d5",
               "target_head_changed": true,
               "relevant_base_impact": false,
-              "full_rereview_required": false
+              "full_rereview_required": true
             },
             "readiness": {
               "implementation_allowed": "NO",
