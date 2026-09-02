@@ -1,0 +1,480 @@
+name: Accept Governance Adoption V2 atomically
+
+on:
+  push:
+    branches:
+      - automation/accept-governance-adoption-v2
+
+permissions:
+  contents: write
+
+jobs:
+  accept:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EXPECTED_BASE: e0f220f9bd4e72ece6697d2c8b4de15f614fd8d5
+      REVIEWED_HEAD: c6dbc86cec0b20e254fe1d895232f3f12f626fe3
+      TARGET_BRANCH: agent/adopt-development-governance-v1.0.0
+      ACCEPTED_BY: mayf3
+      ACCEPTED_AT: 2026-09-02T12:59:46Z
+      REVIEWER_ID: openai-chatgpt:gpt-5.6-pro/AF-GOVERNANCE-ADOPTION-PR17-C6DBC86-R1
+
+    steps:
+      - name: Checkout automation branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Freeze Base and reviewed Head
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main "$TARGET_BRANCH"
+          test "$(git rev-parse origin/main)" = "$EXPECTED_BASE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$REVIEWED_HEAD"
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+          git config user.name "OpenAI ChatGPT"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply atomic Owner acceptance delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          accepted_by = os.environ['ACCEPTED_BY']
+          accepted_at = os.environ['ACCEPTED_AT']
+          reviewer_id = os.environ['REVIEWER_ID']
+          reviewed_head = os.environ['REVIEWED_HEAD']
+
+          def split_frontmatter(text: str):
+              assert text.startswith('---\n')
+              parts = text.split('---\n', 2)
+              assert len(parts) == 3
+              return parts[1], parts[2]
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              assert count == 1, f'{label}: expected one match, found {count}'
+              return text.replace(old, new, 1)
+
+          v1_path = Path('docs/specs/AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1.md')
+          v1_text = v1_path.read_text(encoding='utf-8')
+          v1_front, v1_body = split_frontmatter(v1_text)
+          v1_front = replace_once(v1_front, 'status: accepted\n', 'status: superseded\n', 'V1 status')
+          v1_front = replace_once(
+              v1_front,
+              'superseded_by: null\n',
+              'superseded_by: AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2\n',
+              'V1 superseded_by',
+          )
+          v1_path.write_text(f'---\n{v1_front}---\n{v1_body}', encoding='utf-8')
+
+          v2_path = Path('docs/specs/AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2.md')
+          v2_text = v2_path.read_text(encoding='utf-8')
+          v2_front, v2_body = split_frontmatter(v2_text)
+          v2_front = replace_once(v2_front, 'status: proposed\n', 'status: accepted\n', 'V2 status')
+          v2_front = replace_once(
+              v2_front,
+              'supersedes: []\n',
+              'supersedes:\n  - AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1\n',
+              'V2 supersedes',
+          )
+
+          v2_body = replace_once(
+              v2_body,
+              'This proposed successor does not activate Governance V1 by itself. The accepted\n'
+              'V1 adoption remains active until an independently reviewed, owner-accepted,\n'
+              'atomically closed successor is merged into `main`.\n',
+              'This owner-accepted successor candidate does not activate Governance V1 by\n'
+              'itself. The V1 adoption remains active on `main` until this exact acceptance\n'
+              'Head is independently rechecked and merged.\n',
+              'V2 activation statement',
+          )
+          v2_body = replace_once(
+              v2_body,
+              '- acceptance, Ready-for-review transition, merge, or production activation.\n',
+              '- Ready-for-review transition, merge, or production activation.\n',
+              'V2 scope acceptance exclusion',
+          )
+          v2_body = replace_once(
+              v2_body,
+              '`AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` is the current accepted\n'
+              'adoption. If V2 is later accepted, the acceptance change must atomically set V2\n'
+              'to `accepted`, declare V1 in `supersedes`, and set V1 to `superseded` with\n'
+              '`superseded_by: AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2`.\n',
+              '`AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` was the active accepted\n'
+              'adoption in the independently reviewed proposed Head. This acceptance commit\n'
+              'atomically sets V2 to `accepted`, declares V1 in `supersedes`, and sets V1 to\n'
+              '`superseded` with\n'
+              '`superseded_by: AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2`.\n\n'
+              'V1 remains the active repository authority on `main` until this exact\n'
+              'acceptance Head passes independent final-head recheck and is merged.\n',
+              'V2 supersession statement',
+          )
+          v2_body = replace_once(
+              v2_body,
+              '### DEC-ADOPT2-004 — Separate preparation from acceptance\n\n'
+              '- Decision owner: `mayf3`\n'
+              '- Decision: this candidate remains proposed with null acceptance metadata.\n'
+              '- Rejected alternative: activate v1.0.0 merely because upstream released it.\n'
+              '- Reason: local independent review and owner acceptance remain mandatory.\n',
+              '### DEC-ADOPT2-004 — Separate preparation from acceptance\n\n'
+              '- Decision owner: `mayf3`\n'
+              '- Decision: preparation remained proposed with null acceptance metadata; after\n'
+              f'  independent review of exact Head `{reviewed_head}` and explicit Owner\n'
+              '  authorization, this separate acceptance commit records local acceptance.\n'
+              '- Rejected alternative: activate v1.0.0 merely because upstream released it.\n'
+              '- Reason: preparation, independent review, Owner acceptance, final-head recheck,\n'
+              '  and merge remain separate attributable acts.\n',
+              'V2 acceptance decision',
+          )
+          v2_body = replace_once(
+              v2_body,
+              '### CTR-ADOPT2-002 — Truthful proposed adoption\n\n'
+              'Preparation MUST set `adoption.status` to `proposed` and MUST set `accepted_by`\n'
+              'and `accepted_at` to null. Preparation MUST NOT claim that V2 is active or that\n'
+              'V1 is superseded.\n',
+              '### CTR-ADOPT2-002 — Truthful staged adoption\n\n'
+              'Preparation MUST set `adoption.status` to `proposed` and MUST set `accepted_by`\n'
+              'and `accepted_at` to null. Authorized acceptance MUST set `adoption.status` to\n'
+              '`accepted` with attributable, non-null acceptance metadata only after exact-Head\n'
+              'independent review. The accepted candidate MUST NOT be treated as active\n'
+              'repository authority until final-head recheck and merge.\n',
+              'V2 truthful transition contract',
+          )
+          v2_body = replace_once(
+              v2_body,
+              '### CTR-ADOPT2-003 — Atomic future supersession\n\n'
+              'If authorized acceptance occurs, V2 acceptance and the V1/V2 whole-authority\n'
+              'supersession backlinks MUST be changed atomically and independently rechecked.\n',
+              '### CTR-ADOPT2-003 — Atomic supersession\n\n'
+              'Authorized acceptance MUST atomically change V2 acceptance and both V1/V2\n'
+              'whole-authority supersession backlinks. The resulting exact Head MUST be\n'
+              'independently rechecked before merge.\n',
+              'V2 atomic supersession contract',
+          )
+          v2_body = replace_once(
+              v2_body,
+              '- Environment: Draft PR before owner acceptance\n'
+              '- Required evidence: exact Base/Head, lock, Spec records, independent review\n'
+              '- Expected result: V2 remains proposed, V1 remains accepted, null acceptance data\n'
+              '- Failure condition: preparation claims acceptance or mutates V1 lifecycle\n',
+              '- Environment: Draft PR across the proposed Head and owner-accepted successor Head\n'
+              '- Required evidence: exact Base/Head, lock, Spec records, independent review, and\n'
+              '  explicit Owner authorization\n'
+              f'- Expected result: proposed metadata is null at `{reviewed_head}`; accepted\n'
+              '  metadata and closed V1/V2 backlinks appear only in the acceptance commit\n'
+              '- Failure condition: preparation fabricates acceptance, an unauthorized actor\n'
+              '  accepts, backlinks are partial, or semantic content changes without review\n',
+              'V2 acceptance evidence contract',
+          )
+          v2_body = replace_once(
+              v2_body,
+              '```text\n'
+              'OPEN_OWNER_DECISIONS = NONE FOR PREPARATION\n'
+              'NORMATIVE_TBD = NONE\n'
+              'UNRESOLVED_AUTHORITY_CONFLICT = NONE\n'
+              'PARTIAL_SUPERSESSION = NONE\n'
+              'READY_FOR_INDEPENDENT_REVIEW = YES\n'
+              'READY_TO_MARK_ACCEPTED = NO\n'
+              '```\n\n'
+              'Independent review of the exact candidate and authorized acceptance by `mayf3`\n'
+              'are still required. This execution Agent does not perform either action.\n',
+              '```text\n'
+              'OPEN_OWNER_DECISIONS = NONE\n'
+              'NORMATIVE_TBD = NONE\n'
+              'UNRESOLVED_AUTHORITY_CONFLICT = NONE\n'
+              'PARTIAL_SUPERSESSION = NONE\n'
+              'OWNER_ACCEPTANCE = RECORDED\n'
+              f'ACCEPTANCE_ACTOR = {accepted_by}\n'
+              f'ACCEPTANCE_REVIEWER = {reviewer_id}\n'
+              f'ACCEPTANCE_REVIEWED_HEAD = {reviewed_head}\n'
+              'READY_FOR_FINAL_HEAD_RECHECK = YES\n'
+              'READY_TO_MERGE = NO\n'
+              '```\n\n'
+              f'Owner acceptance by `{accepted_by}` is recorded after independent review of\n'
+              f'`{reviewed_head}`. This exact acceptance Head must now receive an independent\n'
+              'final-head recheck before the Draft PR can be marked Ready or merged.\n\n'
+              '## 14. Owner acceptance record\n\n'
+              '```text\n'
+              f'ACCEPTED_BY = {accepted_by}\n'
+              f'ACCEPTED_AT = {accepted_at}\n'
+              f'REVIEWER_ID = {reviewer_id}\n'
+              f'REVIEWED_PROPOSED_HEAD = {reviewed_head}\n'
+              'REVIEW_RESULT = ACCEPT\n'
+              'BLOCKERS = 0\n'
+              'HIGH = 0\n'
+              'ACCEPTANCE_DELTA = lifecycle metadata + V1/V2 backlinks + lock + index only\n'
+              'FINAL_HEAD_RECHECK_REQUIRED = YES\n'
+              'MERGE_PERFORMED = NO\n'
+              '```\n',
+              'V2 final acceptance state',
+          )
+          v2_path.write_text(f'---\n{v2_front}---\n{v2_body}', encoding='utf-8')
+
+          lock_path = Path('.agents/governance.lock.json')
+          lock = json.loads(lock_path.read_text(encoding='utf-8'))
+          assert lock['adoption']['status'] == 'proposed'
+          assert lock['adoption']['accepted_by'] is None
+          assert lock['adoption']['accepted_at'] is None
+          lock['adoption']['status'] = 'accepted'
+          lock['adoption']['accepted_by'] = accepted_by
+          lock['adoption']['accepted_at'] = accepted_at
+          lock_path.write_text(json.dumps(lock, indent=2) + '\n', encoding='utf-8')
+
+          index_path = Path('docs/specs/README.md')
+          index = index_path.read_text(encoding='utf-8')
+          index = replace_once(
+              index,
+              '| `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` | accepted | invariant | repository governance | none | — |\n'
+              '| `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2` | proposed | invariant | repository governance v1.0.0 adoption | none | — |\n',
+              '| `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` | superseded | invariant | repository governance | none | — |\n'
+              '| `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2` | accepted | invariant | repository governance v1.0.0 adoption | none | `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` |\n',
+              'Spec index statuses',
+          )
+          index = replace_once(
+              index,
+              '`AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2` is a proposed whole-authority successor. V1 remains active until exact-Head review, authorized acceptance, atomic supersession, and merge.\n',
+              '`AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2` is the owner-accepted whole-authority successor candidate. Within this candidate, V1 is superseded and V2 is accepted; V1 remains active on `main` until this exact acceptance Head passes independent final-head recheck and is merged.\n',
+              'Spec index activation note',
+          )
+          index_path.write_text(index, encoding='utf-8')
+          PY
+
+      - name: Validate exact acceptance delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet jsonschema pyyaml
+
+          python3 - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          import jsonschema
+          import yaml
+
+          reviewed = subprocess.check_output(
+              ['git', 'show', 'c6dbc86cec0b20e254fe1d895232f3f12f626fe3:docs/specs/AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1.md'],
+              text=True,
+          )
+          current = Path('docs/specs/AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1.md').read_text()
+          assert reviewed.split('---\n', 2)[2] == current.split('---\n', 2)[2]
+
+          lock = json.loads(Path('.agents/governance.lock.json').read_text())
+          schema = json.loads(Path('.agents/schemas/governance-lock.schema.json').read_text())
+          jsonschema.validate(lock, schema)
+          assert lock['adoption']['status'] == 'accepted'
+          assert lock['adoption']['accepted_by'] == 'mayf3'
+          assert lock['adoption']['accepted_at'] == '2026-09-02T12:59:46Z'
+
+          def frontmatter(text):
+              return yaml.safe_load(text.split('---\n', 2)[1])
+
+          v1 = frontmatter(Path('docs/specs/AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1.md').read_text())
+          v2 = frontmatter(Path('docs/specs/AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2.md').read_text())
+          assert v1['status'] == 'superseded'
+          assert v1['superseded_by'] == 'AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2'
+          assert v2['status'] == 'accepted'
+          assert v2['supersedes'] == ['AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1']
+          assert v2['superseded_by'] is None
+
+          changed = set(subprocess.check_output(
+              ['git', 'diff', '--name-only', 'c6dbc86cec0b20e254fe1d895232f3f12f626fe3'], text=True
+          ).splitlines())
+          expected = {
+              '.agents/governance.lock.json',
+              'docs/specs/AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1.md',
+              'docs/specs/AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2.md',
+              'docs/specs/README.md',
+          }
+          assert changed == expected, (changed, expected)
+          print('ACCEPTANCE_DELTA_FILES=4')
+          print('LOCK_SCHEMA=PASS')
+          print('ATOMIC_SUPERSESSION=PASS')
+          print('V1_BODY_PRESERVED=PASS')
+          PY
+
+          python3 .agents/tools/verify_governance.py --target . | tee /tmp/verify-governance.txt
+
+          python3 - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          import yaml
+
+          def frontmatter(text):
+              if not text.startswith('---\n'):
+                  return None
+              return yaml.safe_load(text.split('---\n', 2)[1])
+
+          def records_from_commit(commit):
+              paths = subprocess.check_output(
+                  ['git', 'ls-tree', '-r', '--name-only', commit, '--', 'docs/specs'], text=True
+              ).splitlines()
+              out = []
+              for path in paths:
+                  if path.endswith('.md'):
+                      fm = frontmatter(subprocess.check_output(['git', 'show', f'{commit}:{path}'], text=True))
+                      if fm is not None:
+                          out.append(fm)
+              return out
+
+          candidate = []
+          for path in sorted(Path('docs/specs').glob('*.md')):
+              fm = frontmatter(path.read_text())
+              if fm is not None:
+                  candidate.append(fm)
+
+          Path('/tmp/base-specs.json').write_text(json.dumps(records_from_commit('e0f220f9bd4e72ece6697d2c8b4de15f614fd8d5'), indent=2) + '\n')
+          Path('/tmp/candidate-specs.json').write_text(json.dumps(candidate, indent=2) + '\n')
+          PY
+
+          python3 .agents/tools/validate_spec_transition.py \
+            --base /tmp/base-specs.json \
+            --candidate /tmp/candidate-specs.json \
+            | tee /tmp/spec-transition.txt
+
+          cat > /tmp/governance-route.json <<'JSON'
+          {
+            "schema_version": 1,
+            "task_id": "agent-forum-accept-governance-v1.0.0",
+            "goal": "record owner-authorized Governance v1.0.0 adoption acceptance",
+            "current_gap": "the reviewed successor is not yet atomically accepted",
+            "done_when": "one fixed acceptance Head closes V1/V2 backlinks and lock metadata",
+            "route_stage": "AUTHORITY_ACCEPTANCE",
+            "authority_accepted_in_base": "NO",
+            "owner_decision_required": false,
+            "authority": {
+              "declared_action": "SUPERSEDE",
+              "ownership_known": true,
+              "accepted_owner_exists": true,
+              "accepted_meaning_changed": true,
+              "accepted_strict_addition": false,
+              "proposed_target_named": false,
+              "proposal_scope_changed": false,
+              "proposal_ownership_changed": false,
+              "proposal_decision_identity_changed": false,
+              "implementation_authority": "none",
+              "atomic_spec_implementation_permitted": false
+            },
+            "plan": {"complexity": "STANDARD", "level": "CHANGE_BRIEF"},
+            "assurance": {
+              "failure_consequence": "DURABLE_STATE",
+              "level": "DURABLE",
+              "controlled_runbook_present": false
+            },
+            "execution_mandate": {
+              "status": "VALID",
+              "attributable": true,
+              "target_bound": true,
+              "actor_bound": true,
+              "environment_bound": true,
+              "scope_bound": true,
+              "allowed_effects_bound": true,
+              "forbidden_effects_bound": true,
+              "exact_operation_bound": true,
+              "done_when_bound": true,
+              "abort_conditions_bound": true,
+              "secret_handling_bound": true,
+              "receipt_bound": true,
+              "attempt_bounds_bound": true,
+              "self_issued": false
+            },
+            "write_surface": {"mutation_planned": true, "isolated": true},
+            "spec_gap_dependency": "NONE",
+            "evidence": {
+              "load_bearing_required": true,
+              "reviewability": "PASS",
+              "fabrication_observed": false,
+              "failure_class": "NONE"
+            },
+            "live_authority_gap": {
+              "state": "NONE",
+              "expansion_frozen": false,
+              "auto_delete": false,
+              "permanent_grandfather": false,
+              "owner_disposition_present": true
+            },
+            "emergency": {
+              "state": "NONE",
+              "action_kind": "NONE",
+              "owner_authorized": false,
+              "incident_reference_present": false,
+              "durable_new_behavior": false,
+              "normal_authority_reconciliation_required": false
+            },
+            "review": {
+              "review_target_head": "c6dbc86cec0b20e254fe1d895232f3f12f626fe3",
+              "base_head": "e0f220f9bd4e72ece6697d2c8b4de15f614fd8d5",
+              "current_base_head": "e0f220f9bd4e72ece6697d2c8b4de15f614fd8d5",
+              "target_head_changed": true,
+              "relevant_base_impact": false,
+              "full_rereview_required": false
+            },
+            "readiness": {
+              "implementation_allowed": "NO",
+              "merge_ready": "NO",
+              "operation_allowed": "NO"
+            },
+            "stop": {
+              "done_when_met": true,
+              "expansion_triggered": false,
+              "next_action": "STOP"
+            },
+            "findings": []
+          }
+          JSON
+          python3 .agents/tools/validate_governance_route.py /tmp/governance-route.json | tee /tmp/governance-route.txt
+
+          git diff --check
+          git diff --exit-code "$EXPECTED_BASE" -- \
+            AGENTS.md .agents/local docs/product \
+            docs/specs/AGENT_FORUM_CORE_INVARIANTS_V1.md
+
+          npm --prefix svc-forum ci
+          npm --prefix svc-forum test | tee /tmp/repository-tests.txt
+
+      - name: Create one atomic acceptance commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add \
+            .agents/governance.lock.json \
+            docs/specs/AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1.md \
+            docs/specs/AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2.md \
+            docs/specs/README.md
+          test "$(git diff --cached --name-only | wc -l | tr -d ' ')" = 4
+          git commit -m "docs: accept Governance v1.0.0 adoption" \
+            -m "Owner-accepted-by: mayf3" \
+            -m "Reviewed-head: c6dbc86cec0b20e254fe1d895232f3f12f626fe3" \
+            -m "Review-result: ACCEPT" \
+            -m "Final-head-recheck-required: yes"
+          echo "ACCEPTANCE_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git push origin "HEAD:$TARGET_BRANCH"
+
+      - name: Verify remote final coordinates
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$EXPECTED_BASE"
+          test "$(git ls-remote origin refs/heads/$TARGET_BRANCH | cut -f1)" = "$ACCEPTANCE_HEAD"
+          echo "ACCEPTANCE_HEAD=$ACCEPTANCE_HEAD"
+          echo "FINAL_HEAD_RECHECK_REQUIRED=YES"
+          echo "MERGE_PERFORMED=NO"
+
+      - name: Upload acceptance validation receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-adoption-acceptance-validation
+          path: |
+            /tmp/verify-governance.txt
+            /tmp/spec-transition.txt
+            /tmp/governance-route.txt
+            /tmp/repository-tests.txt
+          retention-days: 30
