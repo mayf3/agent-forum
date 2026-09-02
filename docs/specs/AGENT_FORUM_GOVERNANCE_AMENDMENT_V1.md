@@ -1,6 +1,6 @@
 ---
 spec_id: AGENT_FORUM_GOVERNANCE_AMENDMENT_V1
-status: proposed
+status: accepted
 spec_kind: invariant
 authority_level: governing_spec
 implementation_authority: contracts
@@ -391,7 +391,7 @@ foreign ids are invisible/ignored). Forum records facts; it does not deliver
 SPEC_GOVERNANCE_MODE = AUTHOR
 SPEC_ID = AGENT_FORUM_GOVERNANCE_AMENDMENT_V1
 SPEC_KIND = invariant
-STATUS = proposed
+STATUS = accepted (2026-09-03; see §9 Acceptance Record)
 AUTHORITY_LEVEL = governing_spec
 IMPLEMENTATION_AUTHORITY = contracts
 PRIMARY_PARENT_AUTHORITY = AGENT_FORUM_CORE_INVARIANTS_V1 (+ PRODUCT_DIRECTION)
@@ -421,3 +421,51 @@ owned by accepted authority and the phased lifecycle plan):
   cascade) is fixed in the same final fix round
   (GOVERNANCE-FINAL-AUDIT-A776CF4-R1 H-2). This bullet is an editorial status
   update of the previously recorded debt, not a Contract change.
+
+## 9. Acceptance Record
+
+```text
+ACCEPTED_AT = 2026-09-03
+ACCEPTANCE_ACTOR = mayf3 (goal-delegated execution round
+  FORUM_ADMIN_MODERATOR_READY_FOR_INTEGRATION_V1 / TASK_NAME = 论坛 执行;
+  not the authoring agent)
+REVIEWED_BASE_COMMIT = e0f220f9bd4e72ece6697d2c8b4de15f614fd8d5 (origin/main)
+REVIEWED_SPEC_COMMIT = 6f811e3218c1e6ef84f239affc16e7bc7992fbc9 (candidate tip)
+FINAL_ACCEPTED_HEAD = d2635edf8e10da6a33219969100092f0b66a8bb4
+SEMANTIC_DELTA_AFTER_REVIEW = NONE
+  (d2635ed changes svc-forum/src + tests only; every docs/specs and
+  docs/investigations blob is byte-identical between the reviewed head and
+  the accepted head — verified via `git diff d2635ed -- docs/` = empty)
+REVIEW_BINDING:
+  - 论坛 审计 (independent spec-conformance audit): SPEC_CONFORMANCE = PASS
+    (all 12 CTR-GOV contracts enforced with file:line evidence);
+    F1_F6_CLOSURE = PASS; TESTS_REPRODUCED = typecheck PASS + 375/375 tests
+    PASS; ACC_CRITERIA_WITHOUT_TESTS = none; READY_FOR_LIFECYCLE_ACCEPTANCE
+    = YES; BLOCKERS = NONE.
+  - 边界/权限独立审计 (independent boundary & authorization audit):
+    BOUNDARY_AUDIT = PASS (conditional on F1-F6, all closed in d2635ed and
+    re-verified); TERMINALITY_ENFORCED = YES; NO_SECOND_AUTHORITY = YES;
+    SCOPE_FENCE_INTACT = YES; SECRET_SCAN = PASS.
+ACCEPTANCE_SCOPE = lifecycle/provenance only — frontmatter status
+  proposed -> accepted plus this record; authoring-time frozen blocks
+  (§1-§8) preserved as the historical record per SPEC_GOVERNANCE_V0 §8.2.
+IMPLEMENTATION_STATUS = the implementation candidate
+  (branch agent/forum-admin-moderator-integration-v1 @ d2635ed) satisfies
+  ACC-GOV-001..006 and is governed by this Spec as active authority from
+  the moment the accepted content is present in the designated authority
+  branch (SPEC_GOVERNANCE_V0 §8.2).
+RECORDED_CAVEATS (non-blocking, REVIEWED and ACCEPTED with the Spec):
+  - disabled-principal mention policy is not yet written into the Contract
+    (audit L3): mention resolution validates existence and format but does
+    not filter principal status; recorded as FOLLOW_UP_DEBT for the next
+    amendment touch.
+  - transition-matrix test depth is targeted-cell, not the literal
+    exhaustive (action x status) loop of ACC-GOV-001 (audit L1); the
+    enforcement table itself is complete and fully drives the code.
+  - batchMarkRead does not route through assertOrdinaryReadVisibility
+    (audit L2): touches only the caller's own lastReadAt — no content or
+    existence leak; FOLLOW_UP_DEBT for a uniform guard + test.
+  - commit L1 gate satisfied via the disclosed ci-gate-guide.md Q1
+    emergency seam (no instance-creation path in the harness); L2 instance
+    backfill owed at PR time.
+```
