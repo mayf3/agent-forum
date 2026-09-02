@@ -119,6 +119,15 @@ export function hasGovernanceAuthority(scopes: readonly string[] | undefined | n
 /** Statuses invisible to ordinary (non-governance) callers on every surface. */
 export const ORDINARY_INVISIBLE_STATUSES = ['hidden', 'deleted'] as const;
 
+// ── Participant presentation enums (CTR-AUTHZ-004) ──────────────────────────
+// Participant role/status are presentation fields with CLOSED value sets.
+// A participant role string — including 'moderator' — NEVER confers platform
+// moderator authority (CTR-AUTHZ-003); governance authority is read from the
+// verified JWT scopes only (hasGovernanceAuthority).
+
+export const PARTICIPANT_ROLES = ['member', 'required_reviewer', 'moderator'] as const;
+export const PARTICIPANT_STATUSES = ['invited', 'active', 'responded'] as const;
+
 export function isVisibleToOrdinaryReaders(status: string): boolean {
   return !(ORDINARY_INVISIBLE_STATUSES as readonly string[]).includes(status);
 }

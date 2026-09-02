@@ -25,7 +25,13 @@ export interface CreateReportInput {
   note?: string | null;
 }
 
-/** Verify the reported target exists and is not already soft-deleted. */
+/**
+ * Verify the reported target exists and is not already soft-deleted.
+ *
+ * Hidden targets read as NOT FOUND (CTR-GOV-HIDE: indistinguishable from a
+ * nonexistent id — reporting must not become a hidden-content existence
+ * oracle). Deleted targets get the explicit terminal-state 400.
+ */
 export async function assertReportTargetExists(
   targetType: string,
   targetId: string,
@@ -33,13 +39,15 @@ export async function assertReportTargetExists(
   if (!isUuid(targetId)) throw new HttpError(400, 'targetId must be a valid UUID');
   if (targetType === 'thread') {
     const thread = await prisma.forumThread.findUnique({ where: { id: targetId } });
-    if (!thread) throw new HttpError(404, 'Reported thread not found');
+    if (!thread || thread.status === 'hidden') throw new HttpError(404, 'Reported thread not found');
     if (thread.status === 'deleted') throw new HttpError(400, 'Cannot report a deleted thread');
     return;
   }
   if (targetType === 'message') {
     const message = await prisma.forumThreadMessage.findUnique({ where: { id: targetId } });
     if (!message) throw new HttpError(404, 'Reported message not found');
+    const parent = await prisma.forumThread.findUnique({ where: { id: message.threadId } });
+    if (!parent || parent.status === 'hidden') throw new HttpError(404, 'Reported message not found');
     if (message.deletedAt) throw new HttpError(400, 'Cannot report a deleted message');
     return;
   }

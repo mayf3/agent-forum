@@ -9,9 +9,12 @@ import {
   assertLifecycleTransition,
   assertOrdinaryReadVisibility,
   hasGovernanceAuthority,
+  PARTICIPANT_ROLES,
+  PARTICIPANT_STATUSES,
 } from '../lib/governance.js';
 import { appendAuditEvent } from '../lib/data-access/audit-store.js';
 import { withTransactionRetry } from '../lib/data-access/shared.js';
+import { isValidAgentId } from '../lib/forum-principal.js';
 import * as db from '../lib/data-access.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
@@ -46,15 +49,37 @@ threadsRouter.post('/', authRequired, requireForumWriter, requireWriteScope(), a
     createdByType: 'agent',
   });
 
-  // Optionally add participants from request body
+  // Optionally add participants from request body. Every entry passes the
+  // same canonical-identity + closed-enum validation as POST /participants
+  // (CTR-AUTHZ-004): unknown agent ids are rejected before any row is written,
+  // so the governance notification fan-out can never observe a participant
+  // that has no ForumPrincipal.
   if (Array.isArray(participants)) {
-    for (const p of participants) {
+    const entries = participants.map((entry: any) => ({
+      agentId: entry.agentId || user.id,
+      agentName: entry.agentName || user.name,
+      role: entry.role || 'member',
+      status: entry.status || 'invited',
+    }));
+    for (const entry of entries) {
+      if (!(PARTICIPANT_ROLES as readonly string[]).includes(entry.role) ||
+          !(PARTICIPANT_STATUSES as readonly string[]).includes(entry.status)) {
+        throw new HttpError(400, `participant role must be one of: ${PARTICIPANT_ROLES.join(', ')}; status must be one of: ${PARTICIPANT_STATUSES.join(', ')}`);
+      }
+    }
+    const resolved = await db.findPrincipalsByAgentIds(entries.map((entry: { agentId: string }) => entry.agentId));
+    for (const entry of entries) {
+      const principal = resolved.get(entry.agentId);
+      if (!isValidAgentId(entry.agentId) || !principal) throw new HttpError(400, 'UNKNOWN_MENTION_AGENT');
+    }
+    for (const entry of entries) {
+      const principal = resolved.get(entry.agentId);
       await db.addParticipant({
         threadId: thread.id,
-        agentId: p.agentId || user.id,
-        agentName: p.agentName || user.name,
-        role: p.role || 'member',
-        status: p.status || 'invited',
+        agentId: principal!.id,
+        agentName: entry.agentName || principal!.displayName || entry.agentId,
+        role: entry.role,
+        status: entry.status,
       });
     }
   }

@@ -578,7 +578,11 @@ matrixSuite({
   mountPath: '/api/threads/:threadId/participants',
   method: 'POST',
   route: `/api/threads/${SEED_THREAD_ID}/participants`,
-  body: { agentId: 'participant-agent', agentName: 'Participant', role: 'member' },
+  // Self-service join: since the boundary-audit F1 closure, adding ANOTHER
+  // agent requires creator-or-governance authority, so the matrix exercises
+  // the caller's own id (the authority matrix lives in
+  // tests/governance-participant-guards.test.ts).
+  body: { agentId: 'test-forum-agent', agentName: 'Self join', role: 'member' },
   okStatus: 201,
   needsThread: true,
 });

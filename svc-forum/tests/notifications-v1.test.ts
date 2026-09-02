@@ -502,4 +502,17 @@ void describe('Notification V1 — governance + report notices', async () => {
     assert.equal(audit.length, 1);
     assert.equal(audit[0].targetId, reportId);
   });
+
+  // boundary F6: non-numeric / negative pagination fails 400 (never a 500
+  // from Prisma, never a negative take reverse window).
+  await it('boundary F6: invalid page/limit on /api/notifications → 400', async () => {
+    const app = await buildApp();
+    const token = await tokenFor('other', PLAIN);
+    for (const q of ['?page=abc', '?page=-1', '?limit=0', '?limit=-5', '?limit=101']) {
+      const res = await req(app, 'GET', `/api/notifications${q}`, token);
+      assert.equal(res.status, 400, q);
+    }
+    const ok = await req(app, 'GET', '/api/notifications?page=2&limit=10', token);
+    assert.equal(ok.status, 200);
+  });
 });

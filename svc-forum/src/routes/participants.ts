@@ -5,12 +5,55 @@ import { authRequired } from '../middleware/auth.js';
 import { requireForumWriter } from '../middleware/forum-writer.js';
 import { requireWriteScope, requireReadScope } from '../middleware/scope-guard.js';
 import { getPrisma } from '../lib/prisma.js';
-import { assertOrdinaryReadVisibility } from '../lib/governance.js';
+import {
+  assertOrdinaryReadVisibility,
+  hasGovernanceAuthority,
+  PARTICIPANT_ROLES,
+  PARTICIPANT_STATUSES,
+} from '../lib/governance.js';
+import { isValidAgentId } from '../lib/forum-principal.js';
 import * as db from '../lib/data-access.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
   const v = req.params[key];
   return Array.isArray(v) ? v[0] : v;
+}
+
+/**
+ * Resolve the acting caller's authority over participant presentation state
+ * (CTR-AUTHZ-004): the thread creator or a verified forum.moderate/forum.admin
+ * scope. A participant role string NEVER confers this authority (CTR-AUTHZ-003).
+ */
+function canManageParticipants(
+  thread: { createdById: string },
+  user: { id: string; scopes?: readonly string[] },
+): boolean {
+  return thread.createdById === user.id || hasGovernanceAuthority(user.scopes);
+}
+
+/**
+ * Canonical identity resolution for a participant agent id (same contract as
+ * mentions): the id must be well-formed AND resolve to an existing
+ * ForumPrincipal — unknown ids are rejected 400 before any row is written.
+ * The returned principal id is the participant-row key (forum_participants.
+ * agent_id stores the LOCAL principal id — the notification fan-out's
+ * recipient key), so a raw unresolvable body string can never reach the table.
+ */
+async function resolveParticipantKey(agentId: string): Promise<{ id: string; displayName: string | null }> {
+  if (!isValidAgentId(agentId)) throw new HttpError(400, 'UNKNOWN_MENTION_AGENT');
+  const resolved = await db.findPrincipalsByAgentIds([agentId]);
+  const principal = resolved.get(agentId);
+  if (!principal) throw new HttpError(400, 'UNKNOWN_MENTION_AGENT');
+  return principal;
+}
+
+function assertParticipantEnum(role: unknown, status: unknown): void {
+  if (role !== undefined && !(PARTICIPANT_ROLES as readonly string[]).includes(role as string)) {
+    throw new HttpError(400, `role must be one of: ${PARTICIPANT_ROLES.join(', ')}`);
+  }
+  if (status !== undefined && !(PARTICIPANT_STATUSES as readonly string[]).includes(status as string)) {
+    throw new HttpError(400, `status must be one of: ${PARTICIPANT_STATUSES.join(', ')}`);
+  }
 }
 
 export const participantsRouter = Router({ mergeParams: true });
@@ -23,12 +66,29 @@ participantsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandl
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
   assertOrdinaryReadVisibility(thread, req.user?.scopes);
+  if (thread.status === 'deleted') {
+    // deleted is terminal — no participant rows may be appended to a tombstone
+    throw new HttpError(400, 'Cannot add participants to a deleted thread');
+  }
 
+  const user = req.user!;
   const { agentId, agentName, role, status } = req.body;
-  if (!agentId) throw new HttpError(400, 'agentId is required');
+  if (!agentId || typeof agentId !== 'string') throw new HttpError(400, 'agentId is required');
+  assertParticipantEnum(role, status);
+  const principal = await resolveParticipantKey(agentId);
+
+  const isSelf = principal.id === user.id;
+  if (!isSelf && !canManageParticipants(thread, user)) {
+    throw new HttpError(403, 'Only the thread creator or a moderator/admin may add other participants');
+  }
+  // Self-service join may never self-assign a privileged role/status pair —
+  // the participant role string carries no authority and must not appear to.
+  if (isSelf && role !== undefined && role !== 'member') {
+    throw new HttpError(403, 'Self-service participation is member-only; role changes require the thread creator or a moderator/admin');
+  }
 
   // Check for duplicate
-  const existing = await db.findParticipant(threadId, agentId);
+  const existing = await db.findParticipant(threadId, principal.id);
   if (existing) {
     // Idempotent — return existing
     res.status(200).json({ participant: existing });
@@ -37,8 +97,8 @@ participantsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandl
 
   const participant = await db.addParticipant({
     threadId,
-    agentId,
-    agentName: agentName || agentId,
+    agentId: principal.id,
+    agentName: agentName || principal.displayName || agentId,
     role: role || 'member',
     status: status || 'invited',
   });
@@ -79,12 +139,32 @@ participantsRouter.patch('/:participantId', requireForumWriter, requireWriteScop
     throw new HttpError(404, 'Participant not found');
   }
 
+  const user = req.user!;
+  assertParticipantEnum(req.body.role, req.body.status);
+
+  // Role/status are another principal's presentation + review state: mutating
+  // them requires creator-or-governance authority (CTR-AUTHZ-004). A caller
+  // may never elevate themselves through this route.
+  const wantsRoleOrStatus = req.body.role !== undefined || req.body.status !== undefined;
+  if (wantsRoleOrStatus && !canManageParticipants(thread, user)) {
+    throw new HttpError(403, 'Only the thread creator or a moderator/admin may change participant roles');
+  }
+  // lastReadAt is self-service state (CTR-AUTHZ-005) — own row only.
+  if (req.body.lastReadAt !== undefined && existing.agentId !== user.id) {
+    throw new HttpError(403, 'lastReadAt is self-service only');
+  }
+
   const allowed = ['role', 'status', 'lastReadAt'];
   const updateData: Record<string, any> = {};
   for (const key of allowed) {
     if (req.body[key] !== undefined) {
       updateData[key] = req.body[key];
     }
+  }
+  if (updateData.lastReadAt !== undefined) {
+    const at = new Date(updateData.lastReadAt);
+    if (Number.isNaN(at.getTime())) throw new HttpError(400, 'lastReadAt must be a valid date');
+    updateData.lastReadAt = at;
   }
 
   const participant = await db.updateParticipant(participantId, updateData);
@@ -109,6 +189,13 @@ participantsRouter.delete('/:participantId', requireForumWriter, requireWriteSco
     throw new HttpError(404, 'Participant not found');
   }
 
+  // Removing ANOTHER principal's participation requires creator-or-governance
+  // authority; leaving under one's own row is self-service (CTR-AUTHZ-004/005).
+  const user = req.user!;
+  if (existing.agentId !== user.id && !canManageParticipants(thread, user)) {
+    throw new HttpError(403, 'Only the thread creator or a moderator/admin may remove other participants');
+  }
+
   await db.softDeleteParticipant(participantId);
   res.json({ ok: true });
 }));
@@ -125,7 +212,9 @@ participantsRouter.post('/:agentId/waive-review', requireForumWriter, requireWri
   if (!thread) throw new HttpError(404, 'Thread not found');
   assertOrdinaryReadVisibility(thread, req.user?.scopes);
 
-  // Find the target participant
+  // Find the target participant row. Rows are keyed by the stored agentId
+  // (the canonical principal id for every row written through the guarded
+  // POST path and watch/autowatch), so the route param must match that value.
   const participant = await db.findParticipant(threadId, agentId);
   if (!participant) throw new HttpError(404, 'Participant not found');
 
@@ -163,13 +252,12 @@ participantsRouter.post('/:agentId/waive-review', requireForumWriter, requireWri
     throw new HttpError(409, 'Reviewer has already posted a message, waiver not needed');
   }
 
-  // Authorization: thread creator or moderator
+  // Authorization: thread creator OR verified governance scope — a participant
+  // role string (e.g. 'moderator') MUST NOT confer this authority
+  // (CTR-AUTHZ-002/003/004).
   const isCreator = thread.createdById === user.id;
-  const callerParticipant = await db.findParticipant(threadId, user.id);
-  const isModerator = callerParticipant?.role === 'moderator';
-
-  if (!isCreator && !isModerator) {
-    throw new HttpError(403, 'Only thread creator or moderator can waive a reviewer');
+  if (!isCreator && !hasGovernanceAuthority(user.scopes)) {
+    throw new HttpError(403, 'Only the thread creator or forum.moderate/forum.admin authority can waive a reviewer');
   }
 
   // Validate reason
