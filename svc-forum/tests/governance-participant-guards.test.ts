@@ -92,9 +92,15 @@ function seedThreads(status = 'open') {
 
 /** Participant of THREAD_ID (the mutation target). Returns its id. */
 function seedThreadParticipant(role = 'member'): string {
+  return seedParticipantFor('member', role);
+}
+
+/** Participant row of THREAD_ID owned by the given identity. */
+function seedParticipantFor(who: keyof typeof IDS, role = 'member'): string {
   const id = mockUuid();
+  const owner = IDS[who];
   participants.set(id, {
-    id, threadId: THREAD_ID, agentId: IDS.member.pid, agentName: IDS.member.agentId,
+    id, threadId: THREAD_ID, agentId: owner.pid, agentName: owner.agentId,
     role, status: 'active', joinedAt: new Date(), leftAt: null,
   });
   return id;
@@ -114,6 +120,11 @@ function mockStore(store: Map<string, any>) {
       if (where.id) return store.get(where.id) || null;
       if (where.authSubject) {
         for (const v of store.values()) if (v.authSubject === where.authSubject) return v;
+        return null;
+      }
+      if (where.threadId_agentId) {
+        const { threadId, agentId } = where.threadId_agentId;
+        for (const v of store.values()) if (v.threadId === threadId && v.agentId === agentId && !v.leftAt) return v;
         return null;
       }
       return null;
@@ -139,10 +150,12 @@ function createMockPrisma() {
     forumThread: mockStore(threads),
     forumThreadParticipant: mockStore(participants),
     forumPrincipal: mockStore(principals),
+    forumThreadMessage: { findFirst: async () => null },
     $transaction: async (fn: (tx: any) => any) => fn({
       forumThread: mockStore(threads),
       forumThreadParticipant: mockStore(participants),
       forumPrincipal: mockStore(principals),
+      forumThreadMessage: { findFirst: async () => null },
     }),
     $disconnect: async () => {},
   };
@@ -164,6 +177,7 @@ async function req(app: any, method: string, path: string, token: string, body?:
   let r: any;
   if (method === 'PATCH') r = _supertest(app).patch(path);
   else if (method === 'DELETE') r = _supertest(app).delete(path);
+  else if (method === 'POST') r = _supertest(app).post(path);
   else throw new Error(`Unknown method: ${method}`);
   r = r.set('Authorization', `Bearer ${token}`);
   if (body !== undefined) r = r.send(body);
@@ -248,10 +262,10 @@ void describe('Participant nested-mutation guards (visibility + thread binding)'
     assert.equal(participants.get(FOREIGN_PARTICIPANT_ID).leftAt, null);
   });
 
-  await it('open thread: PATCH and DELETE keep working (no regression)', async () => {
+  await it('open thread: creator PATCH/DELETE keep working (no regression)', async () => {
     const pid = seedThreadParticipant();
     const app = await buildApp();
-    const token = await tokenFor('plain', SCOPES.plain);
+    const token = await tokenFor('creator', SCOPES.plain);
 
     const patched = await req(app, 'PATCH', `/api/threads/${THREAD_ID}/participants/${pid}`, token, { role: 'required_reviewer', status: 'invited' });
     assert.equal(patched.status, 200);
@@ -264,6 +278,114 @@ void describe('Participant nested-mutation guards (visibility + thread binding)'
     assert.ok(participants.get(pid).leftAt instanceof Date, 'soft-deleted via leftAt');
   });
 
+  await it('plain writer PATCH/DELETE on ANOTHER principal participant row → 403 (CTR-AUTHZ-004)', async () => {
+    const pid = seedThreadParticipant();
+    const app = await buildApp();
+    const token = await tokenFor('plain', SCOPES.plain);
+
+    const patched = await req(app, 'PATCH', `/api/threads/${THREAD_ID}/participants/${pid}`, token, { role: 'required_reviewer' });
+    assert.equal(patched.status, 403);
+    assert.equal(participants.get(pid).role, 'member', 'role unchanged');
+
+    const deleted = await req(app, 'DELETE', `/api/threads/${THREAD_ID}/participants/${pid}`, token);
+    assert.equal(deleted.status, 403);
+    assert.equal(participants.get(pid).leftAt, null, 'row untouched');
+  });
+
+  await it('self-service: own lastReadAt PATCH allowed; own row DELETE (leave) allowed', async () => {
+    const pid = seedParticipantFor('plain');
+    const app = await buildApp();
+    const token = await tokenFor('plain', SCOPES.plain);
+
+    const patched = await req(app, 'PATCH', `/api/threads/${THREAD_ID}/participants/${pid}`, token, { lastReadAt: new Date().toISOString() });
+    assert.equal(patched.status, 200);
+    assert.ok(participants.get(pid).lastReadAt instanceof Date, 'own lastReadAt updated');
+
+    const deleted = await req(app, 'DELETE', `/api/threads/${THREAD_ID}/participants/${pid}`, token);
+    assert.equal(deleted.status, 200, 'self-leave is self-service');
+  });
+
+  await it('governance scope PATCH on another principal row → 200 (CTR-AUTHZ-004 creator-or-moderate)', async () => {
+    const pid = seedThreadParticipant();
+    const app = await buildApp();
+    const token = await tokenFor('moderator', SCOPES.moderator);
+
+    const patched = await req(app, 'PATCH', `/api/threads/${THREAD_ID}/participants/${pid}`, token, { role: 'required_reviewer' });
+    assert.equal(patched.status, 200);
+    assert.equal(participants.get(pid).role, 'required_reviewer');
+  });
+});
+
+void describe('Participant authority matrix (CTR-AUTHZ-002/003/004 — boundary audit F1/F2 closure)', async () => {
+  beforeEach(() => {
+    resetDb();
+    seedPrincipals();
+    seedThreads('open');
+    prismaMod.setPrisma(createMockPrisma() as any);
+  });
+
+  await it('creator can add another known agent (201)', async () => {
+    const app = await buildApp();
+    const token = await tokenFor('creator', SCOPES.plain);
+    const res = await req(app, 'POST', `/api/threads/${THREAD_ID}/participants`, token, { agentId: IDS.member.agentId });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.participant.role, 'member');
+  });
+
+  await it('plain writer adding ANOTHER agent → 403', async () => {
+    const app = await buildApp();
+    const token = await tokenFor('plain', SCOPES.plain);
+    const res = await req(app, 'POST', `/api/threads/${THREAD_ID}/participants`, token, { agentId: IDS.member.agentId });
+    assert.equal(res.status, 403);
+  });
+
+  await it('self-service join as member → 201; self-elevation → 403', async () => {
+    const app = await buildApp();
+    const token = await tokenFor('plain', SCOPES.plain);
+    const joined = await req(app, 'POST', `/api/threads/${THREAD_ID}/participants`, token, { agentId: IDS.plain.agentId });
+    assert.equal(joined.status, 201);
+    assert.equal(joined.body.participant.role, 'member');
+
+    const elevated = await req(app, 'POST', `/api/threads/${THREAD_ID}/participants`, token, { agentId: IDS.plain.agentId, role: 'moderator' });
+    assert.equal(elevated.status, 403);
+  });
+
+  await it('UNKNOWN agent id → 400 (no ghost participant row — F2 poison closed)', async () => {
+    const app = await buildApp();
+    const token = await tokenFor('creator', SCOPES.plain);
+    const res = await req(app, 'POST', `/api/threads/${THREAD_ID}/participants`, token, { agentId: 'ghost-not-a-principal' });
+    assert.equal(res.status, 400);
+    assert.ok(Array.from(participants.values()).every(p => p.agentId !== 'ghost-not-a-principal'));
+  });
+
+  await it('role/status outside the closed enum → 400', async () => {
+    const app = await buildApp();
+    const token = await tokenFor('creator', SCOPES.plain);
+    const badRole = await req(app, 'POST', `/api/threads/${THREAD_ID}/participants`, token, { agentId: IDS.member.agentId, role: 'superadmin' });
+    assert.equal(badRole.status, 400);
+    const badStatus = await req(app, 'POST', `/api/threads/${THREAD_ID}/participants`, token, { agentId: IDS.member.agentId, status: 'banned' });
+    assert.equal(badStatus.status, 400);
+  });
+
+  await it('participant role moderator does NOT authorize waive; governance scope does (CTR-AUTHZ-003)', async () => {
+    const reviewerPid = seedParticipantFor('member', 'required_reviewer');
+    seedParticipantFor('plain', 'moderator'); // plain-scoped caller holds a 'moderator' row
+    const app = await buildApp();
+    const plainToken = await tokenFor('plain', SCOPES.plain);
+    const res = await req(app, 'POST', `/api/threads/${THREAD_ID}/participants/${IDS.member.pid}/waive-review`, plainToken, { reason: 'role-based attempt' });
+    assert.equal(res.status, 403, 'participant role string must not confer waive authority');
+
+    const modToken = await tokenFor('moderator', SCOPES.moderator);
+    const res2 = await req(app, 'POST', `/api/threads/${THREAD_ID}/participants/${IDS.member.pid}/waive-review`, modToken, { reason: 'scope-based waiver' });
+    assert.equal(res2.status, 200, 'verified forum.moderate scope authorizes waive (no participant row needed)');
+
+    // Waiver is idempotent once set: replaying as the (authorized) creator
+    // returns the existing waiver.
+    const creatorToken = await tokenFor('creator', SCOPES.plain);
+    const res3 = await req(app, 'POST', `/api/threads/${THREAD_ID}/participants/${IDS.member.pid}/waive-review`, creatorToken, { reason: 'creator replay' });
+    assert.equal(res3.status, 200, 'idempotent waiver replay');
+    assert.equal(res3.body.participant.reviewWaiverReason, 'scope-based waiver');
+  });
   await it('unknown participantId on an open thread → 404 (unchanged)', async () => {
     const app = await buildApp();
     const token = await tokenFor('plain', SCOPES.plain);

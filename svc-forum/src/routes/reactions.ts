@@ -27,7 +27,7 @@ async function requireVisibleParentThread(req: any) {
 reactionsRouter.get('/', requireReadScope(), asyncHandler(async (req, res) => {
   await requireVisibleParentThread(req);
   const messageId = p(req, 'messageId');
-  const summary = await db.getReactionsForMessage(messageId);
+  const summary = await db.getReactionsForMessage(p(req, 'threadId'), messageId);
   res.json({ reactions: summary });
 }));
 

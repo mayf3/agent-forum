@@ -351,11 +351,23 @@ void describe('Message Reactions', async () => {
       principalId: USER_B.id, principalName: USER_B.name, emoji: '🚀',
     });
 
-    const summary = await da.getReactionsForMessage(message.id);
+    const summary = await da.getReactionsForMessage(message.threadId, message.id);
     assert.equal(summary.length, 2);
     const thumbs = summary.find(s => s.emoji === '👍')!;
     assert.equal(thumbs.count, 2);
     assert.deepEqual(thumbs.principals.map(p => p.id).sort(), [USER_B.id, USER_C.id].sort());
+  });
+
+  await it('boundary F3: reactions of a message from ANOTHER thread → 404 (cross-thread binding)', async () => {
+    const { message } = await seedThreadAndMessage();
+    const otherThreadId = mockUuid();
+    await assert.rejects(
+      da.getReactionsForMessage(otherThreadId, message.id),
+      (err: any) => err.statusCode === 404,
+    );
+    // Correct thread binding still works
+    const summary = await da.getReactionsForMessage(message.threadId, message.id);
+    assert.ok(Array.isArray(summary));
   });
 
   await it('AC#2 message list includes reactions summary', async () => {

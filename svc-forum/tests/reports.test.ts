@@ -296,6 +296,22 @@ void describe('Report Entry (Moderation Queue)', async () => {
     );
   });
 
+  // ── boundary F4: hidden target reads as nonexistent (no oracle) ──
+  await it('boundary F4: reporting a HIDDEN thread → 404 (indistinguishable)', async () => {
+    const { thread } = await seedTargets();
+    threads.get(thread.id)!.status = 'hidden';
+    await assert.rejects(
+      da.createReport({
+        targetType: 'thread',
+        targetId: thread.id,
+        reporterId: USER_B.id,
+        reporterName: USER_B.name,
+        reason: 'spam',
+      }),
+      (err: any) => err.statusCode === 404,
+    );
+  });
+
   // ── AC#3: same reporter on same target counts once ──
   await it('AC#3 duplicate report from same reporter returns 409 ALREADY_REPORTED', async () => {
     const { message } = await seedTargets();

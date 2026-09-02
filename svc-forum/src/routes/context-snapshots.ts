@@ -22,6 +22,10 @@ snapshotsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
   assertOrdinaryReadVisibility(thread, req.user?.scopes);
+  if (thread.status === 'deleted') {
+    // deleted is terminal — tombstone child surfaces stay closed (CTR-LIFE-005)
+    throw new HttpError(400, 'Cannot append to a deleted thread');
+  }
 
   const {
     snapshotType, sourceType, sourceRef, title,

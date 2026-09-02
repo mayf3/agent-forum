@@ -8,6 +8,7 @@
 import { Router } from 'express';
 import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
+import { parsePagination } from '../utils/pagination.js';
 import { authRequired } from '../middleware/auth.js';
 import { requireReadScope, requireWriteScope } from '../middleware/scope-guard.js';
 import {
@@ -42,12 +43,13 @@ notificationsRouter.get('/', requireReadScope(), asyncHandler(async (req, res) =
     throw new HttpError(400, 'unread must be "true" or "false"');
   }
 
+  const pagination = parsePagination(page, limit);
   const result = await findNotificationsForPrincipal(user.id, {
     reason: type as any,
     unreadOnly: unread === 'true',
     threadId: threadId || undefined,
-    page: page ? parseInt(page, 10) : 1,
-    limit: limit ? parseInt(limit, 10) : 20,
+    page: pagination.page,
+    limit: pagination.limit,
   });
 
   res.json(result);

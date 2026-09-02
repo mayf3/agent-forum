@@ -110,8 +110,18 @@ export async function removeReaction(input: {
   return { removed: true, emoji };
 }
 
-/** Reaction summary for one message (AC#2). */
-export async function getReactionsForMessage(messageId: string) {
+/**
+ * Reaction summary for one message (AC#2). The messageId MUST belong to the
+ * route thread and the message must be visible (not soft-deleted) — otherwise
+ * reactions of hidden/deleted threads could be read through a cross-thread
+ * route binding (CTR-GOV-HIDE nested-read matrix).
+ */
+export async function getReactionsForMessage(threadId: string, messageId: string) {
+  const message = await prisma.forumThreadMessage.findFirst({
+    where: { id: messageId, threadId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!message) throw new HttpError(404, 'Message not found');
   const rows = await prisma.forumReaction.findMany({
     where: { messageId },
     orderBy: { createdAt: 'asc' },

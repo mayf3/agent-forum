@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
+import { parsePagination } from '../utils/pagination.js';
 import { authRequired } from '../middleware/auth.js';
 import { requireGovernanceScopes } from '../middleware/scope-guard.js';
 import { findAuditEvents, AUDIT_EVENT_TYPES, AUDIT_TARGET_TYPES } from '../lib/data-access/audit-store.js';
@@ -68,13 +69,14 @@ adminRouter.get('/audit-logs', asyncHandler(async (req, res) => {
     throw new HttpError(400, `targetType must be one of: ${AUDIT_TARGET_TYPES.join(', ')}`);
   }
 
+  const pagination = parsePagination(page, limit);
   const result = await findAuditEvents({
     eventType: eventType || undefined,
     targetType: targetType || undefined,
     targetId: targetId || undefined,
     actorAgentId: actorAgentId || undefined,
-    page: page ? parseInt(page, 10) : 1,
-    limit: limit ? parseInt(limit, 10) : 20,
+    page: pagination.page,
+    limit: pagination.limit,
   });
 
   res.json(result);
