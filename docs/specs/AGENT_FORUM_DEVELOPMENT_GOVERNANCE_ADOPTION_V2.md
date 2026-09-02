@@ -1,6 +1,6 @@
 ---
 spec_id: AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2
-status: proposed
+status: accepted
 spec_kind: invariant
 authority_level: governing_spec
 implementation_authority: none
@@ -12,7 +12,8 @@ external_authorities:
     authority_id: AGENT_DEVELOPMENT_GOVERNANCE_V1
     revision: 902842735a69797b54016eeaa88d2f949f5879a9
     relation: constrained_by
-supersedes: []
+supersedes:
+  - AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1
 superseded_by: null
 owners:
   - mayf3
@@ -31,9 +32,9 @@ GOAL = use independent Authority, Plan, and Assurance routing for future work
 SUCCESS = exact vendored bytes + local review + authorized acceptance + merge
 ```
 
-This proposed successor does not activate Governance V1 by itself. The accepted
-V1 adoption remains active until an independently reviewed, owner-accepted,
-atomically closed successor is merged into `main`.
+This owner-accepted successor candidate does not activate Governance V1 by
+itself. The V1 adoption remains active on `main` until this exact acceptance
+Head is independently rechecked and merged.
 
 ## 2. Scope and non-goals
 
@@ -53,7 +54,7 @@ atomically closed successor is merged into `main`.
 - implementation of `AGENT_OPERATIONAL_LAYER_V1`;
 - bulk rewriting historical tasks, Specs, reviews, or evidence;
 - GitHub App, Broker, WORM, branch protection, or semantic CI construction;
-- acceptance, Ready-for-review transition, merge, or production activation.
+- Ready-for-review transition, merge, or production activation.
 
 ## 3. Authority and dependencies
 
@@ -72,10 +73,14 @@ The upstream distribution is a constrained governance dependency, not Agent
 Forum Product Authority. Local precedence and actors remain defined by
 `.agents/local/README.md`.
 
-`AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` is the current accepted
-adoption. If V2 is later accepted, the acceptance change must atomically set V2
-to `accepted`, declare V1 in `supersedes`, and set V1 to `superseded` with
+`AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` was the active accepted
+adoption in the independently reviewed proposed Head. This acceptance commit
+atomically sets V2 to `accepted`, declares V1 in `supersedes`, and sets V1 to
+`superseded` with
 `superseded_by: AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2`.
+
+V1 remains the active repository authority on `main` until this exact
+acceptance Head passes independent final-head recheck and is merged.
 
 ## 4. Current State
 
@@ -231,9 +236,12 @@ to `accepted`, declare V1 in `supersedes`, and set V1 to `superseded` with
 ### DEC-ADOPT2-004 — Separate preparation from acceptance
 
 - Decision owner: `mayf3`
-- Decision: this candidate remains proposed with null acceptance metadata.
+- Decision: preparation remained proposed with null acceptance metadata; after
+  independent review of exact Head `c6dbc86cec0b20e254fe1d895232f3f12f626fe3` and explicit Owner
+  authorization, this separate acceptance commit records local acceptance.
 - Rejected alternative: activate v1.0.0 merely because upstream released it.
-- Reason: local independent review and owner acceptance remain mandatory.
+- Reason: preparation, independent review, Owner acceptance, final-head recheck,
+  and merge remain separate attributable acts.
 
 ## 9. Contracts
 
@@ -244,16 +252,19 @@ The repository MUST vendor every path in the v1.0.0 manifest from source commit
 source commit, version `1.0.0`, distribution `development-governance-v0`,
 manifest digest, and per-file digests and sizes.
 
-### CTR-ADOPT2-002 — Truthful proposed adoption
+### CTR-ADOPT2-002 — Truthful staged adoption
 
 Preparation MUST set `adoption.status` to `proposed` and MUST set `accepted_by`
-and `accepted_at` to null. Preparation MUST NOT claim that V2 is active or that
-V1 is superseded.
+and `accepted_at` to null. Authorized acceptance MUST set `adoption.status` to
+`accepted` with attributable, non-null acceptance metadata only after exact-Head
+independent review. The accepted candidate MUST NOT be treated as active
+repository authority until final-head recheck and merge.
 
-### CTR-ADOPT2-003 — Atomic future supersession
+### CTR-ADOPT2-003 — Atomic supersession
 
-If authorized acceptance occurs, V2 acceptance and the V1/V2 whole-authority
-supersession backlinks MUST be changed atomically and independently rechecked.
+Authorized acceptance MUST atomically change V2 acceptance and both V1/V2
+whole-authority supersession backlinks. The resulting exact Head MUST be
+independently rechecked before merge.
 
 ### CTR-ADOPT2-004 — Local authority preservation
 
@@ -293,10 +304,13 @@ bytes return to one exact prior version together.
 
 - Contracts: `CTR-ADOPT2-002`, `CTR-ADOPT2-003`
 - Method: inspect lock, Spec lifecycle, old authority, and transition validation
-- Environment: Draft PR before owner acceptance
-- Required evidence: exact Base/Head, lock, Spec records, independent review
-- Expected result: V2 remains proposed, V1 remains accepted, null acceptance data
-- Failure condition: preparation claims acceptance or mutates V1 lifecycle
+- Environment: Draft PR across the proposed Head and owner-accepted successor Head
+- Required evidence: exact Base/Head, lock, Spec records, independent review, and
+  explicit Owner authorization
+- Expected result: proposed metadata is null at `c6dbc86cec0b20e254fe1d895232f3f12f626fe3`; accepted
+  metadata and closed V1/V2 backlinks appear only in the acceptance commit
+- Failure condition: preparation fabricates acceptance, an unauthorized actor
+  accepts, backlinks are partial, or semantic content changes without review
 
 ### ACC-ADOPT2-003 — Local authority is byte-preserved
 
@@ -373,13 +387,33 @@ ACCEPTED_ROLLBACK = revert the complete adoption update commit
 ## 13. Open questions
 
 ```text
-OPEN_OWNER_DECISIONS = NONE FOR PREPARATION
+OPEN_OWNER_DECISIONS = NONE
 NORMATIVE_TBD = NONE
 UNRESOLVED_AUTHORITY_CONFLICT = NONE
 PARTIAL_SUPERSESSION = NONE
-READY_FOR_INDEPENDENT_REVIEW = YES
-READY_TO_MARK_ACCEPTED = NO
+OWNER_ACCEPTANCE = RECORDED
+ACCEPTANCE_ACTOR = mayf3
+ACCEPTANCE_REVIEWER = openai-chatgpt:gpt-5.6-pro/AF-GOVERNANCE-ADOPTION-PR17-C6DBC86-R1
+ACCEPTANCE_REVIEWED_HEAD = c6dbc86cec0b20e254fe1d895232f3f12f626fe3
+READY_FOR_FINAL_HEAD_RECHECK = YES
+READY_TO_MERGE = NO
 ```
 
-Independent review of the exact candidate and authorized acceptance by `mayf3`
-are still required. This execution Agent does not perform either action.
+Owner acceptance by `mayf3` is recorded after independent review of
+`c6dbc86cec0b20e254fe1d895232f3f12f626fe3`. This exact acceptance Head must now receive an independent
+final-head recheck before the Draft PR can be marked Ready or merged.
+
+## 14. Owner acceptance record
+
+```text
+ACCEPTED_BY = mayf3
+ACCEPTED_AT = 2026-09-02T12:59:46Z
+REVIEWER_ID = openai-chatgpt:gpt-5.6-pro/AF-GOVERNANCE-ADOPTION-PR17-C6DBC86-R1
+REVIEWED_PROPOSED_HEAD = c6dbc86cec0b20e254fe1d895232f3f12f626fe3
+REVIEW_RESULT = ACCEPT
+BLOCKERS = 0
+HIGH = 0
+ACCEPTANCE_DELTA = lifecycle metadata + V1/V2 backlinks + lock + index only
+FINAL_HEAD_RECHECK_REQUIRED = YES
+MERGE_PERFORMED = NO
+```
