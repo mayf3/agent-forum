@@ -12,12 +12,14 @@ OWNER =
 mayf3
 
 DISPOSITION =
-proposed
+adopted (2026-09-03, atomic with AGENT_FORUM_GOVERNANCE_AMENDMENT_V1
+acceptance; independent 论坛 审计 PASS binding at reviewed head 6f811e3,
+final accepted head d2635ed, SEMANTIC_DELTA_AFTER_REVIEW = NONE)
 
 AMENDMENT_STATUS =
-PROPOSED / NOT_ACCEPTED
-（实施 Agent 无权自行标记 accepted；本 amendment 被独立接受前，
- notification storage invariant 视为未变更，见 NO_CLAIM_BEFORE_ACCEPTANCE）
+ACCEPTED / ADOPTED
+（本 amendment 与 AGENT_FORUM_GOVERNANCE_AMENDMENT_V1 §9 Acceptance Record
+同事务落章；verifier 断言更新即生效断言，见 VERIFIER_BINDING）
 
 PROPOSED_AT =
 2026-08-31
