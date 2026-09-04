@@ -7,11 +7,11 @@
   "distribution_manifest_sha256": "c1fa620da4a16e4073d617e49eb5080487f2a117e3bab6502fd223afee0f06e0",
   "adoption": {
     "mode": "vendored",
-    "status": "proposed",
+    "status": "accepted",
     "prepared_by": "openai-chatgpt:gpt-5.6-pro",
     "prepared_at": "2026-09-01T23:40:26Z",
-    "accepted_by": null,
-    "accepted_at": null
+    "accepted_by": "mayf3",
+    "accepted_at": "2026-09-04T14:32:44Z"
   },
   "files": [
     {
