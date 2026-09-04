@@ -445,7 +445,6 @@ WHERE p.id=${sqlLiteral(sigkill.fixture.principalId)}::uuid
 
   console.log('PREEXISTING_PARENT_PRESERVATION=PASS');
   console.log('CLEANUP_IDEMPOTENT_FOR_OWNED_FIXTURES=PASS');
-  console.log('SUBSCRIPTION_VERIFIER_CLEANUP_FAULT_TESTS=PASS');
 } finally {
   harnessCleanupStarted = true;
   for (const child of activeChildren) {
@@ -478,3 +477,4 @@ assert(psql(`SELECT count(*) FROM public.forum_principals WHERE id=${sqlLiteral(
 assert(psql(`SELECT count(*) FROM public.forum_threads WHERE id=${sqlLiteral(sentinelThreadId)}::uuid OR title=${sqlLiteral(harnessOwnershipMarker)};`, true) === '0', 'harness sentinel Thread remained');
 console.log('HARNESS_FINALLY_REACHED=PASS');
 console.log('HARNESS_OWNED_SENTINEL_CLEANUP=PASS');
+console.log('SUBSCRIPTION_VERIFIER_CLEANUP_FAULT_TESTS=PASS');
