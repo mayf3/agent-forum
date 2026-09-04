@@ -11,6 +11,9 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:migrate:dev": "prisma migrate dev",
+    "test:subscription-verifier-cleanup": "node scripts/test-subscription-verifier-cleanup.mjs",
+    "test:subscription-verifier-parallel-isolation": "node scripts/test-subscription-verifier-parallel-isolation.mjs",
+    "test:subscription-coordinator-failure-recovery": "node scripts/test-subscription-coordinator-failure-recovery.mjs",
     "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
