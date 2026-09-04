@@ -44,6 +44,14 @@ function moduleSpecifiers(source) {
     .map((match) => match[1]);
 }
 
+function exactLogOffset(source, marker) {
+  const statement = `console.log('${marker}');`;
+  const offsets = [...source.matchAll(new RegExp(statement.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))]
+    .map((match) => match.index);
+  assert(offsets.length === 1, `${marker} must be emitted by exactly one literal console.log statement`);
+  return offsets[0];
+}
+
 function walkFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
@@ -100,9 +108,25 @@ try {
   // The verifier belongs to the PR #15 integration context and is absent from
   // this isolated hardening-only branch. Its required edge is still checked.
 }
-assert(sources.coordinator.includes('GLOBAL_ZERO_ASSERTION_OWNER=EXTERNAL_COORDINATOR'), 'coordinator ownership marker is missing');
+exactLogOffset(sources.coordinator, 'GLOBAL_ZERO_ASSERTION_OWNER=EXTERNAL_COORDINATOR');
 
-// Property 3: test controls and harness identities stay hidden from production
+// Property 3: each entrypoint retains one literal overall PASS, and that claim
+// remains after the layer's final recovery/terminal-assertion marker. Literal
+// statements prevent comments or diagnostic strings from satisfying the
+// contract accidentally.
+const terminalMarkers = {
+  cleanup: ['HARNESS_OWNED_SENTINEL_CLEANUP=PASS', 'SUBSCRIPTION_VERIFIER_CLEANUP_FAULT_TESTS=PASS'],
+  coordinator: ['SUCCESS_LOG_AFTER_FINAL_RECOVERY=YES', 'SUBSCRIPTION_VERIFIER_PARALLEL_ISOLATION_TESTS=PASS'],
+  faultSuite: ['FAULT_SUITE_SESSION_FINAL_ASSERTION=PASS', 'SUBSCRIPTION_COORDINATOR_FAILURE_RECOVERY_TESTS=PASS'],
+};
+for (const [layer, [recoveryMarker, overallMarker]] of Object.entries(terminalMarkers)) {
+  assert(
+    exactLogOffset(sources[layer], recoveryMarker) < exactLogOffset(sources[layer], overallMarker),
+    `${files[layer]} emitted ${overallMarker} before ${recoveryMarker}`,
+  );
+}
+
+// Property 4: test controls and harness identities stay hidden from production
 // runtime/schema code. This rejects a dependency from product code back into
 // test-only orchestration without prescribing runtime implementation details.
 const privateTokens = [
@@ -125,7 +149,7 @@ for (const directoryName of ['src', 'prisma']) {
   }
 }
 
-// Property 4: package.json exposes exactly the three accepted hardening
+// Property 5: package.json exposes exactly the three accepted hardening
 // commands and keeps this architectural check as an internal station test.
 const packageJson = JSON.parse(readFileSync(join(packageDirectory, 'package.json'), 'utf8'));
 for (const [name, command] of expectedCommands) {
