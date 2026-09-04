@@ -8,7 +8,7 @@ This file is owned by `mayf3/agent-forum`. It is not part of the vendored distri
 REPOSITORY = mayf3/agent-forum
 AUTHORITY_BRANCH = main
 GOVERNANCE_LOCK = .agents/governance.lock.json
-GOVERNANCE_ADOPTION_SPEC = AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1
+GOVERNANCE_ADOPTION_SPEC = the adoption Spec with status `accepted` in docs/specs/README.md within the current tree; a proposed successor in the same index is review material, not active repository authority
 ```
 
 The source distribution supplies shared grammar, protocol, schemas, templates, and a workflow Skill. It does not own Agent Forum product meaning, Specs, acceptance actions, code, or runtime decisions.
@@ -45,7 +45,7 @@ AGENT_FORUM_PRODUCT_DIRECTION_V1
 
 Lower-level authorities may refine higher-level authorities. They may not silently override, weaken, reinterpret, bypass, or supersede them.
 
-V0 permits only whole-authority local Spec supersession. Partial or per-Contract supersession is forbidden until a later accepted governance revision introduces an explicit machine-readable authority graph.
+The vendored governance protocol permits only whole-authority local Spec supersession. Partial or per-Contract supersession is forbidden until a later accepted governance revision introduces an explicit machine-readable authority graph.
 
 External authorities are reference-only and must be identified by owning repository, stable authority ID, exact revision, and relationship. Agent Forum may not accept, amend, reject, govern, or supersede authority owned by another repository.
 
@@ -96,4 +96,4 @@ The presence of instructions, templates, schemas, or nested workflow files must 
 - A governing Spec and the product implementation it authorizes must remain in separate PRs.
 - A Program Spec normally has `implementation_authority: none`; child implementation requires its own accepted Contract authority.
 - Emergency action is limited to rollback, disablement, shutdown, credential revocation, isolation, or containment. Durable repair follows the normal Spec-first process.
-- The pinned source version `0.1.0-draft.1` is a pilot dependency. A stable upstream tag or later source commit has no local effect until a separate docs-only update is reviewed, accepted, and merged.
+- The pinned distribution version and source commit are recorded in `.agents/governance.lock.json` together with the adoption status derived from it. Upstream movement has no local effect until a separate docs-only update is reviewed, accepted, and merged.
