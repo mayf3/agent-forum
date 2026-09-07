@@ -10,7 +10,7 @@ governed_by: []
 external_authorities:
   - repository: mayf3/agent-development-governance
     authority_id: AGENT_DEVELOPMENT_GOVERNANCE_V1
-    revision: 902842735a69797b54016eeaa88d2f949f5879a9
+    revision: b69e8dbadc68f2323a5117e7c22b147ae3f5f175
     relation: constrained_by
 supersedes: []
 superseded_by: null
@@ -22,7 +22,7 @@ owners:
 
 ## 1. Goal
 
-Adopt the exact stable Agent Development Governance v1.0.0 distribution in
+Adopt the exact stable Agent Development Governance v1.0.2 distribution in
 Agent Forum while preserving this repository's ownership of Product Direction,
 Architecture, governing Specs, acceptance, code, runtime, and operations.
 
@@ -39,8 +39,8 @@ atomically closed successor is merged into `main`.
 
 ### In scope
 
-- vendor the 25 manifest-governed paths from upstream v1.0.0;
-- pin source commit `902842735a69797b54016eeaa88d2f949f5879a9`;
+- vendor the 25 manifest-governed paths from upstream v1.0.2;
+- pin source commit `b69e8dbadc68f2323a5117e7c22b147ae3f5f175`;
 - preserve distribution ID `development-governance-v0`;
 - prepare `adoption.status: proposed` with null acceptance metadata;
 - introduce Governance V1's independent Authority, Plan, and Assurance axes;
@@ -59,11 +59,11 @@ atomically closed successor is merged into `main`.
 
 ```text
 SOURCE_REPOSITORY = mayf3/agent-development-governance
-SOURCE_TAG = v1.0.0
+SOURCE_TAG = v1.0.2
 SOURCE_TAG_TYPE = annotated
-SOURCE_COMMIT = 902842735a69797b54016eeaa88d2f949f5879a9
+SOURCE_COMMIT = b69e8dbadc68f2323a5117e7c22b147ae3f5f175
 DISTRIBUTION = development-governance-v0
-DISTRIBUTION_VERSION = 1.0.0
+DISTRIBUTION_VERSION = 1.0.2
 LOCAL_ACCEPTANCE_ACTOR = mayf3
 IMPLEMENTATION_AUTHORITY = none
 ```
@@ -82,9 +82,9 @@ to `accepted`, declare V1 in `supersedes`, and set V1 to `superseded` with
 ### STATE-ADOPT2-001 — Current local adoption
 
 - Subject: Agent Forum governance adoption
-- As of commit: `e0f220f9bd4e72ece6697d2c8b4de15f614fd8d5`
+- As of commit: `b9f11af1ec44dd1f5c623c6e151b9a2bca6b425f`
 - Environment: `mayf3/agent-forum` authority branch `main`
-- Observed at: `2026-09-01T23:40:26Z`
+- Observed at: `2026-09-07T23:42:57Z`
 - Projection: V1 remains accepted and pins `0.1.0-draft.1` at
   `46f78c3f00d768d99a4c8c2da975b124bce042f9`.
 - Basis: `OBS-ADOPT2-001`
@@ -92,59 +92,97 @@ to `accepted`, declare V1 in `supersedes`, and set V1 to `superseded` with
 ### STATE-ADOPT2-002 — Stable upstream candidate
 
 - Subject: upstream governance distribution
-- As of artifact: annotated tag `v1.0.0`
+- As of artifact: annotated tag `v1.0.2`
 - Environment: `mayf3/agent-development-governance`
-- Observed at: `2026-09-01T23:40:26Z`
+- Observed at: `2026-09-07T23:42:57Z`
 - Projection: the tag peels to source commit
-  `902842735a69797b54016eeaa88d2f949f5879a9`; its manifest declares
-  version `1.0.0`, distribution `development-governance-v0`, and 25 files.
+  `b69e8dbadc68f2323a5117e7c22b147ae3f5f175`; its manifest declares
+  version `1.0.2`, distribution `development-governance-v0`, and 25 files.
 - Basis: `OBS-ADOPT2-002`, `OBS-ADOPT2-003`
+
+### STATE-ADOPT2-003 — Retargeted proposed candidate
+
+- Subject: this adoption candidate (PR #17)
+- As of commit: the proposed candidate derived from
+  `b9f11af1ec44dd1f5c623c6e151b9a2bca6b425f` after the retarget commits
+  `f9b8b67216c8287ecb26f2f424b5e9bbf08e98e7` (withdrawal) and
+  `ed9ea4875f6c422099b3291ddf4082f3a52b5222` (re-vendor)
+- Environment: `mayf3/agent-forum` adoption branch
+  `agent/adopt-development-governance-v1.0.0`
+- Observed at: `2026-09-07T23:42:57Z`
+- Projection: the unmerged v1.0.0 lifecycle acceptance (`280d6bb`) was
+  withdrawn history-preservingly; the candidate is re-vendored from v1.0.2
+  and proposes `adoption.status: proposed` with null acceptance metadata.
+- Basis: `OBS-ADOPT2-005`
 
 ## 5. Observations
 
 ### OBS-ADOPT2-001 — Existing adoption is exact and locally accepted
 
-- Subject: `.agents/governance.lock.json` before this proposal
-- Source revision: Agent Forum `e0f220f9bd4e72ece6697d2c8b4de15f614fd8d5`
+- Subject: `.agents/governance.lock.json` on the authority branch
+- Source revision: Agent Forum `b9f11af1ec44dd1f5c623c6e151b9a2bca6b425f`
 - Environment: GitHub `main`
-- Observed at: `2026-09-01T23:40:26Z`
+- Observed at: `2026-09-07T23:42:57Z`
 - Method: inspect the lock, V1 adoption Spec, and local authority map
 - Result: adoption V1 is accepted at version `0.1.0-draft.1`; upstream movement
   has no effect without another local review and acceptance.
 - Provenance: repository files at the stated commit
 
-### OBS-ADOPT2-002 — v1.0.0 is an annotated exact-release tag
+### OBS-ADOPT2-002 — v1.0.2 is an annotated exact-release tag
 
-- Subject: upstream `v1.0.0`
-- Source revision: tag object `bb98937d176890088da736fa4a45f48279f19d50`
+- Subject: upstream `v1.0.2`
+- Source revision: tag object `503dd8b092cf8673c6cbc0a82ed87a3e051423fc`
 - Environment: upstream Git repository
-- Observed at: `2026-09-01T23:40:26Z`
-- Method: inspect tag object type and peel the tag
+- Observed at: `2026-09-07T23:42:57Z`
+- Method: fetch the annotated tag, inspect tag object type, and peel the tag
 - Result: object type is `tag`; peeled commit is
-  `902842735a69797b54016eeaa88d2f949f5879a9`.
+  `b69e8dbadc68f2323a5117e7c22b147ae3f5f175`.
 - Provenance: upstream Git tag and commit objects
 
 ### OBS-ADOPT2-003 — The release manifest is exact
 
 - Subject: `distribution/manifest.json`
-- Source revision: `902842735a69797b54016eeaa88d2f949f5879a9`
+- Source revision: `b69e8dbadc68f2323a5117e7c22b147ae3f5f175`
 - Environment: upstream clean checkout
-- Observed at: `2026-09-01T23:40:26Z`
+- Observed at: `2026-09-07T23:42:57Z`
 - Method: run the upstream vendor source validation and manifest digest checks
-- Result: all 25 declared files match their exact SHA-256 and size.
+- Result: all 25 declared files match their exact SHA-256 and size; manifest
+  digest `21e8dd6fbf35147c183e575d27407e715113116950171d9dffc2f8c17b906e14`.
 - Provenance: upstream manifest and vendor validation output
 
 ### OBS-ADOPT2-004 — Local extensions remain repository-owned
 
 - Subject: Agent Forum local authority files
-- Source revision: candidate derived from
-  `e0f220f9bd4e72ece6697d2c8b4de15f614fd8d5`
-- Environment: isolated adoption write surface
-- Observed at: `2026-09-01T23:40:26Z`
+- Source revision: re-vendor commit
+  `ed9ea4875f6c422099b3291ddf4082f3a52b5222`
+- Environment: adoption write surface derived from
+  `b9f11af1ec44dd1f5c623c6e151b9a2bca6b425f`
+- Observed at: `2026-09-07T23:42:57Z`
 - Method: compare pre/post SHA-256 for `AGENTS.md`, `.agents/local/**`, Product
-  Direction, Core Invariants, and the accepted V1 adoption Spec
-- Result: all compared local files are byte-identical.
-- Provenance: local digest receipt generated during preparation
+  Direction, Core Invariants, and the accepted V1 adoption Spec; inspect the
+  vendor tool plan, which creates bootstrap templates only when missing
+- Result: all compared local files are byte-identical; the working-tree delta
+  of the re-vendor touches only `.agents/**` and the lock.
+- Provenance: vendor tool plan/apply output and git diff
+
+### OBS-ADOPT2-005 — The v1.0.0 acceptance was withdrawn and the candidate retargeted
+
+- Subject: this candidate's lifecycle history on
+  `agent/adopt-development-governance-v1.0.0`
+- Source revision: withdrawal commit
+  `f9b8b67216c8287ecb26f2f424b5e9bbf08e98e7`; re-vendor commit
+  `ed9ea4875f6c422099b3291ddf4082f3a52b5222`
+- Environment: `mayf3/agent-forum` adoption branch
+- Observed at: `2026-09-07T23:42:57Z`
+- Method: inspect the branch history and the withdrawal/vendor commit deltas
+- Result: the v1.0.0 lifecycle acceptance `280d6bb` (Owner grant comment
+  `5541956711`, reviewed ACCEPT) was withdrawn by exact inversion of its
+  lifecycle-only delta with no reset, force-push, or history rewrite; the
+  v1.0.0 -> v1.0.2 vendored byte delta is exactly 4 files
+  (`.agents/README.md`, `spec-frontmatter.schema.json`,
+  `GOVERNANCE_ADOPTION_SPEC_TEMPLATE.md`, `validate_spec_transition.py`);
+  21 of 25 vendored files are byte-identical.
+- Provenance: branch history and vendor tool plan/apply output
 
 ## 6. Claims and assumptions
 
@@ -177,7 +215,7 @@ to `accepted`, declare V1 in `supersedes`, and set V1 to `superseded` with
 - Target: `CLM-ADOPT2-001`
 - Relation: SUPPORTS
 - Bound coordinates: upstream
-  `902842735a69797b54016eeaa88d2f949f5879a9`
+  `b69e8dbadc68f2323a5117e7c22b147ae3f5f175`
 - Strength/sufficiency: sufficient for exact byte and revision identity
 - Limitations: does not establish local semantic acceptance
 - Provenance: tag object, manifest, vendor output, and governance verifier
@@ -187,7 +225,7 @@ to `accepted`, declare V1 in `supersedes`, and set V1 to `superseded` with
 - Source observations: `OBS-ADOPT2-001`, `OBS-ADOPT2-003`
 - Target: `CLM-ADOPT2-002`
 - Relation: SUPPORTS
-- Bound coordinates: old pin `46f78c3f...`, new pin `90284273...`
+- Bound coordinates: old pin `46f78c3f...`, new pin `b69e8dba...`
 - Strength/sufficiency: sufficient to show changed long-lived governance meaning
 - Limitations: does not itself authorize acceptance
 - Provenance: old/new protocol and manifest comparison
@@ -208,7 +246,7 @@ to `accepted`, declare V1 in `supersedes`, and set V1 to `superseded` with
 
 - Decision owner: `mayf3`
 - Decision: use exact source commit
-  `902842735a69797b54016eeaa88d2f949f5879a9`.
+  `b69e8dbadc68f2323a5117e7c22b147ae3f5f175`.
 - Rejected alternative: pin upstream `main`, a merge alias, or `latest`.
 - Reason: upstream movement must remain inert in this repository.
 
@@ -235,13 +273,25 @@ to `accepted`, declare V1 in `supersedes`, and set V1 to `superseded` with
 - Rejected alternative: activate v1.0.0 merely because upstream released it.
 - Reason: local independent review and owner acceptance remain mandatory.
 
+### DEC-ADOPT2-005 — Retarget the candidate from v1.0.0 to v1.0.2
+
+- Decision owner: `mayf3` (Owner goal directive UPSTREAM_TARGET_RESELECTION)
+- Decision: withdraw the unmerged v1.0.0 lifecycle acceptance
+  history-preservingly and re-vendor the exact v1.0.2 release instead.
+- Rejected alternatives: keep the v1.0.0 candidate
+  (`VALID_BUT_NOT_TO_BE_MERGED`); adopt v1.0.1 directly.
+- Reason: v1.0.2 is the published stable consumer-adoption target; it
+  contains the v1.0.1 transition-validator technical fix and closes the
+  v1.0.1 publication-provenance gap, so adopting v1.0.0 would knowingly pin
+  a defective validator.
+
 ## 9. Contracts
 
 ### CTR-ADOPT2-001 — Exact stable source identity
 
-The repository MUST vendor every path in the v1.0.0 manifest from source commit
-`902842735a69797b54016eeaa88d2f949f5879a9`. The lock MUST record repository,
-source commit, version `1.0.0`, distribution `development-governance-v0`,
+The repository MUST vendor every path in the v1.0.2 manifest from source commit
+`b69e8dbadc68f2323a5117e7c22b147ae3f5f175`. The lock MUST record repository,
+source commit, version `1.0.2`, distribution `development-governance-v0`,
 manifest digest, and per-file digests and sizes.
 
 ### CTR-ADOPT2-002 — Truthful proposed adoption
@@ -357,7 +407,7 @@ appending a new acceptance-record section to the normative body.
 
 - Contracts: `CTR-ADOPT2-006`, `CTR-ADOPT2-007`
 - Method: inspect diff, run repository tests, and compare product tree
-- Environment: Base `e0f220f9bd4e72ece6697d2c8b4de15f614fd8d5`
+- Environment: Base `b9f11af1ec44dd1f5c623c6e151b9a2bca6b425f`
   and exact candidate Head
 - Required evidence: changed paths, test result, product-code identity
 - Expected result: only shared governance and adoption metadata change
