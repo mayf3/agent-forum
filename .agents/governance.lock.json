@@ -7,11 +7,11 @@
   "distribution_manifest_sha256": "21e8dd6fbf35147c183e575d27407e715113116950171d9dffc2f8c17b906e14",
   "adoption": {
     "mode": "vendored",
-    "status": "proposed",
+    "status": "accepted",
     "prepared_by": "zcode:glm-5.3-flash",
     "prepared_at": "2026-09-07T23:41:42Z",
-    "accepted_by": null,
-    "accepted_at": null
+    "accepted_by": "mayf3",
+    "accepted_at": "2026-09-08T00:39:42Z"
   },
   "files": [
     {

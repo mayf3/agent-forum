@@ -1,6 +1,6 @@
 ---
 spec_id: AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V2
-status: proposed
+status: accepted
 spec_kind: invariant
 authority_level: governing_spec
 implementation_authority: none
@@ -12,7 +12,8 @@ external_authorities:
     authority_id: AGENT_DEVELOPMENT_GOVERNANCE_V1
     revision: b69e8dbadc68f2323a5117e7c22b147ae3f5f175
     relation: constrained_by
-supersedes: []
+supersedes:
+  - AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1
 superseded_by: null
 owners:
   - mayf3
