@@ -44,7 +44,16 @@ model ForumThread {
   visibilityState    String?              @map("visibility_state")
   currentRevision    Int?                 @map("current_revision")
   creatorPrincipal   ForumPrincipal?      @relation("ForumThreadCreatorPrincipal", fields: [creatorPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "forum_threads_creator_principal_fk")
-  currentRevisionRow ForumThreadRevision? @relation("ForumThreadCurrentRevision", fields: [id, currentRevision], references: [threadId, revision], onDelete: Restrict, onUpdate: Restrict, map: "forum_threads_current_revision_fk")
+
+  // NOTE: the DB-level composite FK forum_threads_current_revision_fk
+  // (id, current_revision) → forum_thread_revisions(thread_id, revision) from
+  // migration 20260901062000, plus trigger forum_guard_current_revision, are
+  // deliberately NOT modeled as a Prisma relation. Modeling it required
+  // `fields: [id, currentRevision]`, which makes Prisma mark the primary key
+  // `id` as read-only (DMMF isReadOnly=true) and silently omit it from INSERTs
+  // — the P2011 thread-create outage of 2026-09-09. The pointer stays a plain
+  // nullable Int; read the revision row through forumThreadRevision
+  // (threadId_revision unique) when needed.
 
   participants       ForumThreadParticipant[]
   messages           ForumThreadMessage[]
@@ -539,7 +548,6 @@ model ForumThreadRevision {
   thread              ForumThread     @relation("ForumThreadRevisions", fields: [threadId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   openedByPrincipal   ForumPrincipal  @relation("ForumThreadRevisionOpenedBy", fields: [openedByPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   resolvedByPrincipal ForumPrincipal? @relation("ForumThreadRevisionResolvedBy", fields: [resolvedByPrincipalId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  currentForThreads   ForumThread[]   @relation("ForumThreadCurrentRevision")
 
   @@unique([threadId, revision])
   @@map("forum_thread_revisions")
