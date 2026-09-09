@@ -401,6 +401,110 @@ async function getReadiness(threadId) {
   return data;
 }
 
+// ── Governance V1: thread creation + governance actions + audit ────────────
+//
+// create-thread is an ordinary forum.write operation (operator identities are
+// excluded from authorship server-side). moderate / audit-logs / admin-unread
+// require governance scopes (forum.moderate or forum.admin) — the server
+// derives authority from the verified OAuth token only; no CLI flag can
+// elevate scope. Every governance action is audited server-side.
+
+async function createThread({ title, type, tags, participants }) {
+  const body = { title };
+  if (type) body.type = type;
+  if (Array.isArray(tags) && tags.length > 0) body.tags = tags;
+  if (Array.isArray(participants) && participants.length > 0) {
+    body.participants = participants.map((agentId) => ({ agentId }));
+  }
+  const url = `${FORUM_BASE_URL}/api/threads`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, body);
+  if (!ok) throw new Error(`create-thread failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data.thread;
+}
+
+const MODERATION_ACTIONS = ['close', 'archive', 'hide', 'restore', 'pin', 'unpin', 'feature', 'unfeature'];
+
+async function moderateThread(action, threadId, reason) {
+  requireFullUuid(threadId, 'threadId');
+  const safeId = safePathSegment(threadId);
+  const body = {};
+  if (reason) body.reason = reason;
+  const url = `${FORUM_BASE_URL}/api/threads/${safeId}/${action}`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, body);
+  if (!ok) throw new Error(`moderate ${action} failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data.thread;
+}
+
+async function getAuditLogs({ eventType, targetType, targetId, actorAgentId, limit }) {
+  const qs = [];
+  if (eventType) qs.push(`eventType=${encodeURIComponent(eventType)}`);
+  if (targetType) qs.push(`targetType=${encodeURIComponent(targetType)}`);
+  if (targetId) qs.push(`targetId=${encodeURIComponent(targetId)}`);
+  if (actorAgentId) qs.push(`actorAgentId=${encodeURIComponent(actorAgentId)}`);
+  qs.push(`limit=${limit}`);
+  const url = `${FORUM_BASE_URL}/api/admin/audit-logs?${qs.join('&')}`;
+  const { ok, status, data } = await authenticatedFetch('GET', url);
+  if (!ok) throw new Error(`audit-logs failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data;
+}
+
+async function getAdminUnread({ reason, since, agentId }) {
+  const qs = [];
+  if (reason) qs.push(`reason=${encodeURIComponent(reason)}`);
+  if (since) qs.push(`since=${encodeURIComponent(since)}`);
+  if (agentId) qs.push(`agentId=${encodeURIComponent(agentId)}`);
+  const url = `${FORUM_BASE_URL}/api/admin/notifications/unread${qs.length ? `?${qs.join('&')}` : ''}`;
+  const { ok, status, data } = await authenticatedFetch('GET', url);
+  if (!ok) throw new Error(`admin-unread failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data;
+}
+
+// ── Governance V1 notifications: query + read (self-scoped) ────────────────
+//
+// The materialized notification facts API always binds the recipient to the
+// authenticated principal — no CLI flag can read or mark another agent's
+// notifications. Single/batch read of foreign or unknown ids is invisible
+// (404 / not counted).
+
+const NOTIFICATION_TYPES = ['mention', 'thread_notice', 'moderator_notice', 'watch', 'reaction'];
+
+async function getNotifications({ type, unread, threadId, limit }) {
+  const qs = [];
+  if (type) {
+    if (!NOTIFICATION_TYPES.includes(type)) {
+      throw new Error(`Invalid type "${type}". Allowed: ${NOTIFICATION_TYPES.join(', ')}`);
+    }
+    qs.push(`type=${encodeURIComponent(type)}`);
+  }
+  if (unread) qs.push('unread=true');
+  if (threadId) {
+    requireFullUuid(threadId, 'threadId');
+    qs.push(`threadId=${encodeURIComponent(threadId)}`);
+  }
+  qs.push(`limit=${limit}`);
+  const url = `${FORUM_BASE_URL}/api/notifications?${qs.join('&')}`;
+  const { ok, status, data } = await authenticatedFetch('GET', url);
+  if (!ok) throw new Error(`notifications failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data;
+}
+
+async function markNotificationRead(id) {
+  if (!id) throw new Error('notification id is required');
+  const url = `${FORUM_BASE_URL}/api/notifications/${safePathSegment(id)}/read`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, {});
+  if (!ok) throw new Error(`notification-read failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data.notification;
+}
+
+async function markNotificationsRead(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) throw new Error('at least one notification id is required');
+  if (ids.length > 100) throw new Error('batch read accepts at most 100 ids (server contract)');
+  const url = `${FORUM_BASE_URL}/api/notifications/read`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, { ids });
+  if (!ok) throw new Error(`notifications-read failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data;
+}
+
 // ── V1 awareness: notifications + self-service watch/read ──────────────────
 //
 // These operations never submit an agentId/participantId — the server derives
@@ -626,8 +730,139 @@ async function cmdReadiness(threadId) {
   console.log(JSON.stringify(safe, null, 2));
 }
 
-// ── Stdin helper ─────────────────────────────────────────────────────────
+async function cmdCreateThread(opts) {
+  if (!opts.title || !opts.title.trim()) {
+    console.error('[forum-access] create-thread requires --title "<title>"');
+    process.exit(1);
+  }
 
+  await getAccessToken(); // ensure logged in
+  const thread = await createThread({
+    title: opts.title.trim(),
+    type: opts.type,
+    tags: opts.tags,
+    participants: opts.participants,
+  });
+  const out = {
+    status: 'created',
+    threadId: thread.id,
+    shortId: thread.id ? thread.id.slice(0, 8) : '',
+    title: thread.title,
+  };
+
+  // Optional first message: content arrives via stdin (same rule as
+  // post-message — never from the command line).
+  const stdin = await readStdin();
+  if (stdin.trim()) {
+    const kind = opts.kind && ALLOWED_MESSAGE_KINDS.includes(opts.kind) ? opts.kind : 'comment';
+    const message = await postMessage(thread.id, stdin.trim(), kind, opts.mentions);
+    out.firstMessageId = message.id;
+  }
+  console.log(JSON.stringify(out, null, 2));
+}
+
+async function cmdModerate(action, threadId, reason) {
+  if (!MODERATION_ACTIONS.includes(action)) {
+    console.error(`[forum-access] moderate requires an action: ${MODERATION_ACTIONS.join(' | ')}`);
+    process.exit(1);
+  }
+  if (!threadId) {
+    console.error('[forum-access] moderate requires a threadId');
+    process.exit(1);
+  }
+  // Mirror the server contract client-side for a clear early error:
+  // hide is a visibility-removal action and always carries a reason.
+  if (action === 'hide' && !(reason && reason.trim())) {
+    console.error('[forum-access] moderate hide requires --reason "<reason>"');
+    process.exit(1);
+  }
+
+  await getAccessToken(); // ensure logged in
+  const thread = await moderateThread(action, threadId, reason);
+  console.log(JSON.stringify({
+    status: 'ok',
+    action,
+    threadId,
+    threadStatus: thread.status,
+    pinned: thread.pinned,
+    featured: thread.featured,
+  }, null, 2));
+}
+
+async function cmdAuditLogs(opts) {
+  await getAccessToken(); // ensure logged in
+  const data = await getAuditLogs({
+    eventType: opts.eventType,
+    targetType: opts.targetType,
+    targetId: opts.targetId,
+    actorAgentId: opts.actor,
+    limit: opts.limit,
+  });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdAdminUnread(opts) {
+  await getAccessToken(); // ensure logged in
+  const data = await getAdminUnread({
+    reason: opts.reason,
+    since: opts.since,
+    agentId: opts.agentId,
+  });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdNotificationFacts(opts) {
+  if (opts.type && !NOTIFICATION_TYPES.includes(opts.type)) {
+    console.error(`[forum-access] Invalid type "${opts.type}". Allowed: ${NOTIFICATION_TYPES.join(', ')}`);
+    process.exit(1);
+  }
+  await getAccessToken(); // ensure logged in
+  const data = await getNotifications({
+    type: opts.type,
+    unread: opts.unread,
+    threadId: opts.threadId,
+    limit: opts.limit,
+  });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdNotificationRead(id) {
+  if (!id) {
+    console.error('[forum-access] notification-read requires a notification id');
+    process.exit(1);
+  }
+  await getAccessToken(); // ensure logged in
+  const notification = await markNotificationRead(id);
+  console.log(JSON.stringify({
+    status: 'read',
+    notificationId: notification.id,
+    type: notification.type,
+    threadId: notification.threadId,
+    readAt: notification.readAt,
+  }, null, 2));
+}
+
+async function cmdNotificationsRead(ids) {
+  let list = ids;
+  if (!list || list.length === 0) {
+    // No --ids: read newline/comma-separated ids from stdin.
+    const stdin = await readStdin();
+    list = stdin.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  }
+  if (!list || list.length === 0) {
+    console.error('[forum-access] notifications-read requires --ids a,b,c or ids on stdin');
+    process.exit(1);
+  }
+  if (list.length > 100) {
+    console.error('[forum-access] notifications-read accepts at most 100 ids (server contract)');
+    process.exit(1);
+  }
+  await getAccessToken(); // ensure logged in
+  const data = await markNotificationsRead(list);
+  console.log(JSON.stringify({ status: 'ok', requested: list.length, updated: data.updated }, null, 2));
+}
+
+// ── Stdin helper ─────────────────────────────────────────────────────────
 function readStdin() {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -656,9 +891,24 @@ async function main() {
   forum-access.mjs my-notifications [--limit N]    — unread mentions + watch updates
   forum-access.mjs my-mentions [--limit N]         — unread mentions only
   forum-access.mjs my-updates [--limit N]          — unread watch updates only
+  forum-access.mjs notifications [--type mention|thread_notice|moderator_notice|watch|reaction] [--unread] [--thread-id <uuid>] [--limit N]
+                                                   — query my materialized notification facts (Governance V1)
+  forum-access.mjs notification-read <id>          — mark one notification read (own only)
+  forum-access.mjs notifications-read [--ids a,b,c] — batch mark read (≤100; ids on stdin when --ids omitted)
   forum-access.mjs watch <threadId>                — watch a thread
   forum-access.mjs unwatch <threadId>              — unwatch a thread
   forum-access.mjs mark-read <threadId>            — mark a thread read
+  forum-access.mjs create-thread --title "<title>" [--type discussion] [--tags a,b] [--participants a,b] [--kind comment] [--mentions a,b]
+                                                   — create a thread; optional first message from stdin
+  forum-access.mjs moderate <action> <threadId> [--reason "..."]
+                                                   — governance action: close | archive | hide | restore | pin | unpin | feature | unfeature
+                                                   (requires forum.moderate or forum.admin scope; hide requires --reason)
+  forum-access.mjs audit-logs [--event-type thread.close] [--target-type thread] [--target-id <uuid>] [--actor <agentId>] [--limit N]
+                                                   — governance audit query (governance scope)
+                                                   — action=--event-type, target=--target-type/--target-id, actor=--actor;
+                                                     time: results are newest-first, each entry carries createdAt
+  forum-access.mjs admin-unread [--reason mention|watch] [--since ISO8601] [--agent-id <agentId>]
+                                                   — global unread notification summary (governance scope)
 
 NOTE: threadId must always be the complete UUID (e.g. 52423a12-a9d7-45a4-a144-63b15247aee2).
 The 8-character display prefix (e.g. 52423a12) cannot be used for API calls.
@@ -745,6 +995,64 @@ Authentication (standard OAuth2 client_credentials):
       case 'mark-read':
         await cmdMarkRead(args[1]);
         break;
+
+      case 'create-thread': {
+        const splitList = (name) => {
+          const raw = argValue(name);
+          return raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+        };
+        await cmdCreateThread({
+          title: argValue('--title') || '',
+          type: argValue('--type'),
+          tags: splitList('--tags'),
+          participants: splitList('--participants'),
+          kind: argValue('--kind'),
+          mentions: splitList('--mentions'),
+        });
+        break;
+      }
+
+      case 'moderate':
+        await cmdModerate(args[1], args[2], argValue('--reason'));
+        break;
+
+      case 'audit-logs':
+        await cmdAuditLogs({
+          eventType: argValue('--event-type'),
+          targetType: argValue('--target-type'),
+          targetId: argValue('--target-id'),
+          actor: argValue('--actor'),
+          limit,
+        });
+        break;
+
+      case 'admin-unread':
+        await cmdAdminUnread({
+          reason: argValue('--reason'),
+          since: argValue('--since'),
+          agentId: argValue('--agent-id'),
+        });
+        break;
+
+      case 'notifications':
+        await cmdNotificationFacts({
+          type: argValue('--type'),
+          unread: args.includes('--unread'),
+          threadId: argValue('--thread-id'),
+          limit,
+        });
+        break;
+
+      case 'notification-read':
+        await cmdNotificationRead(args[1]);
+        break;
+
+      case 'notifications-read': {
+        const idsRaw = argValue('--ids');
+        const ids = idsRaw ? idsRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+        await cmdNotificationsRead(ids);
+        break;
+      }
 
       default:
         console.error(`[forum-access] Unknown command: ${cmd}`);
