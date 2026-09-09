@@ -847,3 +847,187 @@ describe('integration', () => {
     assert.ok(calls[0].url.includes('sort=latest'), calls[0].url);
   });
 });
+
+// ── Governance V1 CLI: create-thread / moderate / audit-logs / admin-unread ──
+
+describe('governance cli (static analysis)', () => {
+  it('moderation actions are exactly the contracted lifecycle + flag set', () => {
+    assert.ok(
+      SOURCE.includes("['close', 'archive', 'hide', 'restore', 'pin', 'unpin', 'feature', 'unfeature']"),
+      'MODERATION_ACTIONS must match CTR-GOV-STATE + CTR-GOV-PIN/FEATURE surface'
+    );
+  });
+
+  it('governance commands never call agent-task or workflow endpoints', () => {
+    assert.ok(!SOURCE.includes('agent-tasks'));
+    assert.ok(!SOURCE.includes('/api/workflow'));
+    assert.ok(!SOURCE.includes('DiscussionRun'));
+  });
+
+  it('moderate hide documents mandatory reason', () => {
+    assert.ok(SOURCE.includes("requires --reason"), 'hide reason requirement must be surfaced client-side');
+  });
+});
+
+describe('governance cli (parsing)', () => {
+  it('moderate without action fails before HTTP', async () => {
+    const r = await runScriptAsync(['moderate'], null, 59999);
+    assert.notEqual(r.status, 0);
+    assert.ok(r.stderr.includes('close'), 'stderr should list valid actions');
+  });
+
+  it('moderate with unknown action fails before HTTP', async () => {
+    const r = await runScriptAsync(['moderate', 'delete', VALID_UUID], null, 59999);
+    assert.notEqual(r.status, 0);
+    assert.ok(r.stderr.includes('close'), 'stderr should list valid actions');
+  });
+
+  it('moderate hide without --reason fails before HTTP', async () => {
+    const r = await runScriptAsync(['moderate', 'hide', VALID_UUID], null, 59999);
+    assert.notEqual(r.status, 0);
+    assert.ok(r.stderr.includes('--reason'), 'stderr must require --reason');
+  });
+
+  it('create-thread without --title fails before HTTP', async () => {
+    const r = await runScriptAsync(['create-thread'], null, 59999);
+    assert.notEqual(r.status, 0);
+    assert.ok(r.stderr.includes('--title'));
+  });
+});
+
+describe('governance cli (integration)', () => {
+  let mock;
+  let port;
+
+  before(async () => {
+    mock = await createMockServer((req, res, body) => {
+      if (req.url === '/api/threads' && req.method === 'POST') {
+        sendJson(res, 201, { thread: { id: VALID_UUID, title: 'Created Thread', status: 'open' } });
+        return true;
+      }
+      if (req.url === `/api/threads/${VALID_UUID}/close` && req.method === 'POST') {
+        sendJson(res, 200, { thread: { id: VALID_UUID, status: 'closed', pinned: false, featured: false } });
+        return true;
+      }
+      if (req.url === `/api/threads/${VALID_UUID}/hide` && req.method === 'POST') {
+        sendJson(res, 200, { thread: { id: VALID_UUID, status: 'hidden', pinned: false, featured: false } });
+        return true;
+      }
+      if (req.url === `/api/threads/${VALID_UUID}/pin` && req.method === 'POST') {
+        sendJson(res, 200, { thread: { id: VALID_UUID, status: 'open', pinned: true, featured: false } });
+        return true;
+      }
+      if (req.url.startsWith('/api/admin/audit-logs') && req.method === 'GET') {
+        sendJson(res, 200, { items: [{ eventType: 'thread.close', targetId: VALID_UUID }], total: 1 });
+        return true;
+      }
+      if (req.url.startsWith('/api/admin/notifications/unread') && req.method === 'GET') {
+        sendJson(res, 200, { agents: [{ agentId: 'test-agent', unreadCount: 2 }] });
+        return true;
+      }
+      if (req.url === `/api/threads/${VALID_UUID}/restore` && req.method === 'POST') {
+        sendJson(res, 403, { error: 'insufficient_scope' });
+        return true;
+      }
+      return false;
+    });
+    port = mock.port;
+  });
+
+  after(() => {
+    if (mock) mock.server.close();
+  });
+
+  it('create-thread posts title, tags, participants and optional stdin first message', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(
+      ['create-thread', '--title', 'Created Thread', '--tags', 'a,b', '--participants', 'other-agent', '--kind', 'proposal'],
+      'first message body',
+      port
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.status, 'created');
+    assert.equal(o.threadId, VALID_UUID);
+    assert.ok(o.firstMessageId, 'first message should be posted');
+
+    const createCalls = mock.requestLog.filter(e => e.method === 'POST' && e.url === '/api/threads');
+    assert.equal(createCalls.length, 1);
+    const createBody = JSON.parse(createCalls[0].body);
+    assert.equal(createBody.title, 'Created Thread');
+    assert.deepEqual(createBody.tags, ['a', 'b']);
+    assert.deepEqual(createBody.participants, [{ agentId: 'other-agent' }]);
+    assert.ok(!createCalls[0].body.includes('authorId'), 'no author identity in create body');
+  });
+
+  it('moderate close sends POST to the dedicated governance endpoint', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['moderate', 'close', VALID_UUID], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.method === 'POST' && e.url.endsWith('/close'));
+    assert.equal(calls.length, 1);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.status, 'ok');
+    assert.equal(o.action, 'close');
+    assert.equal(o.threadStatus, 'closed');
+  });
+
+  it('moderate hide sends the reason in the request body', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['moderate', 'hide', VALID_UUID, '--reason', 'spam'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.method === 'POST' && e.url.endsWith('/hide'));
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].body.includes('"reason":"spam"'), 'reason must be sent');
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.threadStatus, 'hidden');
+  });
+
+  it('moderate pin hits the flag endpoint and reports flags', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['moderate', 'pin', VALID_UUID], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.method === 'POST' && e.url.endsWith('/pin'));
+    assert.equal(calls.length, 1);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.pinned, true);
+  });
+
+  it('moderate surfaces governance denial without leaking the token', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['moderate', 'restore', VALID_UUID], null, port);
+    assert.notEqual(r.status, 0);
+    assert.ok(r.stderr.includes('403'), 'stderr should carry the HTTP status');
+    const combined = r.stdout + r.stderr;
+    assert.ok(!combined.includes('fakesignature'), 'access token must never appear in output');
+  });
+
+  it('audit-logs forwards filters and returns entries', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(
+      ['audit-logs', '--event-type', 'thread.close', '--target-id', VALID_UUID, '--actor', 'test-agent', '--limit', '5'],
+      null,
+      port
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.url.startsWith('/api/admin/audit-logs'));
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.includes('eventType=thread.close'), calls[0].url);
+    assert.ok(calls[0].url.includes(`targetId=${VALID_UUID}`), calls[0].url);
+    assert.ok(calls[0].url.includes('actorAgentId=test-agent'), calls[0].url);
+    assert.ok(calls[0].url.includes('limit=5'), calls[0].url);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.total, 1);
+  });
+
+  it('admin-unread hits the global unread summary endpoint', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(['admin-unread', '--reason', 'mention'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    const calls = mock.requestLog.filter(e => e.url.startsWith('/api/admin/notifications/unread'));
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.includes('reason=mention'), calls[0].url);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.agents[0].unreadCount, 2);
+  });
+});
