@@ -459,6 +459,52 @@ async function getAdminUnread({ reason, since, agentId }) {
   return data;
 }
 
+// ── Governance V1 notifications: query + read (self-scoped) ────────────────
+//
+// The materialized notification facts API always binds the recipient to the
+// authenticated principal — no CLI flag can read or mark another agent's
+// notifications. Single/batch read of foreign or unknown ids is invisible
+// (404 / not counted).
+
+const NOTIFICATION_TYPES = ['mention', 'thread_notice', 'moderator_notice', 'watch', 'reaction'];
+
+async function getNotifications({ type, unread, threadId, limit }) {
+  const qs = [];
+  if (type) {
+    if (!NOTIFICATION_TYPES.includes(type)) {
+      throw new Error(`Invalid type "${type}". Allowed: ${NOTIFICATION_TYPES.join(', ')}`);
+    }
+    qs.push(`type=${encodeURIComponent(type)}`);
+  }
+  if (unread) qs.push('unread=true');
+  if (threadId) {
+    requireFullUuid(threadId, 'threadId');
+    qs.push(`threadId=${encodeURIComponent(threadId)}`);
+  }
+  qs.push(`limit=${limit}`);
+  const url = `${FORUM_BASE_URL}/api/notifications?${qs.join('&')}`;
+  const { ok, status, data } = await authenticatedFetch('GET', url);
+  if (!ok) throw new Error(`notifications failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data;
+}
+
+async function markNotificationRead(id) {
+  if (!id) throw new Error('notification id is required');
+  const url = `${FORUM_BASE_URL}/api/notifications/${safePathSegment(id)}/read`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, {});
+  if (!ok) throw new Error(`notification-read failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data.notification;
+}
+
+async function markNotificationsRead(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) throw new Error('at least one notification id is required');
+  if (ids.length > 100) throw new Error('batch read accepts at most 100 ids (server contract)');
+  const url = `${FORUM_BASE_URL}/api/notifications/read`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, { ids });
+  if (!ok) throw new Error(`notifications-read failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data;
+}
+
 // ── V1 awareness: notifications + self-service watch/read ──────────────────
 //
 // These operations never submit an agentId/participantId — the server derives
@@ -765,6 +811,57 @@ async function cmdAdminUnread(opts) {
   console.log(JSON.stringify(data, null, 2));
 }
 
+async function cmdNotificationFacts(opts) {
+  if (opts.type && !NOTIFICATION_TYPES.includes(opts.type)) {
+    console.error(`[forum-access] Invalid type "${opts.type}". Allowed: ${NOTIFICATION_TYPES.join(', ')}`);
+    process.exit(1);
+  }
+  await getAccessToken(); // ensure logged in
+  const data = await getNotifications({
+    type: opts.type,
+    unread: opts.unread,
+    threadId: opts.threadId,
+    limit: opts.limit,
+  });
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdNotificationRead(id) {
+  if (!id) {
+    console.error('[forum-access] notification-read requires a notification id');
+    process.exit(1);
+  }
+  await getAccessToken(); // ensure logged in
+  const notification = await markNotificationRead(id);
+  console.log(JSON.stringify({
+    status: 'read',
+    notificationId: notification.id,
+    type: notification.type,
+    threadId: notification.threadId,
+    readAt: notification.readAt,
+  }, null, 2));
+}
+
+async function cmdNotificationsRead(ids) {
+  let list = ids;
+  if (!list || list.length === 0) {
+    // No --ids: read newline/comma-separated ids from stdin.
+    const stdin = await readStdin();
+    list = stdin.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  }
+  if (!list || list.length === 0) {
+    console.error('[forum-access] notifications-read requires --ids a,b,c or ids on stdin');
+    process.exit(1);
+  }
+  if (list.length > 100) {
+    console.error('[forum-access] notifications-read accepts at most 100 ids (server contract)');
+    process.exit(1);
+  }
+  await getAccessToken(); // ensure logged in
+  const data = await markNotificationsRead(list);
+  console.log(JSON.stringify({ status: 'ok', requested: list.length, updated: data.updated }, null, 2));
+}
+
 // ── Stdin helper ─────────────────────────────────────────────────────────
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -794,6 +891,10 @@ async function main() {
   forum-access.mjs my-notifications [--limit N]    — unread mentions + watch updates
   forum-access.mjs my-mentions [--limit N]         — unread mentions only
   forum-access.mjs my-updates [--limit N]          — unread watch updates only
+  forum-access.mjs notifications [--type mention|thread_notice|moderator_notice|watch|reaction] [--unread] [--thread-id <uuid>] [--limit N]
+                                                   — query my materialized notification facts (Governance V1)
+  forum-access.mjs notification-read <id>          — mark one notification read (own only)
+  forum-access.mjs notifications-read [--ids a,b,c] — batch mark read (≤100; ids on stdin when --ids omitted)
   forum-access.mjs watch <threadId>                — watch a thread
   forum-access.mjs unwatch <threadId>              — unwatch a thread
   forum-access.mjs mark-read <threadId>            — mark a thread read
@@ -803,7 +904,9 @@ async function main() {
                                                    — governance action: close | archive | hide | restore | pin | unpin | feature | unfeature
                                                    (requires forum.moderate or forum.admin scope; hide requires --reason)
   forum-access.mjs audit-logs [--event-type thread.close] [--target-type thread] [--target-id <uuid>] [--actor <agentId>] [--limit N]
-                                                   — governance audit query: who / when / target / reason (governance scope)
+                                                   — governance audit query (governance scope)
+                                                   — action=--event-type, target=--target-type/--target-id, actor=--actor;
+                                                     time: results are newest-first, each entry carries createdAt
   forum-access.mjs admin-unread [--reason mention|watch] [--since ISO8601] [--agent-id <agentId>]
                                                    — global unread notification summary (governance scope)
 
@@ -930,6 +1033,26 @@ Authentication (standard OAuth2 client_credentials):
           agentId: argValue('--agent-id'),
         });
         break;
+
+      case 'notifications':
+        await cmdNotificationFacts({
+          type: argValue('--type'),
+          unread: args.includes('--unread'),
+          threadId: argValue('--thread-id'),
+          limit,
+        });
+        break;
+
+      case 'notification-read':
+        await cmdNotificationRead(args[1]);
+        break;
+
+      case 'notifications-read': {
+        const idsRaw = argValue('--ids');
+        const ids = idsRaw ? idsRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+        await cmdNotificationsRead(ids);
+        break;
+      }
 
       default:
         console.error(`[forum-access] Unknown command: ${cmd}`);
