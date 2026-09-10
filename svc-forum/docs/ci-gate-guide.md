@@ -1,6 +1,19 @@
 # CI 门禁使用指南（svc-forum）
 
-本需求（8265a467）实现三层防线，解决"绕过工作流零成本"根因：
+> **状态更正（2026-09-07，文档诚实化）：本指南描述的是"设计目标"三层防线，其中 L0 平台层
+> 当前并未部署。实际 enforcement 现状（在 main @ b9f11af 核实）：
+> 1. 本仓无根级 `.github/workflows/`——GitHub 从不触发子目录 `svc-forum/.github/workflows/`
+>    内的 workflow，故下述 "Workflow Gate / Arch Health Check" 这两个 PR status check
+>    **不存在、从不运行**；
+> 2. `main` 分支**无 branch protection**（GitHub API: "Branch not protected"）；
+> 3. 与之互斥的权威陈述见 `.agents/protocol/SPEC_GOVERNANCE_V0.md`（"BASE_BRANCH_MERGE_GATE
+>    = not implemented by this distribution"）与 `.agents/local/README.md`（"BASE_BRANCH_GATE
+>    = NOT_IMPLEMENTED"；"嵌套 workflow 文件不得被描述为不可绕过的 GitHub merge gate"）。
+> 因此：L1 commit-msg hook 为**可选本地**防线（`--no-verify` 可跳过且无平台拦截），
+> L2 事后兜底为唯一在案补救。本文件其余内容保留为设计文档，不代表现行平台行为。
+> 本更正仅修改文档表述，零产品/平台/配置变更。
+
+本需求（8265a467）设计了三层防线，旨在解决"绕过工作流零成本"根因（注意：仅 L1/L2 落地，L0 未部署，见顶部状态更正）：
 
 ```
 L0 平台层（不可绕过）  L1 本地层（可跳过但留痕）  L2 事后兜底（补救）
@@ -26,10 +39,10 @@ git commit -m "feat: 实现 XXX" -m "workflow: 8265a467-f983-44af-bf56-fcef60a75
 # 4. push 分支，创建 PR 到 main
 #    PR 描述中必须包含：Workflow: <实例ID>（L0 校验）
 
-# 5. PR 自动触发两个 status check：
-#    - Workflow Gate: 校验实例存在且状态合法
-#    - Arch Health Check: 架构体检（红线禁 merge）
-#    两者全绿 + 1 个 review 通过后才能 merge
+# 5. 【现状更正】不会自动触发任何 status check（workflow 位于子目录，GitHub 从不执行；main 无 branch protection），以下仅为设计目标：
+#    - Workflow Gate: 校验实例存在且状态合法（未部署）
+#    - Arch Health Check: 架构体检（未部署）
+#    现行实际门槛 = 人工 review（设计目标中的平台强制未部署）
 ```
 
 ## PR 描述格式
@@ -46,7 +59,8 @@ Workflow: 8265a467-f983-44af-bf56-fcef60a75996
 
 ### Q1: commit 被拒绝，提示缺 workflow ID？
 在 commit message 中加一行 `workflow: <uuid>`。紧急情况可 `--no-verify` 跳过（L1），
-但 L0 CI 仍会拦截无实例 PR，且绕过会触发 postmortem。
+现状更正：不存在 L0 CI 拦截（无根级 workflow、无 branch protection），绕过不留平台痕迹，
+只能依赖 L2 postmortem 补录（且仅在有 postmortem 纪律时有效）。
 
 ### Q2: PR 的 Workflow Gate 红了？
 - PR 描述没有 `Workflow: <uuid>` → 补充后重新触发（edit PR body 即可自动重跑）
