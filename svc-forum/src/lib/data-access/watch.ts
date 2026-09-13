@@ -83,10 +83,21 @@ export async function markThreadRead(threadId: string, principalId: string) {
       return participant;
     }
 
-    await tx.forumThreadParticipant.update({
-      where: { id: participant.id },
-      data: { lastReadAt: next },
-    });
+    // Monotonic write (T57): the extended-where filter re-checks the stored
+    // cursor at write time, so a concurrent writer can never move it backwards.
+    // P2025 (no row older than `next`) means an interleaved writer already
+    // advanced it — the cursor is monotone either way.
+    try {
+      await tx.forumThreadParticipant.update({
+        where: {
+          id: participant.id,
+          OR: [{ lastReadAt: null }, { lastReadAt: { lt: next } }],
+        },
+        data: { lastReadAt: next },
+      });
+    } catch (e: any) {
+      if (e?.code !== 'P2025') throw e;
+    }
     return { ...participant, lastReadAt: next };
   });
 }
@@ -134,11 +145,27 @@ export async function batchMarkRead(threadIds: string[], principalId: string): P
       continue;
     }
 
-    await prisma.forumThreadParticipant.update({
-      where: { id: participant.id },
-      data: { lastReadAt: next },
-    });
-    updated++;
+    // Monotonic write (T57): same conditional guard as markThreadRead — a
+    // parked concurrent writer must not regress the cursor when it resumes.
+    // P2025 (no row older than `next`) means an interleaved writer already
+    // advanced it — the cursor is monotone either way.
+    let written = 0;
+    try {
+      written = await prisma.forumThreadParticipant.updateMany({
+        where: {
+          id: participant.id,
+          OR: [{ lastReadAt: null }, { lastReadAt: { lt: next } }],
+        },
+        data: { lastReadAt: next },
+      }).then((r: { count: number }) => r.count);
+    } catch (e: any) {
+      if (e?.code !== 'P2025') throw e;
+    }
+    if (written > 0) {
+      updated++;
+    } else {
+      skipped++;
+    }
   }
 
   return { updated, skipped };
