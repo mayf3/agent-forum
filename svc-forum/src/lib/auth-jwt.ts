@@ -39,6 +39,9 @@ import {
   createRemoteJWKSet,
   createLocalJWKSet,
   jwtVerify,
+  type JWTVerifyGetKey,
+  type JWSHeaderParameters,
+  type JWTPayload,
 } from 'jose';
 import {
   JWKSTimeout,
@@ -184,6 +187,9 @@ export function createAccessTokenVerifier(keyResolver: KeyResolver) {
  * Everything else is a token problem → 401 (refreshable vs contract).
  */
 function classifyVerifyError(err: unknown): VerifyTokenError {
+  // Already classified (e.g. by the availability probe around the JWKS
+  // resolver) — never re-classify an intentional class.
+  if (err instanceof VerifyTokenError) return err;
   // JWKS fetch infrastructure failures → 503
   if (err instanceof JWKSTimeout) {
     return new VerifyTokenError('AUTH_JWKS_UNAVAILABLE', 'JWKS request timed out');
@@ -294,6 +300,44 @@ function isInfrastructureError(err: unknown): boolean {
 
 const trustedJwksUrl = new URL(env.AUTH_JWKS_URL);
 
+/**
+ * Availability probe around a JWKS key resolver (T58). When the remote JWKS
+ * cannot be fetched (HTTP 5xx/429, non-2xx, or network failure), jose surfaces
+ * a key-selection error that is indistinguishable from an unknown kid —
+ * classifying it as token-invalid (401, refreshable) turns every request into
+ * a refresh attempt while the identity provider's key endpoint is down
+ * (refresh storm). This wrapper re-probes the endpoint directly on resolver
+ * failure and re-raises AUTH_JWKS_UNAVAILABLE when the endpoint itself is
+ * broken; a healthy endpoint means the miss is real (unknown/rotated kid) and
+ * the original error is re-raised unchanged.
+ */
+export function withJwksAvailabilityProbe(
+  remote: JWTVerifyGetKey,
+  jwksUrl: URL,
+): JWTVerifyGetKey {
+  return async (protectedHeader, payload) => {
+    try {
+      return await remote(protectedHeader, payload);
+    } catch (probeError) {
+      let probeStatus: number | null = null;
+      let networkFailure = false;
+      try {
+        const res = await fetch(jwksUrl);
+        probeStatus = res.status;
+      } catch {
+        networkFailure = true;
+      }
+      if (networkFailure || probeStatus === null || probeStatus >= 500 || probeStatus === 429) {
+        throw new VerifyTokenError(
+          'AUTH_JWKS_UNAVAILABLE',
+          `JWKS endpoint unavailable (probe status ${probeStatus ?? 'network failure'})`,
+        );
+      }
+      throw probeError;
+    }
+  };
+}
+
 let productionVerifier:
   | ReturnType<typeof createAccessTokenVerifier>
   | undefined;
@@ -305,7 +349,10 @@ let productionVerifier:
 export function verifyAuthAccessToken(token: string): Promise<VerifiedAccessToken> {
   productionVerifier ??=
     createAccessTokenVerifier(
-      createRemoteJWKSet(trustedJwksUrl),
+      withJwksAvailabilityProbe(
+        createRemoteJWKSet(trustedJwksUrl),
+        trustedJwksUrl,
+      ),
     );
 
   return productionVerifier(token);
