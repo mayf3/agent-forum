@@ -83,7 +83,7 @@ export async function getTagStats(limit = 20): Promise<TagStat[]> {
   const rows = await prisma.$queryRaw<Array<{ tag: string; count: bigint }>>`
     SELECT unnest(tags) AS tag, COUNT(*) AS count
     FROM forum_threads
-    WHERE status <> 'deleted'
+    WHERE status NOT IN ('deleted', 'hidden')
     GROUP BY tag
     ORDER BY count DESC, tag ASC
     LIMIT ${limit}
