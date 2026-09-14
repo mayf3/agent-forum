@@ -80,6 +80,8 @@ export interface NotificationFactFilter {
   threadId?: string;
   page?: number;
   limit?: number;
+  /** Governance callers: keep facts whose thread is hidden/deleted/archived. */
+  includeHiddenThreadFacts?: boolean;
 }
 
 export interface NotificationFactView {
@@ -113,6 +115,14 @@ export async function findNotificationsForPrincipal(
   if (filter.reason) where.reason = filter.reason;
   if (filter.unreadOnly) where.readAt = null;
   if (filter.threadId) where.threadId = filter.threadId;
+  // Unified visibility policy (T56): a materialized notification whose thread
+  // has since been hidden/deleted/archived must not surface the thread's id,
+  // metadata, or governance payload to ordinary (non-governance) readers —
+  // join the thread and require a viewer-visible status. Governance callers
+  // keep full access via the hasGovernanceAuthority filter above the route.
+  if (!filter.includeHiddenThreadFacts) {
+    where.thread = { status: { notIn: ['hidden', 'deleted', 'archived'] } };
+  }
 
   const unreadWhere: Record<string, unknown> = { recipientPrincipalId, readAt: null };
   if (filter.reason) unreadWhere.reason = filter.reason;

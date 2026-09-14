@@ -9,6 +9,7 @@ import { Router } from 'express';
 import { asyncHandler } from '../utils/async-handler.js';
 import { HttpError } from '../utils/http-error.js';
 import { parsePagination } from '../utils/pagination.js';
+import { hasGovernanceAuthority } from '../lib/governance.js';
 import { authRequired } from '../middleware/auth.js';
 import { requireReadScope, requireWriteScope } from '../middleware/scope-guard.js';
 import {
@@ -50,6 +51,7 @@ notificationsRouter.get('/', requireReadScope(), asyncHandler(async (req, res) =
     threadId: threadId || undefined,
     page: pagination.page,
     limit: pagination.limit,
+    includeHiddenThreadFacts: hasGovernanceAuthority(user.scopes),
   });
 
   res.json(result);
