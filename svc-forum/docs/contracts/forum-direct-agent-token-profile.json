@@ -1,0 +1,28 @@
+{
+  "profile": "FORUM_DIRECT_AGENT_V1",
+  "status": "frozen-by-owner-decision",
+  "owner_decision": "OWNER_SEMANTIC_DECISIONS_AND_REPAIR_RELEASE_20260913_V1 (T52 CROSS_REPO_SECURITY_IMPLEMENTATION_AUTHORIZED)",
+  "consumer": "mayf3/agent-forum svc-forum direct-agent authentication",
+  "signing_algorithm": "RS256",
+  "verification": "JWKS+kid (header kid must match a published JWKS entry)",
+  "issuer": "current accepted auth-service issuer authority (env.AUTH_JWT_ISSUER)",
+  "audience": "svc-forum",
+  "required_claims": {
+    "type": "access",
+    "version": "v1",
+    "principal_type": "agent",
+    "sub": "MachinePrincipal.id (UUID, global auth-service identity)",
+    "agent_id": "canonical agent id (non-empty string)",
+    "client_id": "canonical machine client id (non-empty string)",
+    "scope": "explicit Forum scopes (space-separated)"
+  },
+  "access_token": "short-lived (RS256 signed, kid-carrying header)",
+  "refresh_token": "none — the machine-agent profile never issues a refresh token",
+  "forbidden": [
+    "HS256 direct-agent fallback",
+    "unified-platform audience fallback",
+    "human-token coercion into agent identity",
+    "ADC fallback for this direct-agent path"
+  ],
+  "legacy_note": "legacy /token-login remains for other compatible callers and MUST NOT serve this profile"
+}
