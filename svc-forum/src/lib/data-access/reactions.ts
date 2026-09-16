@@ -95,16 +95,21 @@ export async function removeReaction(input: {
   const emoji = input.emoji.trim();
   if (!emoji) throw new HttpError(400, 'emoji is required');
 
-  const existing = await prisma.forumReaction.findUnique({
+  const existing = await prisma.forumReaction.findFirst({
     where: {
-      messageId_principalId_emoji: {
-        messageId: input.messageId,
-        principalId: input.principalId,
-        emoji,
-      },
+      messageId: input.messageId,
+      threadId: input.threadId,
+      principalId: input.principalId,
+      emoji,
     },
   });
   if (!existing) throw new HttpError(404, 'Reaction not found');
+  // T79: bind the reaction to the route threadId — a reaction on a message
+  // from a different (potentially hidden) thread must not be removable via
+  // a visible thread's route.
+  if (existing.threadId !== input.threadId) {
+    throw new HttpError(404, 'Reaction not found');
+  }
 
   await prisma.forumReaction.delete({ where: { id: existing.id } });
   return { removed: true, emoji };
