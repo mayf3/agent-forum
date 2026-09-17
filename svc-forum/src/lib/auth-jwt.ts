@@ -310,27 +310,69 @@ const trustedJwksUrl = new URL(env.AUTH_JWKS_URL);
  * failure and re-raises AUTH_JWKS_UNAVAILABLE when the endpoint itself is
  * broken; a healthy endpoint means the miss is real (unknown/rotated kid) and
  * the original error is re-raised unchanged.
+ *
+ * T80 (AF-SCOUT-08) resource bounds: ONE bounded deadline covers the whole
+ * probe — fetch and response-body release — so a JWKS endpoint that sends
+ * delayed headers or a never-ending body cannot hang token verification (an
+ * endpoint that cannot answer in time IS unavailable; error taxonomy and
+ * message shape unchanged). Equivalent concurrent probes share the in-flight
+ * request, so N simultaneous resolver failures cost one endpoint fetch, not N.
  */
+
+/** Default probe deadline (ms) covering fetch + body release. */
+export const JWKS_PROBE_DEADLINE_MS = 3_000;
+
+type ProbeOutcome = { networkFailure: true } | { networkFailure: false; status: number };
+
+const inFlightProbes = new Map<string, Promise<ProbeOutcome>>();
+
+async function runProbeOnce(jwksUrl: URL, deadlineMs: number): Promise<ProbeOutcome> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), deadlineMs);
+  try {
+    const res = await fetch(jwksUrl, { signal: controller.signal });
+    const status = res.status;
+    try {
+      // Release the connection immediately: the probe only reads the status,
+      // and an unconsumed body would pin the socket for an unbounded time.
+      await res.body?.cancel();
+    } catch {
+      // Release is best-effort; the deadline still bounds the whole probe.
+    }
+    return { networkFailure: false, status };
+  } catch {
+    return { networkFailure: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function probeEndpointShared(jwksUrl: URL, deadlineMs: number): Promise<ProbeOutcome> {
+  const key = jwksUrl.href;
+  const existing = inFlightProbes.get(key);
+  if (existing) return existing;
+  const probe = runProbeOnce(jwksUrl, deadlineMs).finally(() => {
+    inFlightProbes.delete(key);
+  });
+  inFlightProbes.set(key, probe);
+  return probe;
+}
+
 export function withJwksAvailabilityProbe(
   remote: JWTVerifyGetKey,
   jwksUrl: URL,
+  options?: { probeDeadlineMs?: number },
 ): JWTVerifyGetKey {
+  const deadlineMs = options?.probeDeadlineMs ?? JWKS_PROBE_DEADLINE_MS;
   return async (protectedHeader, payload) => {
     try {
       return await remote(protectedHeader, payload);
     } catch (probeError) {
-      let probeStatus: number | null = null;
-      let networkFailure = false;
-      try {
-        const res = await fetch(jwksUrl);
-        probeStatus = res.status;
-      } catch {
-        networkFailure = true;
-      }
-      if (networkFailure || probeStatus === null || probeStatus >= 500 || probeStatus === 429) {
+      const outcome = await probeEndpointShared(jwksUrl, deadlineMs);
+      if (outcome.networkFailure || outcome.status >= 500 || outcome.status === 429) {
         throw new VerifyTokenError(
           'AUTH_JWKS_UNAVAILABLE',
-          `JWKS endpoint unavailable (probe status ${probeStatus ?? 'network failure'})`,
+          `JWKS endpoint unavailable (probe status ${outcome.networkFailure ? 'network failure' : outcome.status})`,
         );
       }
       throw probeError;
