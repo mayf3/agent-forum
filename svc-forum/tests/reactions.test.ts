@@ -85,7 +85,14 @@ function mockStore(store: Map<string, any>) {
       let items = Array.from(store.values());
       if (where) {
         for (const [k, v] of Object.entries(where)) {
+          // T79: mirror real Prisma scalar filters — the fixed removeReaction
+          // looks the reaction up through a findFirst over all four columns,
+          // so the mock must filter each of them (a partial mock would let a
+          // wrong-row match through and corrupt suite semantics).
           if (k === 'threadId') items = items.filter(i => i.threadId === v);
+          if (k === 'messageId') items = items.filter(i => i.messageId === v);
+          if (k === 'principalId') items = items.filter(i => i.principalId === v);
+          if (k === 'emoji') items = items.filter(i => i.emoji === v);
           if (k === 'id') items = items.filter(i => i.id === v);
           if (k === 'deletedAt' && v === null) items = items.filter(i => !i.deletedAt);
           if (k === 'agentId') items = items.filter(i => i.agentId === v);
@@ -368,6 +375,46 @@ void describe('Message Reactions', async () => {
     // Correct thread binding still works
     const summary = await da.getReactionsForMessage(message.threadId, message.id);
     assert.ok(Array.isArray(summary));
+  });
+
+  await it('T79-A: reaction on a message from ANOTHER thread is NOT removable via this thread route (cross-parent DELETE binding)', async () => {
+    // Visible thread T1 with its own message; hidden-family thread T2 whose
+    // message M2 carries B's reaction. The route validates only the ROUTE
+    // thread (T1), so pre-fix the DELETE lookup matched M2's reaction by
+    // (messageId, principalId, emoji) alone and deleted it across parents.
+    const t1 = await seedThreadAndMessage();
+    const t2 = await da.createThread({
+      title: 'Other thread', type: 'discussion',
+      createdById: USER_A.id, createdByName: USER_A.name, createdByType: 'agent',
+    });
+    const m2 = {
+      id: mockUuid(), threadId: t2.id, parentId: null, seq: 1,
+      authorId: USER_A.id, authorName: USER_A.name, authorType: 'agent',
+      kind: 'comment', content: 'foreign message', mentions: [],
+      deletedAt: null, createdAt: new Date(mockClock), updatedAt: new Date(mockClock),
+    };
+    messages.set(m2.id, m2);
+    await da.addReaction({
+      messageId: m2.id, threadId: t2.id,
+      principalId: USER_B.id, principalName: USER_B.name, emoji: '👍',
+    });
+
+    // DELETE via T1's route for M2's reaction must be a 404 — no mutation.
+    await assert.rejects(
+      da.removeReaction({
+        messageId: m2.id, threadId: t1.thread.id,
+        principalId: USER_B.id, emoji: '👍',
+      }),
+      (err: any) => err.statusCode === 404,
+    );
+    // The reaction itself is untouched and still removable via its TRUE thread.
+    const summary = await da.getReactionsForMessage(t2.id, m2.id);
+    assert.equal(summary.length, 1, 'cross-parent attempt must not delete the reaction');
+    const removed = await da.removeReaction({
+      messageId: m2.id, threadId: t2.id,
+      principalId: USER_B.id, emoji: '👍',
+    });
+    assert.equal(removed.removed, true, 'true-thread removal still works');
   });
 
   await it('AC#2 message list includes reactions summary', async () => {
