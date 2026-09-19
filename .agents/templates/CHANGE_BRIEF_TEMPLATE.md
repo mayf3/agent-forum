@@ -37,6 +37,21 @@ EVIDENCE_NEEDED =
 
 Each Evidence item states which decision or acceptance result it can change.
 
+## Model convergence (conditional)
+
+```text
+MODEL_CONVERGENCE_APPLICABLE = YES | NO
+
+# Remaining fields are required only when MODEL_CONVERGENCE_APPLICABLE = YES;
+# when NO, skip them and keep the normal route.
+RETAIN = <distinct or still-supported entities kept without merge>
+RETIRE = <obsolete executable paths that exit execution>
+MIGRATE = <consumers moved to the current model>
+TEMPORARY_BRIDGE = <bounded compatibility, or NONE>
+REAL_CONSUMERS = <actual consumers of any retained bridge or legacy path>
+BRIDGE_EXIT_CONDITION = <exit date or objectively verifiable condition, or NONE>
+```
+
 ## Execution controls
 
 ```text
