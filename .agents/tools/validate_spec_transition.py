@@ -4,6 +4,14 @@
 Inputs are JSON arrays of governing-Spec frontmatter objects at the transition base
 and candidate states. This tool complements JSON Schema: it checks cross-record
 existence, lifecycle closure, and atomic backlinks that a single-record schema cannot.
+
+Chains of any legal depth are supported: a superseded record may backlink a
+successor that is itself superseded, as long as following ``superseded_by`` links
+terminates at exactly one accepted authority per chain (cycles and premature
+terminations are rejected). Records are accepted raw and unnormalized: historical
+superseded records that predate the current frontmatter schema may omit the
+``governed_by``/``supersedes`` array fields, which are then treated as empty;
+active (proposed/accepted) records must still carry well-formed metadata.
 """
 
 from __future__ import annotations
@@ -67,6 +75,11 @@ def index_records(records: object, label: str, errors: list[str]) -> dict[str, d
     return indexed
 
 
+def is_absent_optional_array(value: object, status: object) -> bool:
+    """True when a missing/null list field is legacy-tolerated on a superseded record."""
+    return value is None and status == "superseded"
+
+
 def validate_metadata(record: dict[str, Any], label: str = "record") -> list[str]:
     errors: list[str] = []
     spec_id = record.get("spec_id")
@@ -82,7 +95,8 @@ def validate_metadata(record: dict[str, Any], label: str = "record") -> list[str
 
     governed_by = record.get("governed_by")
     if not isinstance(governed_by, list):
-        errors.append(f"{label}.governed_by is not an array")
+        if not is_absent_optional_array(governed_by, status):
+            errors.append(f"{label}.governed_by is not an array")
     else:
         for authority_id in governed_by:
             if not is_strict_spec_id(authority_id):
@@ -90,7 +104,8 @@ def validate_metadata(record: dict[str, Any], label: str = "record") -> list[str
 
     supersedes = record.get("supersedes")
     if not isinstance(supersedes, list):
-        errors.append(f"{label}.supersedes is not an array")
+        if not is_absent_optional_array(supersedes, status):
+            errors.append(f"{label}.supersedes is not an array")
     else:
         if len(supersedes) != len(set(map(str, supersedes))):
             errors.append(f"{label}.supersedes contains duplicates")
@@ -209,25 +224,39 @@ def validate_transition(base_records: object, candidate_records: object) -> list
                     )
                 continue
 
-            if successor_status != "accepted":
-                errors.append(f"successor must be proposed or accepted: {successor_id}")
+            if successor_status == "accepted":
+                if old_base.get("status") == "accepted":
+                    if old_base.get("authority_level") != "governing_spec":
+                        errors.append(f"{old_id} was not a governing authority in base")
+                    base_successor = base.get(successor_id)
+                    if base_successor is not None and base_successor.get("status") != "proposed":
+                        errors.append(f"successor was already normative in base: {successor_id}")
+                    if old_candidate.get("status") != "superseded":
+                        errors.append(f"{old_id} is not superseded atomically")
+                    if old_candidate.get("superseded_by") != successor_id:
+                        errors.append(f"{old_id} backlink does not name {successor_id}")
+                elif old_base.get("status") == "superseded":
+                    if old_base.get("superseded_by") != successor_id:
+                        errors.append(f"historical edge changed for {old_id}")
+                else:
+                    errors.append(f"{old_id} was not accepted or superseded in base")
                 continue
 
-            if old_base.get("status") == "accepted":
-                if old_base.get("authority_level") != "governing_spec":
-                    errors.append(f"{old_id} was not a governing authority in base")
-                base_successor = base.get(successor_id)
-                if base_successor is not None and base_successor.get("status") != "proposed":
-                    errors.append(f"successor was already normative in base: {successor_id}")
-                if old_candidate.get("status") != "superseded":
-                    errors.append(f"{old_id} is not superseded atomically")
-                if old_candidate.get("superseded_by") != successor_id:
-                    errors.append(f"{old_id} backlink does not name {successor_id}")
-            elif old_base.get("status") == "superseded":
-                if old_base.get("superseded_by") != successor_id:
-                    errors.append(f"historical edge changed for {old_id}")
-            else:
-                errors.append(f"{old_id} was not accepted or superseded in base")
+            if successor_status == "superseded":
+                # Historical middle generation: this edge was activated while the
+                # successor was accepted and stays valid after its own retirement.
+                # A superseded successor must never newly activate an edge.
+                if old_base.get("status") == "superseded":
+                    if old_base.get("superseded_by") != successor_id:
+                        errors.append(f"historical edge changed for {old_id}")
+                else:
+                    errors.append(
+                        f"superseded successor cannot carry a new edge: "
+                        f"{successor_id} -> {old_id}"
+                    )
+                continue
+
+            errors.append(f"successor must be proposed, accepted, or superseded: {successor_id}")
 
     for old_id, old_candidate in candidate.items():
         if old_candidate.get("status") != "superseded":
@@ -240,11 +269,45 @@ def validate_transition(base_records: object, candidate_records: object) -> list
         if successor is None:
             errors.append(f"{old_id} backlinks nonexistent successor: {successor_id}")
             continue
-        if successor.get("status") != "accepted":
+        if successor.get("status") == "proposed":
             errors.append(f"{old_id} backlinks non-accepted successor: {successor_id}")
         supersedes = successor.get("supersedes")
         if not isinstance(supersedes, list) or old_id not in supersedes:
             errors.append(f"{successor_id} does not backlink superseded authority: {old_id}")
+
+    for start_id in sorted(candidate):
+        start = candidate[start_id]
+        if start.get("status") != "superseded":
+            continue
+        successor_id = start.get("superseded_by")
+        if not is_strict_spec_id(successor_id):
+            continue  # already reported by metadata validation
+        visited = {start_id}
+        current: object = successor_id
+        while True:
+            if current in visited:
+                errors.append(
+                    f"supersession chain from {start_id} does not terminate at an "
+                    f"accepted authority (cycle at {current})"
+                )
+                break
+            visited.add(current)
+            record = candidate.get(current)
+            if record is None:
+                break  # already reported as a nonexistent successor backlink
+            status = record.get("status")
+            if status == "accepted":
+                break  # legal chain termination
+            if status == "proposed":
+                errors.append(
+                    f"supersession chain from {start_id} terminates at a proposed "
+                    f"successor: {current}"
+                )
+                break
+            next_id = record.get("superseded_by")
+            if not is_strict_spec_id(next_id):
+                break  # already reported by metadata validation
+            current = next_id
 
     for old_id, successors in referenced_old.items():
         if len(successors) > 1:

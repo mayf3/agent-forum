@@ -36,6 +36,27 @@ no owner for independent decision -> NEW
 7. Check route stage, authority accepted in base, implementation authority, attributable mutation authorization, target/scope/effects/Done When, isolated write surface, Controlled Runbook, load-bearing gap, Evidence reviewability, live authority gap, emergency containment, Base impact, Done When, and Expansion Trigger.
 8. Use the route table in `.agents/README.md`.
 
+## Affected-work convergence probe
+
+Only when the task actually touches historical IDs, duplicate models, old fields or configuration keys, old API/CLI entrypoints, legacy state stores, fallback paths, compatibility adapters, replacement dependencies, or old runtimes/recovery paths, ask:
+
+```text
+1. Under the current business responsibility, which current and legacy
+   alternatives exist?
+2. Who owns each affected fact?
+3. Which alternatives still have real consumers?
+4. Can the duplication be migrated, deleted, or refactored away instead of
+   adding a permanent mapping or fallback?
+5. If a bridge is unavoidable: who is the real consumer, and what is the
+   exit condition?
+6. What are this task's planned RETAIN / RETIRE / MIGRATE /
+   TEMPORARY_BRIDGE dispositions?
+```
+
+Two identifiers are not duplication by themselves. Converge only the same business responsibility served by multiple independently maintained executable models, and preserve genuinely distinct entities. Record applicable answers in the Change Brief's Model convergence fields.
+
+An unrelated task skips this probe entirely: no global census, no empty convergence matrix, no new approval.
+
 ## Output
 
 ```text
