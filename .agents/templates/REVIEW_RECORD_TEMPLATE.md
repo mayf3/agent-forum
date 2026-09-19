@@ -52,6 +52,24 @@ MINIMAL_CLOSURE =
 
 Non-Blocker kinds are `SPEC_GAP`, `FOLLOW_UP`, and `TOOLING_DEBT`. A load-bearing gap sets dependent readiness to `NOT_READY` but does not let Reviewer write a Contract.
 
+## Model convergence exit (conditional)
+
+```text
+MODEL_CONVERGENCE_APPLICABLE = YES | NO
+
+# Remaining fields are required only when MODEL_CONVERGENCE_APPLICABLE = YES,
+# i.e. the change claims convergence, retirement, or migration completion;
+# when NO, skip them.
+NEW_PATH_USABLE = PROVEN | NOT_PROVEN | NOT_APPLICABLE
+OLD_EXECUTION_PATH_RETIRED = PROVEN | NOT_PROVEN | NOT_APPLICABLE
+RECOVERY_DOES_NOT_REVIVE_OLD_PATH = PROVEN | NOT_PROVEN | NOT_APPLICABLE
+NEW_PATH_EVIDENCE =
+OLD_PATH_EXIT_EVIDENCE =
+NON_REVIVAL_EVIDENCE =
+```
+
+Each proof binds scope, revision, environment, and observation time. Historical evidence, audits, receipts, and migration records remain valid retention and are not convergence debts; a stable supported public facade is not required to retire. A remaining temporary bridge needs a real consumer and an exit condition, and marks the result a bounded stage, not final convergence.
+
 ## Final accepted-Head binding
 
 ```text

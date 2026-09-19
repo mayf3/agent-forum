@@ -1,7 +1,7 @@
 # Development Grammar V1
 
 ```text
-GRAMMAR_VERSION = 1.0.2
+GRAMMAR_VERSION = 1.1.0
 GOVERNING_AUTHORITY = AGENT_DEVELOPMENT_GOVERNANCE_V1
 STATUS = accepted
 ENFORCEMENT_LEVEL = manual_policy_plus_deterministic_integrity
@@ -185,6 +185,25 @@ fabricated / materially distorted / falsely claimed execution -> FALSE_EVIDENCE
 ```
 
 Secret values are not exposed to prove reviewability.
+
+## Model convergence and retirement
+
+When the current task actually touches historical alternatives — historical IDs, duplicate models, old fields or configuration keys, old API/CLI entrypoints, legacy state stores, fallback paths, compatibility adapters, replacement dependencies, or old runtimes/recovery paths — inspect whether the same business responsibility is served by multiple independently maintained executable models. Different identifiers alone are not duplication: preserve genuinely distinct entities such as multi-credential, multi-tenant, per-service eligibility, and supported-protocol differences, and never merge on name similarity, prefixes, or unverified historical mapping.
+
+Prefer migrating real consumers and retiring the replaced executable path over adding a permanent mapping, fallback, or compatibility layer. Record each affected fact as one disposition:
+
+```text
+RETAIN           distinct responsibility or still-supported surface; no merge
+RETIRE           obsolete executable path exits execution
+MIGRATE          consumers move to the current model, then the old path exits
+TEMPORARY_BRIDGE bounded compatibility with a real consumer and an exit condition
+```
+
+A stable supported public facade may remain permanently; it is not an obsolete path merely because it is old. Only a temporary migration bridge owes a real consumer and an objectively verifiable exit condition.
+
+Declaring final convergence requires evidence that the new path is usable, the retired executable path is excluded from affected normal, fallback, and restart/recovery routes, and recovery does not revive it. Retirement removes execution, never historical evidence: audits, receipts, migration records, and necessary tombstones stay readable without granting present eligibility. Unknown or unexecuted coverage stays unknown; it must not become zero or PASS.
+
+Convergence questions apply only to affected work. An unrelated small fix keeps its normal short route: no global census, no empty matrix, no new approval. Parallel or multi-Agent work remains optional; every actual write still needs its own attributable authorization and isolated write surface. Practical refactoring technique beyond this rule is optional method guidance, never a new MUST.
 
 ## Live state ahead of authority
 
