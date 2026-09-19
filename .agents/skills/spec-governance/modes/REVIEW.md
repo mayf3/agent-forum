@@ -27,6 +27,22 @@ Do not rely on unrecorded chat or inaccessible author-only material.
 - **Contracts/Acceptance:** relevant semantic paths; each Acceptance can produce Required Evidence and reject a concrete wrong implementation.
 - **Base impact:** unrelated Base movement gets bounded conflict/authority/behavior/Evidence checking; candidate/relevant authority/behavior/conflict changes invalidate affected review.
 
+### Convergence exit (conditional)
+
+Applies only when the change claims convergence, retirement, or migration completion; otherwise `NOT_APPLICABLE`. Before final convergence may pass, verify with bound evidence:
+
+```text
+NEW_PATH_USABLE                    the current path satisfies applicable business
+                                   and safety Contracts, with executed evidence
+OLD_EXECUTION_PATH_RETIRED         the retired executable path cannot re-enter new
+                                   work through affected normal or fallback paths
+RECOVERY_DOES_NOT_REVIVE_OLD_PATH  applicable restart, recovery, retry, replay, and
+                                   migration reruns do not recreate the retired
+                                   model or transfer authority improperly
+```
+
+Bind each proof to scope, revision, environment, and observation time. Validate the Change Brief's RETAIN / RETIRE / MIGRATE / TEMPORARY_BRIDGE dispositions and, for any remaining bridge, its real consumer and exit condition. Retiring an executable path is not deleting history: audits, receipts, migration records, and necessary tombstones stay readable without granting present eligibility. A stable supported public facade may remain permanently and never blocks convergence; only a temporary migration bridge owes a real consumer and an objectively verifiable exit condition. Unknown or unexecuted coverage stays unknown — it must not become zero, PASS, or fabricated execution. A remaining bridge means a bounded stage, not final retirement. Review uses the parent's existing blocker classes and legal sources; already authorized contract-preserving cleanup needs no new approval merely because it is refactoring.
+
 ## Findings
 
 A Blocker uses one class:
