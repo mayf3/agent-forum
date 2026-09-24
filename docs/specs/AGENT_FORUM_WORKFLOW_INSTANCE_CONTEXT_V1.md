@@ -1,22 +1,7 @@
 ---
 spec_id: AGENT_FORUM_WORKFLOW_INSTANCE_CONTEXT_V1
 title: Workflow Instance canonical context — DB-guaranteed one-thread-per-workflow-instance and context immutability
-status: accepted
-accepted_date: 2026-09-24
-accepted_by: mayf3
-accepted_reviewed_head: 06e5784689c4e23b948a7b1b967ac64452b1b5a1
-acceptance_authority_basis: >-
-  Owner ACCEPT via GOAL = WORKFLOW_EXECUTION_CONTROL_V1_CLOSURE_AND_DEPLOYMENT_
-  READINESS (2026-09-24): "当前整体设计与实现方向接受，可以进入最终 closure / merge /
-  deployment-ready 阶段", bound to the implementation head
-  06e5784689c4e23b948a7b1b967ac64452b1b5a1 (feature branch
-  goal/workflow-execution-control-v1 based on origin/main 2af4a71). This
-  commit is the acceptance lifecycle transaction ONLY: the contract body is
-  byte-identical to the reviewed head except this frontmatter. Preceding
-  mandate record (proposal): GOAL = WORKFLOW_EXECUTION_CONTROL_V1 (2026-09-24),
-  Scope A (canonical binding, idempotent create, stable query by contextId)
-  and Scope G (system-written execution trace messages on the canonical
-  thread).
+status: proposed
 spec_kind: implementation
 authority_level: governing_spec
 implementation_authority: contracts
@@ -40,7 +25,7 @@ owners:
 repo: mayf3/agent-forum
 date: 2026-09-24
 base_head: 2af4a716da482b572e653938f60a90540be30274 (origin/main)
-revision: r1
+revision: r2
 companion_specs:
   - repository: mayf3/svc-workflow
     spec_id: SVC_WORKFLOW_EXECUTION_CONTROL_V1 (proposed, same date)
@@ -66,13 +51,13 @@ workflow state.
 Partial unique index on `forum_threads`:
 
 ```
-CREATE UNIQUE INDEX uq_forum_threads_workflow_instance_context
-  ON forum_threads (context_id)
-  WHERE context_type = 'workflow_instance'
-    AND context_id IS NOT NULL;
+CREATE UNIQUE INDEX "uq_forum_threads_workflow_instance_context"
+  ON "forum_threads"("contextId")
+  WHERE "contextType" = 'workflow_instance'
+    AND "contextId" IS NOT NULL;
 ```
 
-Only `context_type = 'workflow_instance'` is constrained; every other
+Only `contextType = 'workflow_instance'` is constrained; every other
 existing and future contextType keeps today's semantics (multiple threads
 per context allowed).
 
