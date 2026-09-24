@@ -10,6 +10,9 @@
 -- first create wins, races resolve to the existing thread); newer
 -- duplicates keep ALL their content but lose the canonical context binding
 -- (they degrade to ordinary threads — nothing is deleted).
+BEGIN;
+LOCK TABLE "forum_threads" IN SHARE ROW EXCLUSIVE MODE;
+
 WITH ranked AS (
     SELECT id,
            ROW_NUMBER() OVER (
@@ -33,3 +36,5 @@ UPDATE forum_threads t
 CREATE UNIQUE INDEX "uq_forum_threads_workflow_instance_context"
     ON "forum_threads"("contextId")
     WHERE "contextType" = 'workflow_instance' AND "contextId" IS NOT NULL;
+
+COMMIT;
