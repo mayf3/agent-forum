@@ -66,13 +66,13 @@ workflow state.
 Partial unique index on `forum_threads`:
 
 ```
-CREATE UNIQUE INDEX "uq_forum_threads_workflow_instance_context"
-  ON "forum_threads"("contextId")
-  WHERE "contextType" = 'workflow_instance'
-    AND "contextId" IS NOT NULL;
+CREATE UNIQUE INDEX uq_forum_threads_workflow_instance_context
+  ON forum_threads (context_id)
+  WHERE context_type = 'workflow_instance'
+    AND context_id IS NOT NULL;
 ```
 
-Only `contextType = 'workflow_instance'` is constrained; every other
+Only `context_type = 'workflow_instance'` is constrained; every other
 existing and future contextType keeps today's semantics (multiple threads
 per context allowed).
 
