@@ -24,7 +24,15 @@ scope:
   - svc-forum
 governed_by:
   - AGENT_FORUM_CORE_INVARIANTS_V1
-external_authorities: []
+external_authorities:
+  - repository: mayf3/svc-workflow
+    authority_id: SVC_WORKFLOW_EXECUTION_CONTROL_V1
+    revision: 797b72059614ff3ee444207a26c2231b7dc5f7ab
+    relation: interoperates_with
+  - repository: mayf3/dsh-agent-core
+    authority_id: AGENT_CORE_WORKFLOW_EXECUTION_CONTROL_V1
+    revision: 50d8a69bc1996eb28029272f2fa7f8edb4f3baca
+    relation: interoperates_with
 supersedes: []
 superseded_by: null
 owners:
