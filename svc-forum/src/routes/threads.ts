@@ -36,18 +36,30 @@ threadsRouter.post('/', authRequired, requireForumWriter, requireWriteScope(), a
   }
 
   const user = req.user!;
-  const thread = await db.createThread({
-    title: title.trim(),
-    type: type || 'discussion',
-    contextType: contextType || null,
-    contextId: contextId || null,
-    pipeline: pipeline || null,
-    layer: layer || null,
-    tags: tags || [],
-    createdById: user.id,
-    createdByName: user.name,
-    createdByType: 'agent',
-  });
+  // AGENT_FORUM_WORKFLOW_INSTANCE_CONTEXT_V1 (CTR-FWIC-002): the partial
+  // unique index makes duplicate workflow-instance contexts a DB-level
+  // conflict; surface it as 409 so callers re-run the canonical context
+  // query instead of creating a second thread.
+  let thread;
+  try {
+    thread = await db.createThread({
+      title: title.trim(),
+      type: type || 'discussion',
+      contextType: contextType || null,
+      contextId: contextId || null,
+      pipeline: pipeline || null,
+      layer: layer || null,
+      tags: tags || [],
+      createdById: user.id,
+      createdByName: user.name,
+      createdByType: 'agent',
+    });
+  } catch (error: any) {
+    if (error?.code === 'P2002') {
+      throw new HttpError(409, 'WORKFLOW_CONTEXT_THREAD_EXISTS');
+    }
+    throw error;
+  }
 
   // Optionally add participants from request body. Every entry passes the
   // same canonical-identity + closed-enum validation as POST /participants
@@ -218,6 +230,17 @@ threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWrite
   if (existing.status === 'deleted') {
     // deleted is terminal — not even governance edits tombstoned metadata
     throw new HttpError(400, 'Cannot update a deleted thread');
+  }
+
+  // AGENT_FORUM_WORKFLOW_INSTANCE_CONTEXT_V1 (CTR-FWIC-003): the canonical
+  // workflow-instance binding cannot drift after creation — not even by the
+  // creator or governance. Every other contextType stays editable as before.
+  if (existing.contextType === 'workflow_instance') {
+    const contextDrift = (req.body.contextType !== undefined && req.body.contextType !== existing.contextType) ||
+      (req.body.contextId !== undefined && req.body.contextId !== existing.contextId);
+    if (contextDrift) {
+      throw new HttpError(409, 'WORKFLOW_CONTEXT_IMMUTABLE');
+    }
   }
 
   if (!isCreator && !canGovern) {
