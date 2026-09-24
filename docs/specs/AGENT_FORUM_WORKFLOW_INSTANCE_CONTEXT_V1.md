@@ -1,7 +1,17 @@
 ---
 spec_id: AGENT_FORUM_WORKFLOW_INSTANCE_CONTEXT_V1
 title: Workflow Instance canonical context — DB-guaranteed one-thread-per-workflow-instance and context immutability
-status: proposed
+status: accepted
+accepted_date: 2026-09-24
+accepted_by: mayf3
+accepted_reviewed_head: 2fb3f9f3a3a66c9428fdc582df7284b0951acfd2
+acceptance_authority_basis: >-
+  Owner mayf3 exact-head acceptance in
+  PRODUCTION_DEPLOYMENT_CONTROL_PLANE_V1 continuation (2026-09-24),
+  bound to corrected r2 reviewed head
+  2fb3f9f3a3a66c9428fdc582df7284b0951acfd2. This lifecycle
+  transaction changes only acceptance metadata; the normative contract
+  body remains byte-identical to the independently reviewed r2 candidate.
 spec_kind: implementation
 authority_level: governing_spec
 implementation_authority: contracts
