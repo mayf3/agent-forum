@@ -10,6 +10,7 @@ services:
       - JWT_SECRET=${JWT_SECRET:-dev-only-change-this-secret}
       - NODE_ENV=production
       - CORS_ORIGINS=http://localhost:3460
+      - AUTH_JWKS_URL=http://host.docker.internal:4001/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_healthy
