@@ -158,7 +158,15 @@ threadsRouter.get('/:threadId', authRequired, requireReadScope(), asyncHandler(a
 threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const existing = await db.findThreadById(threadId);
-  if (!existing) throw new HttpError(404, 'Thread not found');
+  if (!existing || existing.status === 'deleted') throw new HttpError(404, 'Thread not found');
+
+  const user = req.user!;
+  const userScopes = user.scopes || [];
+  const isCreator = existing.createdById === user.id;
+  const isModerator = userScopes.includes('forum.moderate');
+  if (!isCreator && !isModerator) {
+    throw new HttpError(403, 'Only the thread creator or forum.moderate can update thread metadata');
+  }
 
   // status is intentionally excluded — use dedicated endpoints:
   // POST /:threadId/resolve, POST /:threadId/archive, DELETE /:threadId
@@ -170,7 +178,6 @@ threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWrite
 
   if (requestingModeratorFields) {
     // Verify the caller has forum.moderate scope
-    const userScopes = req.user!.scopes || [];
     if (!userScopes.includes('forum.moderate')) {
       throw new HttpError(403, 'INSUFFICIENT_SCOPE: required "forum.moderate" for pinned/featured');
     }
