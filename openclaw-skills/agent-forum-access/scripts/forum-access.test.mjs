@@ -144,6 +144,19 @@ function createMockServer(customRoutes) {
       return;
     }
 
+    if (u.pathname === '/api/search' && method === 'GET') {
+      const query = u.searchParams.get('q');
+      const page = parseInt(u.searchParams.get('page') || '1', 10);
+      const limit = parseInt(u.searchParams.get('limit') || '20', 10);
+      sendJson(res, 200, {
+        threads: [{ id: VALID_UUID, title: `Thread ${query}`, score: 10 }],
+        messages: [{ id: 'message-1', threadId: VALID_UUID, content: query, score: 2 }],
+        outcomes: [{ id: 'outcome-1', threadId: VALID_UUID, summaryMd: query, score: 2 }],
+        pagination: { page, limit, total: 3, pages: 1 },
+      });
+      return;
+    }
+
     if (u.pathname === '/api/me/notifications' && method === 'GET') {
       const reason = u.searchParams.get('reason') || 'mention';
       const limit = parseInt(u.searchParams.get('limit') || '20', 10);
@@ -547,6 +560,45 @@ describe('integration', () => {
     assert.equal(data.items[0].id, VALID_UUID, 'full UUID preserved');
     assert.equal(data.items[0].threadId, VALID_UUID, 'threadId equals full UUID');
     assert.equal(data.items[0].shortId, VALID_UUID.slice(0, 8), 'shortId is display-only prefix');
+  });
+
+  it('search forwards one encoded bounded GET and preserves full thread IDs', async () => {
+    mock.resetLog();
+    const query = 'governance & audit/phase?';
+    const r = await runScriptAsync(['search', query, '--page', '2', '--limit', '7'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+
+    const data = JSON.parse(r.stdout);
+    assert.equal(data.pagination.page, 2);
+    assert.equal(data.pagination.limit, 7);
+    assert.equal(data.threads[0].threadId, VALID_UUID);
+    assert.equal(data.threads[0].shortId, VALID_UUID.slice(0, 8));
+    assert.equal(data.messages[0].threadId, VALID_UUID);
+    assert.equal(data.messages[0].shortId, VALID_UUID.slice(0, 8));
+    assert.equal(data.outcomes[0].threadId, VALID_UUID);
+    assert.equal(data.outcomes[0].shortId, VALID_UUID.slice(0, 8));
+
+    const calls = mock.requestLog.filter(e => e.url.startsWith('/api/search?'));
+    assert.equal(calls.length, 1);
+    const requestUrl = new URL(calls[0].url, 'http://mock.local');
+    assert.equal(requestUrl.searchParams.get('q'), query);
+    assert.equal(requestUrl.searchParams.get('page'), '2');
+    assert.equal(requestUrl.searchParams.get('limit'), '7');
+    assert.equal(calls[0].method, 'GET');
+  });
+
+  it('search rejects missing query and invalid pagination before Forum request', async () => {
+    for (const args of [
+      ['search'],
+      ['search', 'query', '--page', '0'],
+      ['search', 'query', '--page', 'NaN'],
+      ['search', 'query', '--limit', '101'],
+    ]) {
+      mock.resetLog();
+      const r = await runScriptAsync(args, null, port);
+      assert.equal(r.status, 1);
+      assert.equal(mock.requestLog.filter(e => e.url.startsWith('/api/search')).length, 0);
+    }
   });
 
   // ── Read Transcript ──
