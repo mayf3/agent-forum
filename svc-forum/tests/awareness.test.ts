@@ -898,4 +898,33 @@ void describe('awareness — HTTP layer', async () => {
       .send({ content: 'bad2', kind: 'comment', mentions: 'agent-beta' });
     assert.equal(notArr.status, 400, 'non-array mentions rejected');
   });
+
+  await it('H8. deleted thread rejects message creation with zero writes', async () => {
+    const app = await buildApp();
+    const request = (await import('supertest')).default;
+    const thread = await seedThreadForHttp();
+    await da.updateThread(thread.id, { status: 'deleted' });
+
+    await assert.rejects(
+      () => da.createMessage({
+        threadId: thread.id,
+        authorId: PRINCIPAL_A,
+        authorName: AGENT_A,
+        authorType: 'agent',
+        kind: 'comment',
+        content: 'must not persist',
+      }),
+      (e: any) => e.statusCode === 404,
+    );
+
+    const response = await request(app)
+      .post(`/api/threads/${thread.id}/messages`)
+      .set('Authorization', `Bearer ${await signTokenA()}`)
+      .send({ content: 'must not persist through HTTP', kind: 'comment' });
+
+    assert.equal(response.status, 404);
+    assert.equal(messages.size, 0);
+    assert.equal(participants.size, 0);
+    assert.equal(threads.get(thread.id)?.messageCount, 0);
+  });
 });
