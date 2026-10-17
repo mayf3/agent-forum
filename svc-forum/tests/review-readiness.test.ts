@@ -320,7 +320,11 @@ async function addParticipants(da: any, threadId: string, extra: Array<{ id: str
   }
 }
 
-async function signToken(userId: string, _userName: string) {
+async function signToken(
+  userId: string,
+  _userName: string,
+  scope = 'forum.read forum.write forum.moderate',
+) {
   // Standard OAuth access token: RS256 + full forum scopes.
   // agent_id must be unique per token — JIT principal resolution rejects a
   // second authSubject claiming an already-mapped agent_id (409 → 401).
@@ -328,7 +332,7 @@ async function signToken(userId: string, _userName: string) {
     sub: userId,
     agent_id: userId,
     client_id: 'mc_test_client',
-    scope: 'forum.read forum.write forum.moderate',
+    scope,
   });
 }
 
@@ -673,7 +677,11 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     const request = (await import('supertest')).default;
 
     // Intruder tries to waive (not creator, not moderator, not a participant at all)
-    const intruderToken = await signToken(INTRUDER.id, INTRUDER.name);
+    const intruderToken = await signToken(
+      INTRUDER.id,
+      INTRUDER.name,
+      'forum.read forum.write',
+    );
     const waiverRes = await request(app)
       .post(`/api/threads/${thread.id}/participants/${REVIEWER_A.id}/waive-review`)
       .set('Authorization', `Bearer ${intruderToken}`)
@@ -685,7 +693,11 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       threadId: thread.id, agentId: REGULAR_MEMBER.id, agentName: REGULAR_MEMBER.name,
       role: 'member', status: 'responded',
     });
-    const memberToken = await signToken(REGULAR_MEMBER.id, REGULAR_MEMBER.name);
+    const memberToken = await signToken(
+      REGULAR_MEMBER.id,
+      REGULAR_MEMBER.name,
+      'forum.read forum.write',
+    );
     const waiverRes2 = await request(app)
       .post(`/api/threads/${thread.id}/participants/${REVIEWER_A.id}/waive-review`)
       .set('Authorization', `Bearer ${memberToken}`)
@@ -878,8 +890,8 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     assert.ok(waiverRes.body.error?.includes('already posted'));
   });
 
-  // ── Test 16: Moderator can waive ──
-  await it('16. Moderator can waive a required reviewer', async () => {
+  // ── Test 16: only verified moderator scope can waive ──
+  await it('16. Participant moderator role grants nothing; verified forum.moderate can waive', async () => {
     const thread = await createTestThread(da);
     await addParticipants(da, thread.id, [
       { id: REVIEWER_A.id, name: REVIEWER_A.name, role: 'required_reviewer' },
@@ -892,7 +904,25 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
 
     const app = await buildApp();
     const request = (await import('supertest')).default;
-    const moderatorToken = await signToken(MODERATOR.id, MODERATOR.name);
+    const roleOnlyToken = await signToken(
+      MODERATOR.id,
+      MODERATOR.name,
+      'forum.read forum.write',
+    );
+
+    const denied = await request(app)
+      .post(`/api/threads/${thread.id}/participants/${REVIEWER_A.id}/waive-review`)
+      .set('Authorization', `Bearer ${roleOnlyToken}`)
+      .send({ reason: 'Participant role must not authorize this waiver' });
+    assert.equal(denied.status, 403, 'participant moderator role must not grant platform authority');
+    const beforeVerifiedScope = await da.findParticipant(thread.id, REVIEWER_A.id);
+    assert.equal(beforeVerifiedScope!.reviewWaivedAt ?? null, null, 'denied role-only attempt must not mutate');
+
+    const moderatorToken = await signToken(
+      MODERATOR.id,
+      MODERATOR.name,
+      'forum.read forum.write forum.moderate',
+    );
 
     const waiverRes = await request(app)
       .post(`/api/threads/${thread.id}/participants/${REVIEWER_A.id}/waive-review`)
