@@ -21,6 +21,7 @@ messagesRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(a
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
+  if (thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
   if (thread.status === 'archived') throw new HttpError(400, 'Cannot post to archived thread');
 
   const { content, kind, parentId, attachments, metadata } = req.body;
@@ -122,4 +123,3 @@ messagesRouter.delete('/:messageId', requireForumWriter, requireModeratorScope()
   await db.softDeleteMessage(messageId);
   res.json({ ok: true });
 }));
-
