@@ -45,5 +45,6 @@ A proposed adoption or proposed Spec cannot authorize implementation.
 |---|---|---|---|---|---|
 | `AGENT_FORUM_DEVELOPMENT_GOVERNANCE_ADOPTION_V1` | accepted | invariant | repository governance | none | — |
 | `AGENT_FORUM_CORE_INVARIANTS_V1` | accepted | invariant | `svc-forum`, Forum access client | contracts | — |
+| `AGENT_FORUM_PRIVILEGED_SERVICE_ACTORS_V1` | proposed | invariant | `svc-forum` privileged Service actor boundary | none | — |
 
 Update this index when a governing Spec is added, accepted, or superseded. The table is navigation; the exact Spec file and revision remain authoritative.
