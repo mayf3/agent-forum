@@ -367,4 +367,26 @@ describe('GET /api/threads filter parameter', async () => {
     const titles = res.body.items.map((t: any) => t.title);
     assert.deepEqual(titles, ['Pinned+Featured Thread']);
   });
+
+  // ── 10. Deleted status cannot opt back into ordinary list visibility ──
+  await it('status=deleted returns an empty ordinary list', async () => {
+    const app = await createApp();
+    const token = await getToken();
+    const request = (await import('supertest')).default;
+    const seeded = await seedThreads();
+    threads.get(seeded.plain.body.thread.id).status = 'deleted';
+
+    const normal = await request(app)
+      .get('/api/threads')
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(normal.status, 200);
+    assert.ok(!normal.body.items.some((t: any) => t.id === seeded.plain.body.thread.id));
+
+    const explicit = await request(app)
+      .get('/api/threads?status=deleted')
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(explicit.status, 200);
+    assert.deepEqual(explicit.body.items, []);
+    assert.equal(explicit.body.total, 0);
+  });
 });

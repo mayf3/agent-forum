@@ -15,9 +15,9 @@ export async function watchThread(threadId: string, principalId: string, agentNa
   return withTransactionRetry(async (tx) => {
     const thread = await tx.forumThread.findUnique({
       where: { id: threadId },
-      select: { lastMessageAt: true },
+      select: { lastMessageAt: true, status: true },
     });
-    if (!thread) throw new HttpError(404, 'Thread not found');
+    if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
 
     const now = new Date();
     const prevMs = thread.lastMessageAt ? thread.lastMessageAt.getTime() : 0;
@@ -36,6 +36,12 @@ export async function watchThread(threadId: string, principalId: string, agentNa
 export async function unwatchThread(threadId: string, principalId: string) {
   if (!isUuid(threadId)) throw new HttpError(404, 'Thread not found');
   return withTransactionRetry(async (tx) => {
+    const thread = await tx.forumThread.findUnique({
+      where: { id: threadId },
+      select: { status: true },
+    });
+    if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+
     const participant = await tx.forumThreadParticipant.findUnique({
       where: { threadId_agentId: { threadId, agentId: principalId } },
     });
@@ -59,6 +65,12 @@ export async function unwatchThread(threadId: string, principalId: string) {
 export async function markThreadRead(threadId: string, principalId: string) {
   if (!isUuid(threadId)) throw new HttpError(404, 'Thread not found');
   return withTransactionRetry(async (tx) => {
+    const thread = await tx.forumThread.findUnique({
+      where: { id: threadId },
+      select: { status: true },
+    });
+    if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+
     const participant = await tx.forumThreadParticipant.findUnique({
       where: { threadId_agentId: { threadId, agentId: principalId } },
     });
@@ -106,6 +118,15 @@ export async function batchMarkRead(threadIds: string[], principalId: string): P
       continue;
     }
 
+    const thread = await prisma.forumThread.findUnique({
+      where: { id: threadId },
+      select: { status: true },
+    });
+    if (!thread || thread.status === 'deleted') {
+      skipped++;
+      continue;
+    }
+
     const participant = await prisma.forumThreadParticipant.findUnique({
       where: { threadId_agentId: { threadId, agentId: principalId } },
     });
@@ -146,6 +167,10 @@ export async function batchMarkRead(threadIds: string[], principalId: string): P
 
 // ── Participants ───────────────────────────────────────────
 
+const PARTICIPANT_CREATE_ROLES = new Set(['creator', 'member', 'required_reviewer']);
+const PARTICIPANT_MUTABLE_ROLES = new Set(['member', 'required_reviewer']);
+const PARTICIPANT_STATUSES = new Set(['active', 'invited', 'responded']);
+
 export async function addParticipant(data: {
   threadId: string;
   agentId: string;
@@ -153,6 +178,12 @@ export async function addParticipant(data: {
   role: string;
   status: string;
 }) {
+  if (!PARTICIPANT_CREATE_ROLES.has(data.role)) {
+    throw new HttpError(400, 'role must be creator, member, or required_reviewer');
+  }
+  if (!PARTICIPANT_STATUSES.has(data.status)) {
+    throw new HttpError(400, 'status must be active, invited, or responded');
+  }
   return prisma.forumThreadParticipant.create({ data });
 }
 
@@ -171,12 +202,48 @@ export async function findParticipantsByThreadId(threadId: string) {
 }
 
 export async function updateParticipant(id: string, data: Prisma.ForumThreadParticipantUpdateInput) {
+  if (!isUuid(id)) throw new HttpError(404, 'Participant not found');
+  const keys = Object.keys(data);
+  const isPresentationUpdate = keys.length > 0 && keys.every((key) => key === 'role' || key === 'status');
+  const isWaiverCommit = keys.length === 3
+    && keys.includes('reviewWaivedAt')
+    && keys.includes('reviewWaivedById')
+    && keys.includes('reviewWaiverReason');
+
+  if (isPresentationUpdate) {
+    if (data.role !== undefined && (typeof data.role !== 'string' || !PARTICIPANT_MUTABLE_ROLES.has(data.role))) {
+      throw new HttpError(400, 'role must be member or required_reviewer');
+    }
+    if (data.status !== undefined && (typeof data.status !== 'string' || !PARTICIPANT_STATUSES.has(data.status))) {
+      throw new HttpError(400, 'status must be active, invited, or responded');
+    }
+  } else if (isWaiverCommit) {
+    if (
+      !(data.reviewWaivedAt instanceof Date)
+      || typeof data.reviewWaivedById !== 'string'
+      || typeof data.reviewWaiverReason !== 'string'
+      || !data.reviewWaiverReason.trim()
+    ) {
+      throw new HttpError(400, 'waiver commit requires actor, time, and non-empty reason');
+    }
+  } else {
+    throw new HttpError(
+      400,
+      'Participant update may change only presentation role/status or commit a complete review waiver',
+    );
+  }
   return prisma.forumThreadParticipant.update({ where: { id }, data });
 }
 
 export async function softDeleteParticipant(id: string) {
-  return prisma.forumThreadParticipant.update({
+  if (!isUuid(id)) throw new HttpError(404, 'Participant not found');
+  const participant = await prisma.forumThreadParticipant.findUnique({
     where: { id },
-    data: { leftAt: new Date() },
+    select: { id: true, leftAt: true },
   });
+  if (!participant || participant.leftAt) throw new HttpError(404, 'Participant not found');
+  throw new HttpError(
+    409,
+    'LEGACY_PARTICIPANT_REMOVE_DISABLED: participant removal must not mutate Watch or Read State',
+  );
 }

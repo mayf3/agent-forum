@@ -87,6 +87,9 @@ function mockStore(store: Map<string, any>) {
         for (const [k, v] of Object.entries(where)) {
           if (k === 'threadId') items = items.filter(i => i.threadId === v);
           if (k === 'id') items = items.filter(i => i.id === v);
+          if (k === 'messageId') items = items.filter(i => i.messageId === v);
+          if (k === 'principalId') items = items.filter(i => i.principalId === v);
+          if (k === 'emoji') items = items.filter(i => i.emoji === v);
           if (k === 'deletedAt' && v === null) items = items.filter(i => !i.deletedAt);
           if (k === 'agentId') items = items.filter(i => i.agentId === v);
           if (k === 'leftAt' && v === null) items = items.filter(i => !i.leftAt);
@@ -209,7 +212,11 @@ function mockStore(store: Map<string, any>) {
 }
 
 function createMockPrisma() {
-  const t = mockStore(threads);
+  const threadStore = mockStore(threads);
+  const t = {
+    ...threadStore,
+    create: async ({ data }: any) => threadStore.create({ data: { status: 'open', ...data } }),
+  };
   const m = mockStore(messages);
   const r = mockStore(reactions);
   const p = mockStore(participants);
@@ -346,11 +353,97 @@ void describe('Message Reactions', async () => {
       principalId: USER_B.id, principalName: USER_B.name, emoji: '🚀',
     });
 
-    const summary = await da.getReactionsForMessage(message.id);
+    const summary = await da.getReactionsForMessage(message.threadId, message.id);
     assert.equal(summary.length, 2);
     const thumbs = summary.find(s => s.emoji === '👍')!;
     assert.equal(thumbs.count, 2);
     assert.deepEqual(thumbs.principals.map(p => p.id).sort(), [USER_B.id, USER_C.id].sort());
+  });
+
+  await it('nested Thread mismatch cannot read or remove another Message reaction', async () => {
+    const first = await seedThreadAndMessage();
+    const second = await seedThreadAndMessage();
+    const added = await da.addReaction({
+      messageId: second.message.id,
+      threadId: second.thread.id,
+      principalId: USER_B.id,
+      principalName: USER_B.name,
+      emoji: '🔒',
+    });
+
+    await assert.rejects(
+      da.getReactionsForMessage(first.thread.id, second.message.id),
+      (error: any) => error.statusCode === 404,
+    );
+    await assert.rejects(
+      da.removeReaction({
+        messageId: second.message.id,
+        threadId: first.thread.id,
+        principalId: USER_B.id,
+        emoji: '🔒',
+      }),
+      (error: any) => error.statusCode === 404,
+    );
+    assert.ok(reactions.has(added.id), 'mismatched nested DELETE must preserve the reaction');
+
+    const correct = await da.getReactionsForMessage(second.thread.id, second.message.id);
+    assert.equal(correct[0].emoji, '🔒');
+  });
+
+  await it('read-only Thread permits reads but rejects mutation; deleted rejects all', async () => {
+    const { thread, message } = await seedThreadAndMessage();
+    const existing = await da.addReaction({
+      messageId: message.id,
+      threadId: thread.id,
+      principalId: USER_B.id,
+      principalName: USER_B.name,
+      emoji: '🧪',
+    });
+
+    for (const status of ['resolved', 'archived']) {
+      threads.get(thread.id).status = status;
+      const summary = await da.getReactionsForMessage(thread.id, message.id);
+      assert.equal(summary[0]?.emoji, '🧪');
+      await assert.rejects(
+        da.addReaction({
+          messageId: message.id,
+          threadId: thread.id,
+          principalId: USER_C.id,
+          principalName: USER_C.name,
+          emoji: '👀',
+        }),
+        (error: any) => error.statusCode === 409,
+      );
+      await assert.rejects(
+        da.removeReaction({
+          messageId: message.id,
+          threadId: thread.id,
+          principalId: USER_B.id,
+          emoji: '🧪',
+        }),
+        (error: any) => error.statusCode === 409,
+      );
+      assert.equal(reactions.size, 1);
+      assert.ok(reactions.has(existing.id));
+    }
+
+    threads.get(thread.id).status = 'deleted';
+    await assert.rejects(da.getReactionsForMessage(thread.id, message.id), (error: any) => error.statusCode === 404);
+    await assert.rejects(da.addReaction({
+      messageId: message.id,
+      threadId: thread.id,
+      principalId: USER_C.id,
+      principalName: USER_C.name,
+      emoji: '👀',
+    }), (error: any) => error.statusCode === 404);
+    await assert.rejects(da.removeReaction({
+      messageId: message.id,
+      threadId: thread.id,
+      principalId: USER_B.id,
+      emoji: '🧪',
+    }), (error: any) => error.statusCode === 404);
+    assert.equal(reactions.size, 1);
+    assert.ok(reactions.has(existing.id));
   });
 
   await it('AC#2 message list includes reactions summary', async () => {

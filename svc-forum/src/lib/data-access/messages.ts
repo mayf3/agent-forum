@@ -20,6 +20,18 @@ export interface CreateMessageInput {
   metadata?: any;
 }
 
+export const ORDINARY_MESSAGE_KINDS = new Set([
+  'comment',
+  'proposal',
+  'challenge',
+  'clarification',
+  'evidence',
+]);
+
+export function isOrdinaryMessageKind(kind: unknown): kind is string {
+  return typeof kind === 'string' && ORDINARY_MESSAGE_KINDS.has(kind);
+}
+
 /**
  * Watch / re-watch a thread for a principal. Only touches watch fields:
  * joinedAt / leftAt / agentId / agentName. Never overwrites role, status,
@@ -79,9 +91,16 @@ export async function createMessage(data: CreateMessageInput) {
 
     const thread = await tx.forumThread.findUnique({
       where: { id: data.threadId },
-      select: { lastMessageAt: true },
+      select: { lastMessageAt: true, status: true },
     });
-    if (!thread) throw new HttpError(404, 'Thread not found');
+    if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+    if (thread.status !== 'open') throw new HttpError(409, 'Thread is not open for new messages');
+    if (data.kind === 'decision') {
+      throw new HttpError(409, 'DIRECT_DECISION_MESSAGE_DISABLED: decision messages may only be projected from Finalization');
+    }
+    if (!isOrdinaryMessageKind(data.kind) && data.kind !== 'system') {
+      throw new HttpError(400, 'kind must be comment, proposal, challenge, clarification, evidence, or system');
+    }
 
     const prevTime = thread.lastMessageAt ? thread.lastMessageAt.getTime() : 0;
     const t1 = new Date(Math.max(t0.getTime() + 1, prevTime + 1));
@@ -140,8 +159,16 @@ export async function findMessagesByThreadId(threadId: string) {
 }
 
 export async function softDeleteMessage(id: string) {
-  return prisma.forumThreadMessage.update({
+  if (!isUuid(id)) throw new HttpError(404, 'Message not found');
+  const message = await prisma.forumThreadMessage.findUnique({
     where: { id },
-    data: { deletedAt: new Date() },
+    select: { threadId: true, deletedAt: true },
   });
+  if (!message || message.deletedAt) throw new HttpError(404, 'Message not found');
+  const thread = await prisma.forumThread.findUnique({
+    where: { id: message.threadId },
+    select: { status: true },
+  });
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+  throw new HttpError(409, 'LEGACY_MESSAGE_DELETE_DISABLED: deletion requires an audited tombstone transaction');
 }
