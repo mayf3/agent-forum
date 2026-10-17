@@ -53,13 +53,12 @@ export async function addReaction(input: {
   // pre-check keeps behaviour consistent regardless of driver error mapping;
   // the @@unique([messageId, principalId, emoji]) constraint remains as the
   // authoritative DB-level guarantee (P2002 → 409 below).
-  const existing = await prisma.forumReaction.findUnique({
+  const existing = await prisma.forumReaction.findFirst({
     where: {
-      messageId_principalId_emoji: {
-        messageId: input.messageId,
-        principalId: input.principalId,
-        emoji,
-      },
+      messageId: input.messageId,
+      threadId: input.threadId,
+      principalId: input.principalId,
+      emoji,
     },
     select: { id: true },
   });
@@ -95,13 +94,12 @@ export async function removeReaction(input: {
   const emoji = input.emoji.trim();
   if (!emoji) throw new HttpError(400, 'emoji is required');
 
-  const existing = await prisma.forumReaction.findUnique({
+  const existing = await prisma.forumReaction.findFirst({
     where: {
-      messageId_principalId_emoji: {
-        messageId: input.messageId,
-        principalId: input.principalId,
-        emoji,
-      },
+      messageId: input.messageId,
+      threadId: input.threadId,
+      principalId: input.principalId,
+      emoji,
     },
   });
   if (!existing) throw new HttpError(404, 'Reaction not found');
@@ -111,9 +109,15 @@ export async function removeReaction(input: {
 }
 
 /** Reaction summary for one message (AC#2). */
-export async function getReactionsForMessage(messageId: string) {
+export async function getReactionsForMessage(threadId: string, messageId: string) {
+  const message = await prisma.forumThreadMessage.findFirst({
+    where: { id: messageId, threadId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!message) throw new HttpError(404, 'Message not found');
+
   const rows = await prisma.forumReaction.findMany({
-    where: { messageId },
+    where: { messageId, threadId },
     orderBy: { createdAt: 'asc' },
   });
   return summarizeReactions(rows);
