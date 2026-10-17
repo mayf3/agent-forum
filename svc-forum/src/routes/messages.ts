@@ -110,7 +110,7 @@ messagesRouter.delete('/:messageId', requireForumWriter, requireModeratorScope()
   const messageId = p(req, 'messageId');
 
   const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
 
   const prisma = getPrisma();
   const message = await prisma.forumThreadMessage.findFirst({
@@ -118,8 +118,5 @@ messagesRouter.delete('/:messageId', requireForumWriter, requireModeratorScope()
     select: { id: true },
   });
   if (!message) throw new HttpError(404, 'Message not found');
-
-  await db.softDeleteMessage(messageId);
-  res.json({ ok: true });
+  throw new HttpError(409, 'LEGACY_MESSAGE_DELETE_DISABLED: deletion requires an audited tombstone transaction');
 }));
-
