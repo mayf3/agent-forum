@@ -70,6 +70,7 @@ export async function searchAll(q: string, page = 1, limit = SEARCH_DEFAULT_LIMI
   const [threadHits, messageHits, outcomeHits] = await Promise.all([
     prisma.forumThread.findMany({
       where: {
+        status: { not: 'deleted' },
         OR: [
           { title: { contains: q, mode: 'insensitive' } },
         ],
@@ -78,6 +79,7 @@ export async function searchAll(q: string, page = 1, limit = SEARCH_DEFAULT_LIMI
     prisma.forumThreadMessage.findMany({
       where: {
         deletedAt: null,
+        thread: { status: { not: 'deleted' } },
         content: { contains: q, mode: 'insensitive' },
       },
       include: {
@@ -86,6 +88,7 @@ export async function searchAll(q: string, page = 1, limit = SEARCH_DEFAULT_LIMI
     }),
     prisma.forumOutcome.findMany({
       where: {
+        thread: { status: { not: 'deleted' } },
         summaryMd: { contains: q, mode: 'insensitive' },
       },
       include: {
