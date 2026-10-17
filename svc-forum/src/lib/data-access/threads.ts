@@ -188,7 +188,15 @@ export async function createContextSnapshot(data: {
   takenByName: string;
   note?: string | null;
 }) {
-  return prisma.forumContextSnapshot.create({ data });
+  return prisma.$transaction(async (tx) => {
+    const thread = await tx.forumThread.findUnique({
+      where: { id: data.threadId },
+      select: { status: true },
+    });
+    if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+    if (thread.status !== 'open') throw new HttpError(409, 'Thread is not open for context snapshots');
+    return tx.forumContextSnapshot.create({ data });
+  });
 }
 
 export async function findSnapshotsByThreadId(threadId: string) {

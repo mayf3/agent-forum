@@ -624,6 +624,43 @@ matrixSuite({
   body: { sourceType: 'okr', sourceRef: 'okr-123', title: 'Test' },
   okStatus: 201,
   needsThread: true,
+  extra: () => {
+    it('resolved/archived return 409 and deleted returns 404 at route and data layers', async () => {
+      const app = await buildApp('../src/routes/context-snapshots.js', 'snapshotsRouter', '/api/threads/:threadId/context-snapshots');
+      const token = await signAgentToken();
+      const dataAccess = await import('../src/lib/data-access.js');
+
+      for (const [status, expectedStatus] of [
+        ['resolved', 409],
+        ['archived', 409],
+        ['deleted', 404],
+      ] as const) {
+        threads.get(SEED_THREAD_ID)!.status = status;
+        await assert.rejects(
+          dataAccess.createContextSnapshot({
+            threadId: SEED_THREAD_ID,
+            snapshotType: 'thread_creation',
+            sourceType: 'okr',
+            sourceRef: `direct-${status}`,
+            title: `Direct ${status}`,
+            takenById: AGENT_SUB,
+            takenByName: 'Test Forum Agent',
+          }),
+          (error: any) => error.statusCode === expectedStatus,
+        );
+
+        const res = await request(
+          app,
+          'POST',
+          `/api/threads/${SEED_THREAD_ID}/context-snapshots`,
+          token,
+          { sourceType: 'okr', sourceRef: `http-${status}`, title: `HTTP ${status}` },
+        );
+        assert.equal(res.status, expectedStatus);
+        assert.equal(snapshots.size, 0);
+      }
+    });
+  },
 });
 
 // ── Observer read-only unchanged ──
