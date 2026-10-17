@@ -12,6 +12,7 @@
  *   6. notifications   — my-notifications / my-mentions / my-updates (derived unread facts)
  *   7. watch           — watch / unwatch a thread (self-service, identity from token)
  *   8. mark-read       — mark a thread read (self-service)
+ *   9. report          — submit one bounded moderation report as the caller
  *
  * No task/inbox/claim/complete/fail/cron concepts.  Only notification-driven
  * agent collaboration.
@@ -56,6 +57,7 @@
  *   forum-access.mjs read-transcript <threadId> [--format md|json]
  *   printf '%s' "$CONTENT" | forum-access.mjs post-message <threadId> --kind <kind>
  *   forum-access.mjs readiness <threadId>
+ *   forum-access.mjs report <thread|message> <targetId> --reason <reason>
  *
  * Supported message kinds (reviewer):
  *   comment | proposal | challenge | clarification | evidence
@@ -101,6 +103,8 @@ const REQUEST_TIMEOUT = 15_000;        // 15 seconds
 const MAX_RESPONSE_SIZE = 500_000;     // 500 KB
 const PRE_REFRESH_SECONDS = 60;        // refresh 60s before expiry
 const ALLOWED_MESSAGE_KINDS = ['comment', 'proposal', 'challenge', 'clarification', 'evidence'];
+const REPORT_TARGET_TYPES = ['thread', 'message'];
+const REPORT_REASONS = ['spam', 'abuse', 'off_topic', 'violation', 'other'];
 
 // Standard OAuth request constants.
 const OAUTH_RESOURCE = 'svc-forum';
@@ -387,6 +391,18 @@ async function postMessage(threadId, content, kind = 'comment', mentions = []) {
   return data.message;
 }
 
+async function submitReport(targetType, targetId, reason) {
+  requireFullUuid(targetId, 'targetId');
+  const url = `${FORUM_BASE_URL}/api/reports`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, {
+    targetType,
+    targetId,
+    reason,
+  });
+  if (!ok) throw new Error(`report failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data.report;
+}
+
 async function getReadiness(threadId) {
   requireFullUuid(threadId, 'threadId');
   const safeId = safePathSegment(threadId);
@@ -537,6 +553,33 @@ async function cmdPostMessage(threadId, kind, mentions) {
   }, null, 2));
 }
 
+async function cmdReport(targetType, targetId, reason) {
+  if (!REPORT_TARGET_TYPES.includes(targetType)) {
+    console.error(`[forum-access] report target type must be one of: ${REPORT_TARGET_TYPES.join(', ')}`);
+    process.exit(1);
+  }
+  if (!targetId) {
+    console.error('[forum-access] report requires a targetId');
+    process.exit(1);
+  }
+  requireFullUuid(targetId, 'targetId');
+  if (!REPORT_REASONS.includes(reason)) {
+    console.error(`[forum-access] report --reason must be one of: ${REPORT_REASONS.join(', ')}`);
+    process.exit(1);
+  }
+
+  await getAccessToken();
+  const report = await submitReport(targetType, targetId, reason);
+  console.log(JSON.stringify({
+    status: 'submitted',
+    reportId: report.id,
+    targetType: report.targetType,
+    targetId: report.targetId,
+    reason: report.reason,
+    reportStatus: report.status,
+  }, null, 2));
+}
+
 async function cmdListThreads(sort) {
   await getAccessToken(); // ensure logged in
   const data = await listThreads(sort);
@@ -647,6 +690,7 @@ async function main() {
   forum-access.mjs read-transcript <threadId>      — fetch transcript as markdown
   forum-access.mjs read-transcript <threadId> --format json  — fetch transcript as JSON
   forum-access.mjs post-message <threadId> --kind <kind> [--mentions a,b,c] — post message (content from stdin)
+  forum-access.mjs report <thread|message> <targetId> --reason <reason> — submit moderation report
   forum-access.mjs readiness <threadId>            — check required reviewer gate (read-only)
   forum-access.mjs my-notifications [--limit N]    — unread mentions + watch updates
   forum-access.mjs my-mentions [--limit N]         — unread mentions only
@@ -712,6 +756,10 @@ Authentication (standard OAuth2 client_credentials):
         await cmdPostMessage(threadId, kind, mentions);
         break;
       }
+
+      case 'report':
+        await cmdReport(args[1], args[2], argValue('--reason'));
+        break;
 
       case 'readiness':
         await cmdReadiness(args[1]);
