@@ -134,6 +134,20 @@ function createMockServer(customRoutes) {
       return;
     }
 
+    if (url === '/api/threads' && method === 'POST') {
+      const parsed = JSON.parse(body || '{}');
+      sendJson(res, 201, {
+        thread: {
+          id: VALID_UUID,
+          title: parsed.title,
+          type: 'discussion',
+          status: 'open',
+          tags: parsed.tags || [],
+        },
+      });
+      return;
+    }
+
     // ── V1 awareness endpoints ─────────────────────────────────────────
     const u = new URL(url, 'http://mock.local');
 
@@ -375,6 +389,24 @@ describe('cli parsing', () => {
     assert.ok(r.stderr.includes('Unknown'));
   });
 
+  it('create-thread without --title fails before login', () => {
+    const r = spawnSync('node', [SCRIPT, 'create-thread'], {
+      encoding: 'utf-8', timeout: 3000,
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
+    });
+    assert.equal(r.status, 1);
+    assert.ok(r.stderr.includes('requires --title'));
+  });
+
+  it('create-thread rejects a missing --title value', () => {
+    const r = spawnSync('node', [SCRIPT, 'create-thread', '--title', '--tags', 'forum'], {
+      encoding: 'utf-8', timeout: 3000,
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
+    });
+    assert.equal(r.status, 1);
+    assert.ok(r.stderr.includes('requires --title'));
+  });
+
   it('read-thread without threadId fails', () => {
     const r = spawnSync('node', [SCRIPT, 'read-thread'], {
       encoding: 'utf-8', timeout: 3000,
@@ -488,6 +520,59 @@ describe('integration', () => {
     const lower = stderr.toLowerCase();
     assert.ok(lower.includes('error'), 'stderr should include Error');
     assert.ok(lower.includes('invalid') || lower.includes('fail'), 'stderr should describe the failure');
+  });
+
+  // ── Create Thread ──
+
+  it('create-thread creates one ordinary discussion and returns the full UUID', async () => {
+    const r = await runScriptAsync(
+      ['create-thread', '--title', 'Canonical discussion', '--tags', 'governance, forum,governance'],
+      null, port
+    );
+    assert.equal(r.status, 0, r.stderr);
+
+    const output = JSON.parse(r.stdout);
+    assert.equal(output.status, 'created');
+    assert.equal(output.threadId, VALID_UUID);
+    assert.equal(output.shortId, VALID_UUID.slice(0, 8));
+    assert.equal(output.title, 'Canonical discussion');
+    assert.equal(output.type, 'discussion');
+    assert.equal(output.threadStatus, 'open');
+    assert.deepEqual(output.tags, ['governance', 'forum']);
+
+    const calls = mock.requestLog.filter(
+      e => e.url === '/api/threads' && e.method === 'POST'
+    );
+    assert.equal(calls.length, 1);
+    assert.deepEqual(JSON.parse(calls[0].body), {
+      title: 'Canonical discussion',
+      tags: ['governance', 'forum'],
+    });
+  });
+
+  it('create-thread never submits identity, participants, authority, or governance fields', async () => {
+    const r = await runScriptAsync(
+      [
+        'create-thread', '--title', 'Safe ordinary thread',
+        '--participants', 'other-agent', '--role', 'moderator',
+        '--status', 'hidden', '--pinned', 'true',
+      ],
+      null, port
+    );
+    assert.equal(r.status, 0, r.stderr);
+
+    const calls = mock.requestLog.filter(
+      e => e.url === '/api/threads' && e.method === 'POST'
+    );
+    assert.equal(calls.length, 1);
+    const posted = JSON.parse(calls[0].body);
+    assert.deepEqual(posted, { title: 'Safe ordinary thread' });
+    for (const forbidden of [
+      'agentId', 'authorId', 'createdById', 'createdByType', 'participants',
+      'role', 'status', 'pinned', 'featured', 'outcome',
+    ]) {
+      assert.equal(posted[forbidden], undefined, `${forbidden} must not be submitted`);
+    }
   });
 
   // ── Read Thread ──
@@ -748,6 +833,12 @@ describe('integration', () => {
     assert.equal(r.status, 0, r.stderr);
     forumOps = mock.requestLog.filter(e => e.url.startsWith('/api/threads'));
     assert.equal(forumOps.length, 1, 'post-message should make exactly 1 forum call');
+
+    mock.resetLog();
+    r = await runScriptAsync(['create-thread', '--title', 'one operation'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    forumOps = mock.requestLog.filter(e => e.url.startsWith('/api/threads'));
+    assert.equal(forumOps.length, 1, 'create-thread should make exactly 1 forum call');
   });
 
   // ── V1 awareness: notifications, watch/unwatch, mark-read, --sort ──
