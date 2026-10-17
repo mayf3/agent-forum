@@ -60,7 +60,7 @@ export async function findMyNotifications(opts: {
       }));
       const where: Prisma.ForumThreadMessageWhereInput = {
         deletedAt: null,
-        thread: { status: { not: 'archived' } },
+        thread: { status: { notIn: ['archived', 'deleted'] } },
         OR: or,
       };
       const [items, count] = await Promise.all([
@@ -110,7 +110,7 @@ export async function findMyNotifications(opts: {
   const whereBase: Prisma.ForumThreadMessageWhereInput = {
     deletedAt: null,
     authorId: { not: opts.principalId },
-    thread: { status: { not: 'archived' } },
+    thread: { status: { notIn: ['archived', 'deleted'] } },
   };
 
   if (opts.reason === 'watch') {
