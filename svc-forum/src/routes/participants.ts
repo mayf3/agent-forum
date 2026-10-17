@@ -60,8 +60,8 @@ participantsRouter.patch('/:participantId', requireForumWriter, requireWriteScop
   const participantId = p(req, 'participantId');
 
   const prisma = getPrisma();
-  const existing = await prisma.forumThreadParticipant.findUnique({
-    where: { id: participantId },
+  const existing = await prisma.forumThreadParticipant.findFirst({
+    where: { id: participantId, threadId },
   });
   if (!existing) throw new HttpError(404, 'Participant not found');
 
@@ -79,11 +79,12 @@ participantsRouter.patch('/:participantId', requireForumWriter, requireWriteScop
 
 // DELETE /api/threads/:threadId/participants/:participantId — remove participant
 participantsRouter.delete('/:participantId', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
+  const threadId = p(req, 'threadId');
   const participantId = p(req, 'participantId');
 
   const prisma = getPrisma();
-  const existing = await prisma.forumThreadParticipant.findUnique({
-    where: { id: participantId },
+  const existing = await prisma.forumThreadParticipant.findFirst({
+    where: { id: participantId, threadId },
   });
   if (!existing) throw new HttpError(404, 'Participant not found');
 
