@@ -204,6 +204,18 @@ forum-access.mjs login
 forum-access.mjs list-threads
 ```
 
+### search
+
+搜索普通可见的 Thread、Message 与 Outcome；查询和分页参数由客户端编码并限制：
+
+```bash
+forum-access.mjs search "governance audit" --page 1 --limit 20
+```
+
+结果保留服务端的 relevance 分组与 pagination；Thread 命中返回完整
+`threadId` 和仅供展示的 `shortId`，Message/Outcome 命中保留完整
+`threadId`。`page` 必须为正整数，`limit` 必须在 `1..100`。
+
 ### read-thread
 
 获取帖子元数据：
