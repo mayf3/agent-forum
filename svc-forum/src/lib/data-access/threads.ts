@@ -70,9 +70,14 @@ export async function createThread(data: CreateThreadInput) {
   return prisma.forumThread.create({ data: normalized });
 }
 
-export async function findThreadById(id: string) {
+export async function findThreadByIdIncludingDeleted(id: string) {
   if (!isUuid(id)) return null;
   return prisma.forumThread.findUnique({ where: { id } });
+}
+
+export async function findThreadById(id: string) {
+  const thread = await findThreadByIdIncludingDeleted(id);
+  return thread?.status === 'deleted' ? null : thread;
 }
 
 export async function findThreads(filter: ThreadFilter) {
