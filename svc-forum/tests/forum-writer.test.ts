@@ -536,6 +536,144 @@ matrixSuite({
   },
 });
 
+// ── Thread metadata object authorization and deleted terminality ──────
+
+void describe('PATCH /api/threads/:threadId — creator or verified moderator only', async () => {
+  let prismaMod: typeof import('../src/lib/prisma.js');
+  const THREAD_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const CREATOR_SUB = '11111111-1111-4111-8111-111111111111';
+  const CREATOR_ID = '22222222-2222-4222-8222-222222222222';
+  const WRITER_SUB = '33333333-3333-4333-8333-333333333333';
+  const WRITER_ID = '44444444-4444-4444-8444-444444444444';
+  const MODERATOR_SUB = '55555555-5555-4555-8555-555555555555';
+  const MODERATOR_ID = '66666666-6666-4666-8666-666666666666';
+
+  before(async () => {
+    prismaMod = await import('../src/lib/prisma.js');
+  });
+
+  function seedPrincipal(id: string, authSubject: string, agentId: string) {
+    principals.set(id, {
+      id,
+      authSubject,
+      agentId,
+      principalType: 'agent',
+      status: 'active',
+      displayName: agentId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
+
+  async function tokenFor(sub: string, agentId: string, scope: string) {
+    return _signTestToken({ sub, agent_id: agentId, client_id: 'test-client', scope });
+  }
+
+  beforeEach(() => {
+    resetDb();
+    prismaMod.setPrisma(createMockPrisma() as any);
+    seedPrincipal(CREATOR_ID, CREATOR_SUB, 'creator-agent');
+    seedPrincipal(WRITER_ID, WRITER_SUB, 'ordinary-writer');
+    seedPrincipal(MODERATOR_ID, MODERATOR_SUB, 'moderator-agent');
+    seedThread({
+      id: THREAD_ID,
+      title: 'Original title',
+      createdById: CREATOR_ID,
+      createdByName: 'creator-agent',
+    });
+  });
+
+  it('denies an ordinary non-creator with forum.write before mutation', async () => {
+    const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    const token = await tokenFor(WRITER_SUB, 'ordinary-writer', 'forum.read forum.write');
+    const res = await request(app, 'PATCH', `/api/threads/${THREAD_ID}`, token, {
+      title: 'Unauthorized title',
+    });
+    assert.equal(res.status, 403);
+    assert.equal(threads.get(THREAD_ID)?.title, 'Original title');
+  });
+
+  it('does not grant platform authority from a participant moderator role or body field', async () => {
+    participants.set('77777777-7777-4777-8777-777777777777', {
+      id: '77777777-7777-4777-8777-777777777777',
+      threadId: THREAD_ID,
+      agentId: WRITER_ID,
+      agentName: 'ordinary-writer',
+      role: 'moderator',
+      status: 'active',
+      leftAt: null,
+    });
+    const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    const token = await tokenFor(WRITER_SUB, 'ordinary-writer', 'forum.read forum.write');
+    const res = await request(app, 'PATCH', `/api/threads/${THREAD_ID}`, token, {
+      title: 'Role-escalated title',
+      role: 'moderator',
+    });
+    assert.equal(res.status, 403);
+    assert.equal(threads.get(THREAD_ID)?.title, 'Original title');
+  });
+
+  it('allows the immutable Thread creator to update descriptive metadata', async () => {
+    const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    const token = await tokenFor(CREATOR_SUB, 'creator-agent', 'forum.read forum.write');
+    const res = await request(app, 'PATCH', `/api/threads/${THREAD_ID}`, token, {
+      title: 'Creator title',
+      tags: ['creator-update'],
+    });
+    assert.equal(res.status, 200);
+    assert.equal(threads.get(THREAD_ID)?.title, 'Creator title');
+    assert.deepEqual(threads.get(THREAD_ID)?.tags, ['creator-update']);
+  });
+
+  it('allows a verified forum.moderate principal to update metadata', async () => {
+    const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    const token = await tokenFor(MODERATOR_SUB, 'moderator-agent', 'forum.read forum.write forum.moderate');
+    const res = await request(app, 'PATCH', `/api/threads/${THREAD_ID}`, token, {
+      title: 'Moderator title',
+    });
+    assert.equal(res.status, 200);
+    assert.equal(threads.get(THREAD_ID)?.title, 'Moderator title');
+  });
+
+  it('still requires forum.moderate for pinned/featured even when caller is creator', async () => {
+    const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    const token = await tokenFor(CREATOR_SUB, 'creator-agent', 'forum.read forum.write');
+    const res = await request(app, 'PATCH', `/api/threads/${THREAD_ID}`, token, { pinned: true });
+    assert.equal(res.status, 403);
+    assert.equal(threads.get(THREAD_ID)?.pinned, undefined);
+  });
+
+  it('deleted Thread is terminal even for verified forum.moderate', async () => {
+    threads.get(THREAD_ID)!.status = 'deleted';
+    const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    const token = await tokenFor(MODERATOR_SUB, 'moderator-agent', 'forum.read forum.write forum.moderate');
+    const res = await request(app, 'PATCH', `/api/threads/${THREAD_ID}`, token, {
+      title: 'Must not mutate tombstone',
+      pinned: true,
+    });
+    assert.equal(res.status, 404);
+    assert.equal(threads.get(THREAD_ID)?.status, 'deleted');
+    assert.equal(threads.get(THREAD_ID)?.title, 'Original title');
+    assert.equal(threads.get(THREAD_ID)?.pinned, undefined);
+  });
+
+  it('resolved and archived Threads reject metadata mutation with state conflict', async () => {
+    const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    const token = await tokenFor(MODERATOR_SUB, 'moderator-agent', 'forum.read forum.write forum.moderate');
+    for (const status of ['resolved', 'archived']) {
+      threads.get(THREAD_ID)!.status = status;
+      const res = await request(app, 'PATCH', `/api/threads/${THREAD_ID}`, token, {
+        title: `Must not mutate ${status}`,
+        pinned: true,
+      });
+      assert.equal(res.status, 409);
+      assert.equal(threads.get(THREAD_ID)?.status, status);
+      assert.equal(threads.get(THREAD_ID)?.title, 'Original title');
+      assert.equal(threads.get(THREAD_ID)?.pinned, undefined);
+    }
+  });
+});
+
 matrixSuite({
   name: 'POST /api/threads/:tid/messages — post message',
   routerModule: '../src/routes/messages.js',
