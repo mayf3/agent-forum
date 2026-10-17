@@ -137,6 +137,20 @@ function createMockServer(customRoutes) {
     // ── V1 awareness endpoints ─────────────────────────────────────────
     const u = new URL(url, 'http://mock.local');
 
+    if (u.pathname === '/api/reports' && method === 'POST') {
+      const parsed = JSON.parse(body || '{}');
+      sendJson(res, 201, {
+        report: {
+          id: 'report-1',
+          targetType: parsed.targetType,
+          targetId: parsed.targetId,
+          reason: parsed.reason,
+          status: 'pending',
+        },
+      });
+      return;
+    }
+
     if (u.pathname === '/api/threads' && method === 'GET') {
       // Fallback list route — matches query params (?sort=latest) without
       // swallowing unknown URLs (pathname + method must still match).
@@ -346,6 +360,16 @@ describe('static analysis', () => {
     }
   });
 
+  it('report body cannot supply reporter identity or moderation action', () => {
+    const fn = SOURCE.match(/async function submitReport[\s\S]*?\n}/)?.[0] || '';
+    assert.ok(fn.includes('targetType'));
+    assert.ok(fn.includes('targetId'));
+    assert.ok(fn.includes('reason'));
+    assert.ok(!fn.includes('reporterId'));
+    assert.ok(!fn.includes('reporterName'));
+    assert.ok(!fn.includes('action'));
+  });
+
   it('login output does not contain access_token key', () => {
     const m = SOURCE.match(/console\.log\(JSON\.stringify\(\{([\s\S]{0,500})\},.*\)\)/);
     if (m) {
@@ -549,6 +573,47 @@ describe('integration', () => {
     assert.equal(data.items[0].shortId, VALID_UUID.slice(0, 8), 'shortId is display-only prefix');
   });
 
+  it('report submits one bounded identity-free request and preserves the target UUID', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(
+      ['report', 'message', VALID_UUID, '--reason', 'violation'],
+      null,
+      port,
+    );
+    assert.equal(r.status, 0, r.stderr);
+
+    const output = JSON.parse(r.stdout);
+    assert.equal(output.status, 'submitted');
+    assert.equal(output.reportId, 'report-1');
+    assert.equal(output.targetType, 'message');
+    assert.equal(output.targetId, VALID_UUID);
+    assert.equal(output.reason, 'violation');
+    assert.equal(output.reportStatus, 'pending');
+
+    const calls = mock.requestLog.filter(e => e.url === '/api/reports' && e.method === 'POST');
+    assert.equal(calls.length, 1);
+    assert.deepEqual(JSON.parse(calls[0].body), {
+      targetType: 'message',
+      targetId: VALID_UUID,
+      reason: 'violation',
+    });
+  });
+
+  it('report rejects invalid targets and reasons before a Forum request', async () => {
+    for (const args of [
+      ['report'],
+      ['report', 'outcome', VALID_UUID, '--reason', 'spam'],
+      ['report', 'thread', '52423a12', '--reason', 'spam'],
+      ['report', 'thread', VALID_UUID],
+      ['report', 'thread', VALID_UUID, '--reason', 'not-a-reason'],
+    ]) {
+      mock.resetLog();
+      const r = await runScriptAsync(args, null, port);
+      assert.equal(r.status, 1);
+      assert.equal(mock.requestLog.filter(e => e.url === '/api/reports').length, 0);
+    }
+  });
+
   // ── Read Transcript ──
 
   it('read-transcript uses complete UUID (default md format)', async () => {
@@ -748,6 +813,16 @@ describe('integration', () => {
     assert.equal(r.status, 0, r.stderr);
     forumOps = mock.requestLog.filter(e => e.url.startsWith('/api/threads'));
     assert.equal(forumOps.length, 1, 'post-message should make exactly 1 forum call');
+
+    mock.resetLog();
+    r = await runScriptAsync(
+      ['report', 'thread', VALID_UUID, '--reason', 'spam'],
+      null,
+      port,
+    );
+    assert.equal(r.status, 0, r.stderr);
+    forumOps = mock.requestLog.filter(e => e.url === '/api/reports');
+    assert.equal(forumOps.length, 1, 'report should make exactly 1 forum call');
   });
 
   // ── V1 awareness: notifications, watch/unwatch, mark-read, --sort ──

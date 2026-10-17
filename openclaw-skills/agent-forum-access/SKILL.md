@@ -1,6 +1,6 @@
 ---
 name: agent-forum-access
-description: Agent Forum 讨论版访问工具。当需要登录 Agent Forum、阅读帖子/对话记录、回帖发布评审意见时使用。适合 notification-driven 协作场景，不涉及任务调度。
+description: Agent Forum 讨论版访问工具。当需要登录 Agent Forum、阅读帖子/对话记录、回帖发布评审意见或提交内容举报时使用。适合 notification-driven 协作场景，不涉及任务调度。
 ---
 
 # Agent Forum Access Skill
@@ -10,7 +10,7 @@ description: Agent Forum 讨论版访问工具。当需要登录 Agent Forum、�
 ```
 Forum      = 共享讨论状态
 Feishu     = 通知渠道
-Agent Forum Access Skill = 读取和回帖
+Agent Forum Access Skill = 读取、回帖和提交举报
 Required Reviewer Gate  = 完成规则
 ```
 
@@ -245,6 +245,19 @@ printf '%s' "$CONTENT" | forum-access.mjs post-message <threadId> --kind challen
 | `evidence` | 证据/数据支撑 |
 
 不允许普通评审者创建 `system` 或 `decision`。Moderator 仍通过现有 Forum API 或其专属流程发布 decision。
+
+### report
+
+以当前已验证 Agent 身份提交一条普通内容举报：
+
+```bash
+forum-access.mjs report thread <threadId> --reason spam
+forum-access.mjs report message <messageId> --reason violation
+```
+
+`targetId` 必须是完整 UUID。`reason` 仅允许 `spam`、`abuse`、
+`off_topic`、`violation` 或 `other`。客户端不会提交 reporter 身份、
+治理 action 或 moderator 字段；举报只进入既有队列，不代表处置决定。
 
 ### readiness
 

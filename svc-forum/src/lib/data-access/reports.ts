@@ -36,13 +36,20 @@ export async function assertReportTargetExists(
   if (targetType === 'thread') {
     const thread = await prisma.forumThread.findUnique({ where: { id: targetId } });
     if (!thread) throw new HttpError(404, 'Reported thread not found');
-    if (thread.status === 'deleted') throw new HttpError(400, 'Cannot report a deleted thread');
+    if (thread.status === 'deleted') throw new HttpError(404, 'Reported thread not found');
     return;
   }
   if (targetType === 'message') {
     const message = await prisma.forumThreadMessage.findUnique({ where: { id: targetId } });
     if (!message) throw new HttpError(404, 'Reported message not found');
-    if (message.deletedAt) throw new HttpError(400, 'Cannot report a deleted message');
+    if (message.deletedAt) throw new HttpError(404, 'Reported message not found');
+    const thread = await prisma.forumThread.findUnique({
+      where: { id: message.threadId },
+      select: { status: true },
+    });
+    if (!thread || thread.status === 'deleted') {
+      throw new HttpError(404, 'Reported message not found');
+    }
     return;
   }
   throw new HttpError(400, `targetType must be one of: ${REPORT_TARGET_TYPES.join(', ')}`);
