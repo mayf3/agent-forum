@@ -320,7 +320,11 @@ async function addParticipants(da: any, threadId: string, extra: Array<{ id: str
   }
 }
 
-async function signToken(userId: string, _userName: string) {
+async function signToken(
+  userId: string,
+  _userName: string,
+  scope = 'forum.read forum.write forum.moderate',
+) {
   // Standard OAuth access token: RS256 + full forum scopes.
   // agent_id must be unique per token — JIT principal resolution rejects a
   // second authSubject claiming an already-mapped agent_id (409 → 401).
@@ -328,7 +332,7 @@ async function signToken(userId: string, _userName: string) {
     sub: userId,
     agent_id: userId,
     client_id: 'mc_test_client',
-    scope: 'forum.read forum.write forum.moderate',
+    scope,
   });
 }
 
@@ -466,8 +470,8 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     assert.deepEqual(decisionRes.body.pendingReviewerIds, [REVIEWER_B.id]);
   });
 
-  // ── Test 4: Both reviewers replied → success ──
-  await it('4. Both reviewers replied — decision and resolve succeed', async () => {
+  // ── Test 4: readiness cannot enable the legacy resolve path ──
+  await it('4. Both reviewers replied — legacy resolve remains disabled', async () => {
     const thread = await createTestThread(da);
     await addParticipants(da, thread.id, [
       { id: REVIEWER_A.id, name: REVIEWER_A.name, role: 'required_reviewer' },
@@ -500,12 +504,15 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       .send({ content: 'Final decision', kind: 'decision' });
     assert.equal(decisionRes.status, 201, 'decision should succeed when all reviewers replied');
 
-    // Resolve → 200
+    // Resolve remains disabled until atomic Finalization is available.
     const resolveRes = await request(app)
       .post(`/api/threads/${thread.id}/resolve`)
       .set('Authorization', `Bearer ${token}`)
       .send({ summaryMd: 'All resolved.' });
-    assert.equal(resolveRes.status, 200, 'resolve should succeed when all reviewers replied');
+    assert.equal(resolveRes.status, 409);
+    assert.match(resolveRes.body.error, /LEGACY_RESOLVE_DISABLED/);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'open');
   });
 
   // ── Test 5: system message doesn't count as reviewer reply ──
@@ -628,12 +635,15 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       .send({ content: 'Decision after waiver', kind: 'decision' });
     assert.equal(decisionRes.status, 201, 'decision should succeed when one replied, other waived');
 
-    // Resolve → 200
+    // Readiness does not enable the non-atomic legacy resolve path.
     const resolveRes = await request(app)
       .post(`/api/threads/${thread.id}/resolve`)
       .set('Authorization', `Bearer ${token}`)
       .send({ summaryMd: 'Resolved after waiver.' });
-    assert.equal(resolveRes.status, 200, 'resolve should succeed when one replied, other waived');
+    assert.equal(resolveRes.status, 409);
+    assert.match(resolveRes.body.error, /LEGACY_RESOLVE_DISABLED/);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'open');
   });
 
   // ── Test 9: Empty waiver reason → 400 ──
@@ -816,12 +826,15 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       .send({ content: 'Decision after manual review', kind: 'decision' });
     assert.equal(decisionRes.status, 201, 'decision should succeed in manual mode');
 
-    // Step 3: Resolve
+    // Step 3: legacy resolve remains disabled.
     const resolveRes = await request(app)
       .post(`/api/threads/${thread.id}/resolve`)
       .set('Authorization', `Bearer ${creatorToken}`)
       .send({ summaryMd: 'Manual review completed.' });
-    assert.equal(resolveRes.status, 200, 'resolve should succeed in manual mode');
+    assert.equal(resolveRes.status, 409);
+    assert.match(resolveRes.body.error, /LEGACY_RESOLVE_DISABLED/);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'open');
   });
 
   // ── Test 14: Waiver is idempotent ──
@@ -904,5 +917,52 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     // Readiness should be ready now
     const readiness = await da.getThreadReviewReadiness(thread.id);
     assert.equal(readiness!.ready, true);
+  });
+
+  await it('17. Resolve requires creator or verified moderator scope', async () => {
+    const thread = await createTestThread(da);
+    await addParticipants(da, thread.id, [
+      { id: INTRUDER.id, name: INTRUDER.name, role: 'moderator' },
+    ]);
+
+    const app = await buildApp();
+    const request = (await import('supertest')).default;
+    const writerToken = await signToken(INTRUDER.id, INTRUDER.name, 'forum.read forum.write');
+    const denied = await request(app)
+      .post(`/api/threads/${thread.id}/resolve`)
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send({ summaryMd: 'Participant role must not grant resolve authority.' });
+
+    assert.equal(denied.status, 403);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'open');
+
+    const moderatorToken = await signToken(MODERATOR.id, MODERATOR.name);
+    const disabled = await request(app)
+      .post(`/api/threads/${thread.id}/resolve`)
+      .set('Authorization', `Bearer ${moderatorToken}`)
+      .send({ summaryMd: 'Verified moderator resolution.' });
+
+    assert.equal(disabled.status, 409);
+    assert.match(disabled.body.error, /LEGACY_RESOLVE_DISABLED/);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'open');
+  });
+
+  await it('18. Deleted Thread is terminal even for verified moderator resolve', async () => {
+    const thread = await createTestThread(da);
+    await da.updateThread(thread.id, { status: 'deleted' });
+
+    const app = await buildApp();
+    const request = (await import('supertest')).default;
+    const moderatorToken = await signToken(MODERATOR.id, MODERATOR.name);
+    const response = await request(app)
+      .post(`/api/threads/${thread.id}/resolve`)
+      .set('Authorization', `Bearer ${moderatorToken}`)
+      .send({ summaryMd: 'Must not revive a tombstone.' });
+
+    assert.equal(response.status, 404);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'deleted');
   });
 });
