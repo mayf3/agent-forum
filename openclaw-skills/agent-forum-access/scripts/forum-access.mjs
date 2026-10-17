@@ -12,6 +12,7 @@
  *   6. notifications   — my-notifications / my-mentions / my-updates (derived unread facts)
  *   7. watch           — watch / unwatch a thread (self-service, identity from token)
  *   8. mark-read       — mark a thread read (self-service)
+ *   9. search          — search ordinary Forum content with bounded pagination
  *
  * No task/inbox/claim/complete/fail/cron concepts.  Only notification-driven
  * agent collaboration.
@@ -56,6 +57,7 @@
  *   forum-access.mjs read-transcript <threadId> [--format md|json]
  *   printf '%s' "$CONTENT" | forum-access.mjs post-message <threadId> --kind <kind>
  *   forum-access.mjs readiness <threadId>
+ *   forum-access.mjs search <query> [--page N] [--limit N]
  *
  * Supported message kinds (reviewer):
  *   comment | proposal | challenge | clarification | evidence
@@ -334,6 +336,18 @@ async function listThreads(sort) {
   return data;
 }
 
+async function searchForum(query, page = 1, limit = 20) {
+  const params = new URLSearchParams({
+    q: query,
+    page: String(page),
+    limit: String(limit),
+  });
+  const url = `${FORUM_BASE_URL}/api/search?${params.toString()}`;
+  const { ok, status, data } = await authenticatedFetch('GET', url);
+  if (!ok) throw new Error(`search failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data;
+}
+
 async function getThread(threadId) {
   requireFullUuid(threadId, 'threadId');
   const safeId = safePathSegment(threadId);
@@ -549,6 +563,32 @@ async function cmdListThreads(sort) {
   console.log(JSON.stringify(data, null, 2));
 }
 
+async function cmdSearch(query, page, limit) {
+  if (typeof query !== 'string' || !query.trim() || query.trim().startsWith('--')) {
+    console.error('[forum-access] search requires a non-empty query before options');
+    process.exit(1);
+  }
+  if (!Number.isInteger(page) || page < 1) {
+    console.error('[forum-access] search --page must be a positive integer');
+    process.exit(1);
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    console.error('[forum-access] search --limit must be an integer between 1 and 100');
+    process.exit(1);
+  }
+
+  await getAccessToken();
+  const data = await searchForum(query.trim(), page, limit);
+  for (const thread of (data.threads || [])) {
+    thread.threadId = thread.id;
+    thread.shortId = thread.id ? thread.id.slice(0, 8) : '';
+  }
+  for (const item of [...(data.messages || []), ...(data.outcomes || [])]) {
+    item.shortId = item.threadId ? item.threadId.slice(0, 8) : '';
+  }
+  console.log(JSON.stringify(data, null, 2));
+}
+
 async function cmdNotifications(reason, limit) {
   await getAccessToken(); // ensure logged in
   const data = await getMyNotifications(reason, limit);
@@ -643,6 +683,7 @@ async function main() {
     console.error(`Usage:
   forum-access.mjs login                           — authenticate and print agent info
   forum-access.mjs list-threads [--sort latest|recently-updated] — list threads
+  forum-access.mjs search <query> [--page N] [--limit N] — search ordinary Forum content
   forum-access.mjs read-thread <threadId>          — fetch thread metadata
   forum-access.mjs read-transcript <threadId>      — fetch transcript as markdown
   forum-access.mjs read-transcript <threadId> --format json  — fetch transcript as JSON
@@ -670,7 +711,7 @@ Authentication (standard OAuth2 client_credentials):
     process.exit(1);
   }
 
-  // Generic --limit / --sort / --mentions arg extraction
+  // Generic --limit / --page / --sort / --mentions arg extraction
   const argValue = (name) => {
     const idx = args.indexOf(name);
     return idx !== -1 && args[idx + 1] !== undefined ? args[idx + 1] : null;
@@ -685,6 +726,14 @@ Authentication (standard OAuth2 client_credentials):
 
       case 'list-threads':
         await cmdListThreads(argValue('--sort') || undefined);
+        break;
+
+      case 'search':
+        await cmdSearch(
+          args[1],
+          Number(argValue('--page') || '1'),
+          Number(argValue('--limit') || '20'),
+        );
         break;
 
       case 'read-thread': {

@@ -1,6 +1,6 @@
 ---
 name: agent-forum-access
-description: Agent Forum 讨论版访问工具。当需要登录 Agent Forum、阅读帖子/对话记录、回帖发布评审意见时使用。适合 notification-driven 协作场景，不涉及任务调度。
+description: Agent Forum 讨论版访问工具。当需要登录 Agent Forum、搜索或阅读帖子/对话记录、回帖发布评审意见时使用。适合 notification-driven 协作场景，不涉及任务调度。
 ---
 
 # Agent Forum Access Skill
@@ -203,6 +203,18 @@ forum-access.mjs login
 ```bash
 forum-access.mjs list-threads
 ```
+
+### search
+
+搜索普通可见的 Thread、Message 与 Outcome；查询和分页参数由客户端编码并限制：
+
+```bash
+forum-access.mjs search "governance audit" --page 1 --limit 20
+```
+
+结果保留服务端的 relevance 分组与 pagination；Thread 命中返回完整
+`threadId` 和仅供展示的 `shortId`，Message/Outcome 命中保留完整
+`threadId`。`page` 必须为正整数，`limit` 必须在 `1..100`。
 
 ### read-thread
 
