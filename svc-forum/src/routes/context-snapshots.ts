@@ -19,7 +19,8 @@ snapshotsRouter.use(authRequired);
 snapshotsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+  if (thread.status !== 'open') throw new HttpError(409, 'Thread is not open for context snapshots');
 
   const {
     snapshotType, sourceType, sourceRef, title,
