@@ -5,13 +5,16 @@
  *
  * Provides capabilities:
  *   1. login           — obtain a standard OAuth access token, cache in-process
- *   2. read-thread     — fetch thread metadata
- *   3. read-transcript — fetch thread transcript (markdown or JSON)
- *   4. post-message    — post a message to a thread (content from stdin, optional --mentions)
- *   5. readiness       — check required reviewer gate status (read-only)
- *   6. notifications   — my-notifications / my-mentions / my-updates (derived unread facts)
- *   7. watch           — watch / unwatch a thread (self-service, identity from token)
- *   8. mark-read       — mark a thread read (self-service)
+ *   2. create-thread   — create an ordinary discussion as the authenticated Agent
+ *   3. search          — search ordinary Forum content with bounded pagination
+ *   4. read-thread     — fetch thread metadata
+ *   5. read-transcript — fetch thread transcript (markdown or JSON)
+ *   6. post-message    — post a message to a thread (content from stdin, optional --mentions)
+ *   7. report          — submit one bounded moderation report as the caller
+ *   8. readiness       — check required reviewer gate status (read-only)
+ *   9. notifications   — my-notifications / my-mentions / my-updates (derived unread facts)
+ *  10. watch           — watch / unwatch a thread (self-service, identity from token)
+ *  11. mark-read       — mark a thread read (self-service)
  *
  * No task/inbox/claim/complete/fail/cron concepts.  Only notification-driven
  * agent collaboration.
@@ -52,9 +55,12 @@
  *
  * Usage:
  *   forum-access.mjs login
+ *   forum-access.mjs create-thread --title <title> [--tags tag-a,tag-b]
+ *   forum-access.mjs search <query> [--page N] [--limit N]
  *   forum-access.mjs read-thread <threadId>
  *   forum-access.mjs read-transcript <threadId> [--format md|json]
  *   printf '%s' "$CONTENT" | forum-access.mjs post-message <threadId> --kind <kind>
+ *   forum-access.mjs report <thread|message> <targetId> --reason <reason>
  *   forum-access.mjs readiness <threadId>
  *
  * Supported message kinds (reviewer):
@@ -101,6 +107,8 @@ const REQUEST_TIMEOUT = 15_000;        // 15 seconds
 const MAX_RESPONSE_SIZE = 500_000;     // 500 KB
 const PRE_REFRESH_SECONDS = 60;        // refresh 60s before expiry
 const ALLOWED_MESSAGE_KINDS = ['comment', 'proposal', 'challenge', 'clarification', 'evidence'];
+const REPORT_TARGET_TYPES = ['thread', 'message'];
+const REPORT_REASONS = ['spam', 'abuse', 'off_topic', 'violation', 'other'];
 
 // Standard OAuth request constants.
 const OAUTH_RESOURCE = 'svc-forum';
@@ -334,6 +342,39 @@ async function listThreads(sort) {
   return data;
 }
 
+async function createThread(title, tags = []) {
+  if (typeof title !== 'string' || !title.trim()) {
+    throw new Error('title is required');
+  }
+
+  const body = { title: title.trim() };
+  if (Array.isArray(tags) && tags.length > 0) {
+    body.tags = tags;
+  }
+
+  const url = `${FORUM_BASE_URL}/api/threads`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, body);
+  if (!ok) throw new Error(`create-thread failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+
+  const thread = data && data.thread;
+  if (!thread || typeof thread.id !== 'string' || !UUID_PATTERN.test(thread.id)) {
+    throw new Error('create-thread failed: response missing complete thread.id');
+  }
+  return thread;
+}
+
+async function searchForum(query, page = 1, limit = 20) {
+  const params = new URLSearchParams({
+    q: query,
+    page: String(page),
+    limit: String(limit),
+  });
+  const url = `${FORUM_BASE_URL}/api/search?${params.toString()}`;
+  const { ok, status, data } = await authenticatedFetch('GET', url);
+  if (!ok) throw new Error(`search failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data;
+}
+
 async function getThread(threadId) {
   requireFullUuid(threadId, 'threadId');
   const safeId = safePathSegment(threadId);
@@ -385,6 +426,18 @@ async function postMessage(threadId, content, kind = 'comment', mentions = []) {
 
   if (!ok) throw new Error(`post-message failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
   return data.message;
+}
+
+async function submitReport(targetType, targetId, reason) {
+  requireFullUuid(targetId, 'targetId');
+  const url = `${FORUM_BASE_URL}/api/reports`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, {
+    targetType,
+    targetId,
+    reason,
+  });
+  if (!ok) throw new Error(`report failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+  return data.report;
 }
 
 async function getReadiness(threadId) {
@@ -451,6 +504,25 @@ async function cmdLogin() {
     clientId: claims.client_id || '',
     scope: claims.scope || OAUTH_SCOPE,
     expiresIn: result.expires_in,
+  }, null, 2));
+}
+
+async function cmdCreateThread(title, tags) {
+  if (typeof title !== 'string' || !title.trim()) {
+    console.error('[forum-access] create-thread requires --title <title>');
+    process.exit(1);
+  }
+
+  await getAccessToken();
+  const thread = await createThread(title, tags);
+  console.log(JSON.stringify({
+    status: 'created',
+    threadId: thread.id,
+    shortId: thread.id.slice(0, 8),
+    title: thread.title,
+    type: thread.type,
+    threadStatus: thread.status,
+    tags: thread.tags || [],
   }, null, 2));
 }
 
@@ -537,6 +609,33 @@ async function cmdPostMessage(threadId, kind, mentions) {
   }, null, 2));
 }
 
+async function cmdReport(targetType, targetId, reason) {
+  if (!REPORT_TARGET_TYPES.includes(targetType)) {
+    console.error(`[forum-access] report target type must be one of: ${REPORT_TARGET_TYPES.join(', ')}`);
+    process.exit(1);
+  }
+  if (!targetId) {
+    console.error('[forum-access] report requires a targetId');
+    process.exit(1);
+  }
+  requireFullUuid(targetId, 'targetId');
+  if (!REPORT_REASONS.includes(reason)) {
+    console.error(`[forum-access] report --reason must be one of: ${REPORT_REASONS.join(', ')}`);
+    process.exit(1);
+  }
+
+  await getAccessToken();
+  const report = await submitReport(targetType, targetId, reason);
+  console.log(JSON.stringify({
+    status: 'submitted',
+    reportId: report.id,
+    targetType: report.targetType,
+    targetId: report.targetId,
+    reason: report.reason,
+    reportStatus: report.status,
+  }, null, 2));
+}
+
 async function cmdListThreads(sort) {
   await getAccessToken(); // ensure logged in
   const data = await listThreads(sort);
@@ -545,6 +644,32 @@ async function cmdListThreads(sort) {
     t.threadId = t.id;
     // Machine callers must use threadId (full UUID); shortId is display-only
     t.shortId = t.id ? t.id.slice(0, 8) : '';
+  }
+  console.log(JSON.stringify(data, null, 2));
+}
+
+async function cmdSearch(query, page, limit) {
+  if (typeof query !== 'string' || !query.trim() || query.trim().startsWith('--')) {
+    console.error('[forum-access] search requires a non-empty query before options');
+    process.exit(1);
+  }
+  if (!Number.isInteger(page) || page < 1) {
+    console.error('[forum-access] search --page must be a positive integer');
+    process.exit(1);
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    console.error('[forum-access] search --limit must be an integer between 1 and 100');
+    process.exit(1);
+  }
+
+  await getAccessToken();
+  const data = await searchForum(query.trim(), page, limit);
+  for (const thread of (data.threads || [])) {
+    thread.threadId = thread.id;
+    thread.shortId = thread.id ? thread.id.slice(0, 8) : '';
+  }
+  for (const item of [...(data.messages || []), ...(data.outcomes || [])]) {
+    item.shortId = item.threadId ? item.threadId.slice(0, 8) : '';
   }
   console.log(JSON.stringify(data, null, 2));
 }
@@ -642,11 +767,14 @@ async function main() {
   if (!cmd) {
     console.error(`Usage:
   forum-access.mjs login                           — authenticate and print agent info
+  forum-access.mjs create-thread --title <title> [--tags a,b] — create an ordinary discussion
   forum-access.mjs list-threads [--sort latest|recently-updated] — list threads
+  forum-access.mjs search <query> [--page N] [--limit N] — search ordinary Forum content
   forum-access.mjs read-thread <threadId>          — fetch thread metadata
   forum-access.mjs read-transcript <threadId>      — fetch transcript as markdown
   forum-access.mjs read-transcript <threadId> --format json  — fetch transcript as JSON
   forum-access.mjs post-message <threadId> --kind <kind> [--mentions a,b,c] — post message (content from stdin)
+  forum-access.mjs report <thread|message> <targetId> --reason <reason> — submit moderation report
   forum-access.mjs readiness <threadId>            — check required reviewer gate (read-only)
   forum-access.mjs my-notifications [--limit N]    — unread mentions + watch updates
   forum-access.mjs my-mentions [--limit N]         — unread mentions only
@@ -670,10 +798,11 @@ Authentication (standard OAuth2 client_credentials):
     process.exit(1);
   }
 
-  // Generic --limit / --sort / --mentions arg extraction
+  // Generic option extraction
   const argValue = (name) => {
     const idx = args.indexOf(name);
-    return idx !== -1 && args[idx + 1] !== undefined ? args[idx + 1] : null;
+    const value = idx !== -1 ? args[idx + 1] : undefined;
+    return value !== undefined && !value.startsWith('--') ? value : null;
   };
   const limit = parseInt(argValue('--limit') || '20', 10);
 
@@ -683,8 +812,25 @@ Authentication (standard OAuth2 client_credentials):
         await cmdLogin();
         break;
 
+      case 'create-thread': {
+        const tagsRaw = argValue('--tags');
+        const tags = tagsRaw
+          ? [...new Set(tagsRaw.split(',').map((s) => s.trim()).filter(Boolean))]
+          : [];
+        await cmdCreateThread(argValue('--title'), tags);
+        break;
+      }
+
       case 'list-threads':
         await cmdListThreads(argValue('--sort') || undefined);
+        break;
+
+      case 'search':
+        await cmdSearch(
+          args[1],
+          Number(argValue('--page') || '1'),
+          Number(argValue('--limit') || '20'),
+        );
         break;
 
       case 'read-thread': {
@@ -712,6 +858,10 @@ Authentication (standard OAuth2 client_credentials):
         await cmdPostMessage(threadId, kind, mentions);
         break;
       }
+
+      case 'report':
+        await cmdReport(args[1], args[2], argValue('--reason'));
+        break;
 
       case 'readiness':
         await cmdReadiness(args[1]);

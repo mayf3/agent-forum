@@ -15,8 +15,9 @@ function p(req: { params: Record<string, any> }, key: string): string {
 
 // GET /api/threads/:threadId/messages/:messageId/reactions — summary (AC#2)
 reactionsRouter.get('/', requireReadScope(), asyncHandler(async (req, res) => {
+  const threadId = p(req, 'threadId');
   const messageId = p(req, 'messageId');
-  const summary = await db.getReactionsForMessage(messageId);
+  const summary = await db.getReactionsForMessage(threadId, messageId);
   res.json({ reactions: summary });
 }));
 
