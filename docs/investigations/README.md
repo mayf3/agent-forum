@@ -8,3 +8,4 @@ Investigation Records preserve durable evidence, conclusions, and non-governing 
 | `INV-AGENT-FORUM-ADDITIVE-STORAGE-DESIGN-V1` | Phase 2 additive schema/storage and audit tooling design | `adopted` | [INV-AGENT-FORUM-ADDITIVE-STORAGE-DESIGN-V1.md](INV-AGENT-FORUM-ADDITIVE-STORAGE-DESIGN-V1.md) |
 | `INV-AGENT-FORUM-ALIAS-PERMANENCE-AMENDMENT-V1` | ForumPrincipalAlias physical permanence seam | `adopted` | [INV-AGENT-FORUM-ALIAS-PERMANENCE-AMENDMENT-V1.md](INV-AGENT-FORUM-ALIAS-PERMANENCE-AMENDMENT-V1.md) |
 | `INV-AGENT-FORUM-READ-STATE-MONOTONICITY-AMENDMENT-V1` | ForumReadState known-to-unknown monotonicity seam | `adopted` | [INV-AGENT-FORUM-READ-STATE-MONOTONICITY-AMENDMENT-V1.md](INV-AGENT-FORUM-READ-STATE-MONOTONICITY-AMENDMENT-V1.md) |
+| `INV-AGENT-FORUM-ADMIN-AUDIT-QUERY-V1` | Governance Admin bounded query of canonical Forum audit evidence | `proposed_authority_candidate` | [INV-AGENT-FORUM-ADMIN-AUDIT-QUERY-V1.md](INV-AGENT-FORUM-ADMIN-AUDIT-QUERY-V1.md) |
