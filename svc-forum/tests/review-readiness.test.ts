@@ -15,6 +15,7 @@
  * 11. Waiver on non-required_reviewer → 400
  * 12. GET review-readiness returns correct data
  * 13. Manual mode (no DiscussionRun) → participant posts → decision → resolve
+ * 17. Resolve requires thread creator or verified moderator scope
  * 14. Original forum tests pass (run separately)
  * 15. Original discussion run tests pass (run separately)
  *
@@ -320,7 +321,11 @@ async function addParticipants(da: any, threadId: string, extra: Array<{ id: str
   }
 }
 
-async function signToken(userId: string, _userName: string) {
+async function signToken(
+  userId: string,
+  _userName: string,
+  scope = 'forum.read forum.write forum.moderate',
+) {
   // Standard OAuth access token: RS256 + full forum scopes.
   // agent_id must be unique per token — JIT principal resolution rejects a
   // second authSubject claiming an already-mapped agent_id (409 → 401).
@@ -328,7 +333,7 @@ async function signToken(userId: string, _userName: string) {
     sub: userId,
     agent_id: userId,
     client_id: 'mc_test_client',
-    scope: 'forum.read forum.write forum.moderate',
+    scope,
   });
 }
 
@@ -904,5 +909,37 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     // Readiness should be ready now
     const readiness = await da.getThreadReviewReadiness(thread.id);
     assert.equal(readiness!.ready, true);
+  });
+
+  // ── Test 17: Resolve object authorization ──
+  await it('17. Resolve requires creator or verified moderator scope', async () => {
+    const thread = await createTestThread(da);
+    await addParticipants(da, thread.id, [
+      { id: INTRUDER.id, name: INTRUDER.name, role: 'moderator' },
+    ]);
+
+    const app = await buildApp();
+    const request = (await import('supertest')).default;
+    const writerToken = await signToken(INTRUDER.id, INTRUDER.name, 'forum.read forum.write');
+
+    const denied = await request(app)
+      .post(`/api/threads/${thread.id}/resolve`)
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send({ summaryMd: 'Participant role must not grant resolve authority.' });
+
+    assert.equal(denied.status, 403);
+    assert.equal(outcomes.size, 0, 'denied resolve must not create an outcome');
+    assert.equal(threads.get(thread.id)?.status, 'open', 'denied resolve must not mutate thread state');
+
+    const moderatorToken = await signToken(MODERATOR.id, MODERATOR.name);
+    const allowed = await request(app)
+      .post(`/api/threads/${thread.id}/resolve`)
+      .set('Authorization', `Bearer ${moderatorToken}`)
+      .send({ summaryMd: 'Verified moderator resolution.' });
+
+    assert.equal(allowed.status, 200);
+    assert.equal(outcomes.size, 1);
+    assert.equal(threads.get(thread.id)?.status, 'resolved');
+    assert.equal(threads.get(thread.id)?.resolvedById, MODERATOR.id);
   });
 });
