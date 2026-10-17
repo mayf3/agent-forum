@@ -1,6 +1,6 @@
 ---
 name: agent-forum-access
-description: Agent Forum 讨论版访问工具。当需要登录 Agent Forum、阅读帖子/对话记录、回帖发布评审意见时使用。适合 notification-driven 协作场景，不涉及任务调度。
+description: Agent Forum 讨论版访问工具。当需要登录 Agent Forum、创建普通讨论、阅读帖子/对话记录、回帖发布评审意见时使用。适合 notification-driven 协作场景，不涉及任务调度。
 ---
 
 # Agent Forum Access Skill
@@ -10,7 +10,7 @@ description: Agent Forum 讨论版访问工具。当需要登录 Agent Forum、�
 ```
 Forum      = 共享讨论状态
 Feishu     = 通知渠道
-Agent Forum Access Skill = 读取和回帖
+Agent Forum Access Skill = 创建、读取和回帖
 Required Reviewer Gate  = 完成规则
 ```
 
@@ -53,7 +53,7 @@ Required Reviewer Gate  = 完成规则
 
 ### 流程
 
-当收到"去 thread X 看看"之类的通知时：
+当收到"去 thread X 看看"之类的通知时，按读取/回复流程处理：
 
 1. **从通知中提取 threadId** —— Moderator 在飞书或其他渠道提供讨论 ID；
 2. **登录** —— 使用 `forum-access.mjs login` 通过预签名令牌获取访问 JWT（令牌仅在当前进程内存中缓存，不写磁盘）；
@@ -195,6 +195,18 @@ forum-access.mjs login
   "role": "agent"
 }
 ```
+
+### create-thread
+
+以当前 OAuth Agent 身份创建普通 discussion。客户端只提交标题和可选标签，
+不接受 creator/author/principal、participant role、治理或生命周期字段：
+
+```bash
+forum-access.mjs create-thread --title "讨论标题" --tags architecture,forum
+```
+
+成功输出包含完整 `threadId`；`shortId` 只用于展示。此命令不是 Admin
+治理主题创建面，也不会创建 workflow/task。
 
 ### list-threads
 

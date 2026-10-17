@@ -5,13 +5,14 @@
  *
  * Provides capabilities:
  *   1. login           — obtain a standard OAuth access token, cache in-process
- *   2. read-thread     — fetch thread metadata
- *   3. read-transcript — fetch thread transcript (markdown or JSON)
- *   4. post-message    — post a message to a thread (content from stdin, optional --mentions)
- *   5. readiness       — check required reviewer gate status (read-only)
- *   6. notifications   — my-notifications / my-mentions / my-updates (derived unread facts)
- *   7. watch           — watch / unwatch a thread (self-service, identity from token)
- *   8. mark-read       — mark a thread read (self-service)
+ *   2. create-thread   — create an ordinary discussion as the authenticated Agent
+ *   3. read-thread     — fetch thread metadata
+ *   4. read-transcript — fetch thread transcript (markdown or JSON)
+ *   5. post-message    — post a message to a thread (content from stdin, optional --mentions)
+ *   6. readiness       — check required reviewer gate status (read-only)
+ *   7. notifications   — my-notifications / my-mentions / my-updates (derived unread facts)
+ *   8. watch           — watch / unwatch a thread (self-service, identity from token)
+ *   9. mark-read       — mark a thread read (self-service)
  *
  * No task/inbox/claim/complete/fail/cron concepts.  Only notification-driven
  * agent collaboration.
@@ -52,6 +53,7 @@
  *
  * Usage:
  *   forum-access.mjs login
+ *   forum-access.mjs create-thread --title <title> [--tags tag-a,tag-b]
  *   forum-access.mjs read-thread <threadId>
  *   forum-access.mjs read-transcript <threadId> [--format md|json]
  *   printf '%s' "$CONTENT" | forum-access.mjs post-message <threadId> --kind <kind>
@@ -334,6 +336,27 @@ async function listThreads(sort) {
   return data;
 }
 
+async function createThread(title, tags = []) {
+  if (typeof title !== 'string' || !title.trim()) {
+    throw new Error('title is required');
+  }
+
+  const body = { title: title.trim() };
+  if (Array.isArray(tags) && tags.length > 0) {
+    body.tags = tags;
+  }
+
+  const url = `${FORUM_BASE_URL}/api/threads`;
+  const { ok, status, data } = await authenticatedFetch('POST', url, body);
+  if (!ok) throw new Error(`create-thread failed (HTTP ${status}): ${data && data.error || 'unknown'}`);
+
+  const thread = data && data.thread;
+  if (!thread || typeof thread.id !== 'string' || !UUID_PATTERN.test(thread.id)) {
+    throw new Error('create-thread failed: response missing complete thread.id');
+  }
+  return thread;
+}
+
 async function getThread(threadId) {
   requireFullUuid(threadId, 'threadId');
   const safeId = safePathSegment(threadId);
@@ -451,6 +474,25 @@ async function cmdLogin() {
     clientId: claims.client_id || '',
     scope: claims.scope || OAUTH_SCOPE,
     expiresIn: result.expires_in,
+  }, null, 2));
+}
+
+async function cmdCreateThread(title, tags) {
+  if (typeof title !== 'string' || !title.trim()) {
+    console.error('[forum-access] create-thread requires --title <title>');
+    process.exit(1);
+  }
+
+  await getAccessToken(); // ensure logged in
+  const thread = await createThread(title, tags);
+  console.log(JSON.stringify({
+    status: 'created',
+    threadId: thread.id,
+    shortId: thread.id.slice(0, 8),
+    title: thread.title,
+    type: thread.type,
+    threadStatus: thread.status,
+    tags: thread.tags || [],
   }, null, 2));
 }
 
@@ -642,6 +684,7 @@ async function main() {
   if (!cmd) {
     console.error(`Usage:
   forum-access.mjs login                           — authenticate and print agent info
+  forum-access.mjs create-thread --title <title> [--tags a,b] — create an ordinary discussion
   forum-access.mjs list-threads [--sort latest|recently-updated] — list threads
   forum-access.mjs read-thread <threadId>          — fetch thread metadata
   forum-access.mjs read-transcript <threadId>      — fetch transcript as markdown
@@ -673,7 +716,8 @@ Authentication (standard OAuth2 client_credentials):
   // Generic --limit / --sort / --mentions arg extraction
   const argValue = (name) => {
     const idx = args.indexOf(name);
-    return idx !== -1 && args[idx + 1] !== undefined ? args[idx + 1] : null;
+    const value = idx !== -1 ? args[idx + 1] : undefined;
+    return value !== undefined && !value.startsWith('--') ? value : null;
   };
   const limit = parseInt(argValue('--limit') || '20', 10);
 
@@ -682,6 +726,15 @@ Authentication (standard OAuth2 client_credentials):
       case 'login':
         await cmdLogin();
         break;
+
+      case 'create-thread': {
+        const tagsRaw = argValue('--tags');
+        const tags = tagsRaw
+          ? [...new Set(tagsRaw.split(',').map((s) => s.trim()).filter(Boolean))]
+          : [];
+        await cmdCreateThread(argValue('--title'), tags);
+        break;
+      }
 
       case 'list-threads':
         await cmdListThreads(argValue('--sort') || undefined);
