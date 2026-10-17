@@ -368,21 +368,23 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     prismaMod.setPrisma(createMockPrisma() as any);
   });
 
-  // ── Test 1: No required reviewer → decision allowed, resolve allowed ──
-  await it('1. No required reviewer — decision and resolve allowed', async () => {
+  // ── Test 1: direct decision disabled; legacy resolve evidence remains separate ──
+  await it('1. No required reviewer — direct decision is disabled', async () => {
     const thread = await createTestThread(da);
     await addParticipants(da, thread.id);
 
-    // Decision — should succeed
-    const msg = await da.createMessage({
-      threadId: thread.id,
-      authorId: CREATOR.id,
-      authorName: CREATOR.name,
-      authorType: 'agent',
-      kind: 'decision',
-      content: 'Approved',
-    });
-    assert.equal(msg.kind, 'decision');
+    await assert.rejects(
+      () => da.createMessage({
+        threadId: thread.id,
+        authorId: CREATOR.id,
+        authorName: CREATOR.name,
+        authorType: 'agent',
+        kind: 'decision',
+        content: 'Approved',
+      }),
+      (error: any) => error.statusCode === 409 && /DIRECT_DECISION_MESSAGE_DISABLED/.test(error.message),
+    );
+    assert.equal(messages.size, 0);
 
     // Resolve — should succeed
     await da.createOutcome({
@@ -466,8 +468,8 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     assert.deepEqual(decisionRes.body.pendingReviewerIds, [REVIEWER_B.id]);
   });
 
-  // ── Test 4: Both reviewers replied → success ──
-  await it('4. Both reviewers replied — decision and resolve succeed', async () => {
+  // ── Test 4: readiness cannot authorize the alternate decision route ──
+  await it('4. Both reviewers replied — direct decision stays disabled', async () => {
     const thread = await createTestThread(da);
     await addParticipants(da, thread.id, [
       { id: REVIEWER_A.id, name: REVIEWER_A.name, role: 'required_reviewer' },
@@ -489,7 +491,7 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     assert.equal(readiness.ready, true);
     assert.equal(readiness.pendingReviewerIds.length, 0);
 
-    // Decision → 201
+    // Readiness is true, but only Finalization may project a decision message.
     const app = await buildApp();
     const request = (await import('supertest')).default;
     const token = await signToken(CREATOR.id, CREATOR.name);
@@ -498,7 +500,8 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       .post(`/api/threads/${thread.id}/messages`)
       .set('Authorization', `Bearer ${token}`)
       .send({ content: 'Final decision', kind: 'decision' });
-    assert.equal(decisionRes.status, 201, 'decision should succeed when all reviewers replied');
+    assert.equal(decisionRes.status, 409);
+    assert.match(decisionRes.body.error, /DIRECT_DECISION_MESSAGE_DISABLED/);
 
     // Resolve → 200
     const resolveRes = await request(app)
@@ -617,7 +620,7 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     assert.equal(readiness.ready, true, 'one replied + one waived = ready');
     assert.equal(readiness.pendingReviewerIds.length, 0);
 
-    // Route-level: decision → 201
+    // Route-level: readiness cannot authorize an alternate decision write.
     const app = await buildApp();
     const request = (await import('supertest')).default;
     const token = await signToken(CREATOR.id, CREATOR.name);
@@ -626,7 +629,8 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       .post(`/api/threads/${thread.id}/messages`)
       .set('Authorization', `Bearer ${token}`)
       .send({ content: 'Decision after waiver', kind: 'decision' });
-    assert.equal(decisionRes.status, 201, 'decision should succeed when one replied, other waived');
+    assert.equal(decisionRes.status, 409);
+    assert.match(decisionRes.body.error, /DIRECT_DECISION_MESSAGE_DISABLED/);
 
     // Resolve → 200
     const resolveRes = await request(app)
@@ -808,13 +812,14 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       .send({ content: 'Manual review comment', kind: 'comment' });
     assert.equal(postRes.status, 201, 'reviewer should be able to post manually');
 
-    // Step 2: Creator can now post decision
+    // Step 2: direct decision remains disabled even after a reviewer response.
     const creatorToken = await signToken(CREATOR.id, CREATOR.name);
     const decisionRes = await request(app)
       .post(`/api/threads/${thread.id}/messages`)
       .set('Authorization', `Bearer ${creatorToken}`)
       .send({ content: 'Decision after manual review', kind: 'decision' });
-    assert.equal(decisionRes.status, 201, 'decision should succeed in manual mode');
+    assert.equal(decisionRes.status, 409);
+    assert.match(decisionRes.body.error, /DIRECT_DECISION_MESSAGE_DISABLED/);
 
     // Step 3: Resolve
     const resolveRes = await request(app)

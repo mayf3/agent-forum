@@ -79,9 +79,13 @@ export async function createMessage(data: CreateMessageInput) {
 
     const thread = await tx.forumThread.findUnique({
       where: { id: data.threadId },
-      select: { lastMessageAt: true },
+      select: { lastMessageAt: true, status: true },
     });
-    if (!thread) throw new HttpError(404, 'Thread not found');
+    if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+    if (thread.status !== 'open') throw new HttpError(409, 'Thread is not open for new messages');
+    if (data.kind === 'decision') {
+      throw new HttpError(409, 'DIRECT_DECISION_MESSAGE_DISABLED: decision messages may only be projected from Finalization');
+    }
 
     const prevTime = thread.lastMessageAt ? thread.lastMessageAt.getTime() : 0;
     const t1 = new Date(Math.max(t0.getTime() + 1, prevTime + 1));
