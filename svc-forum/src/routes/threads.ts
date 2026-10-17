@@ -205,6 +205,13 @@ threadsRouter.post('/:threadId/resolve', authRequired, requireForumWriter, requi
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
 
+  const user = req.user!;
+  const isCreator = thread.createdById === user.id;
+  const isModerator = user.scopes.includes('forum.moderate');
+  if (!isCreator && !isModerator) {
+    throw new HttpError(403, 'Only the thread creator or a moderator can resolve this thread');
+  }
+
   // Resolve gate: all required reviewers must be satisfied
   const readiness = await db.getThreadReviewReadiness(threadId);
   if (readiness && !readiness.ready) {
@@ -219,8 +226,6 @@ threadsRouter.post('/:threadId/resolve', authRequired, requireForumWriter, requi
   if (!summaryMd || !summaryMd.trim()) {
     throw new HttpError(400, 'summaryMd (outcome summary) is required to resolve thread');
   }
-
-  const user = req.user!;
 
   // Create outcome
   await db.createOutcome({
