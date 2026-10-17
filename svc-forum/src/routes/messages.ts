@@ -21,7 +21,8 @@ messagesRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(a
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
-  if (thread.status === 'archived') throw new HttpError(400, 'Cannot post to archived thread');
+  if (thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+  if (thread.status !== 'open') throw new HttpError(409, 'Thread is not open for new messages');
 
   const { content, kind, parentId, attachments, metadata } = req.body;
   if (!content || !content.trim()) {
@@ -46,6 +47,7 @@ messagesRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(a
       });
       return;
     }
+    throw new HttpError(409, 'DIRECT_DECISION_MESSAGE_DISABLED: decision messages may only be projected from Finalization');
   }
 
   if (parentId) {
@@ -122,4 +124,3 @@ messagesRouter.delete('/:messageId', requireForumWriter, requireModeratorScope()
   await db.softDeleteMessage(messageId);
   res.json({ ok: true });
 }));
-

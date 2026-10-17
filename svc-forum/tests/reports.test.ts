@@ -124,7 +124,11 @@ function mockStore(store: Map<string, any>) {
 }
 
 function createMockPrisma() {
-  const t = mockStore(threads);
+  const threadStore = mockStore(threads);
+  const t = {
+    ...threadStore,
+    create: async ({ data }: any) => threadStore.create({ data: { status: 'open', ...data } }),
+  };
   const p = mockStore(participants);
   const m = mockStore(messages);
   const r = mockStore(reports);
