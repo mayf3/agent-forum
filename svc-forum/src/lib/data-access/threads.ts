@@ -80,6 +80,12 @@ export async function findThreads(filter: ThreadFilter) {
   const limit = Math.min(filter.limit || 20, 100);
   const skip = (page - 1) * limit;
 
+  // Deleted threads are unavailable on every ordinary list path, including an
+  // explicit status filter. Do not let a caller opt back into tombstone rows.
+  if (filter.status === 'deleted') {
+    return { items: [], total: 0, page, limit };
+  }
+
   const where: Prisma.ForumThreadWhereInput = {};
 
   if (filter.type) where.type = filter.type;
