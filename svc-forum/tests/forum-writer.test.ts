@@ -536,6 +536,59 @@ matrixSuite({
   },
 });
 
+void describe('DELETE /api/threads/:threadId — legacy deletion disabled', async () => {
+  let prismaMod: typeof import('../src/lib/prisma.js');
+
+  before(async () => {
+    prismaMod = await import('../src/lib/prisma.js');
+  });
+
+  beforeEach(() => {
+    resetDb();
+    prismaMod.setPrisma(createMockPrisma() as any);
+  });
+
+  it('ordinary writer is rejected by verified moderator scope before mutation', async () => {
+    seedThread({ id: SEED_THREAD_ID });
+    const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    const res = await request(
+      app,
+      'DELETE',
+      `/api/threads/${SEED_THREAD_ID}`,
+      await signAgentToken(),
+    );
+    assert.equal(res.status, 403);
+    assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
+  });
+
+  it('verified moderator receives stable conflict and changes zero Thread rows', async () => {
+    seedThread({ id: SEED_THREAD_ID });
+    const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    const res = await request(
+      app,
+      'DELETE',
+      `/api/threads/${SEED_THREAD_ID}`,
+      await signAgentToken('forum.read forum.write forum.moderate'),
+      { reason: 'Legacy route has no audited tombstone transaction' },
+    );
+    assert.equal(res.status, 409);
+    assert.match(res.body.error, /LEGACY_THREAD_DELETE_DISABLED/);
+    assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
+  });
+
+  it('missing and already deleted Threads remain ordinary 404', async () => {
+    const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+    const token = await signAgentToken('forum.read forum.write forum.moderate');
+    const missing = await request(app, 'DELETE', `/api/threads/${SEED_THREAD_ID}`, token);
+    assert.equal(missing.status, 404);
+
+    seedThread({ id: SEED_THREAD_ID, status: 'deleted' });
+    const deleted = await request(app, 'DELETE', `/api/threads/${SEED_THREAD_ID}`, token);
+    assert.equal(deleted.status, 404);
+    assert.equal(threads.get(SEED_THREAD_ID)?.status, 'deleted');
+  });
+});
+
 matrixSuite({
   name: 'POST /api/threads/:tid/messages — post message',
   routerModule: '../src/routes/messages.js',
