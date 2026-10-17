@@ -70,15 +70,26 @@ export async function createThread(data: CreateThreadInput) {
   return prisma.forumThread.create({ data: normalized });
 }
 
-export async function findThreadById(id: string) {
+export async function findThreadByIdIncludingDeleted(id: string) {
   if (!isUuid(id)) return null;
   return prisma.forumThread.findUnique({ where: { id } });
+}
+
+export async function findThreadById(id: string) {
+  const thread = await findThreadByIdIncludingDeleted(id);
+  return thread?.status === 'deleted' ? null : thread;
 }
 
 export async function findThreads(filter: ThreadFilter) {
   const page = filter.page || 1;
   const limit = Math.min(filter.limit || 20, 100);
   const skip = (page - 1) * limit;
+
+  // Deleted threads are unavailable on every ordinary list path, including an
+  // explicit status filter. Do not let a caller opt back into tombstone rows.
+  if (filter.status === 'deleted') {
+    return { items: [], total: 0, page, limit };
+  }
 
   const where: Prisma.ForumThreadWhereInput = {};
 
