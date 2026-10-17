@@ -92,6 +92,7 @@ function toMs(v: any): number {
 function matchValue(actual: any, cond: any): boolean {
   if (cond && typeof cond === 'object' && !(cond instanceof Date)) {
     if ('not' in cond) return actual !== cond.not;
+    if ('notIn' in cond) return !cond.notIn.includes(actual);
     if ('gt' in cond) return toMs(actual) > toMs(cond.gt);
     if ('gte' in cond) return toMs(actual) >= toMs(cond.gte);
     if ('lt' in cond) return toMs(actual) < toMs(cond.lt);
@@ -429,6 +430,19 @@ void describe('Admin unread notifications', async () => {
   });
 
   await it('empty when no participants exist', async () => {
+    const res = await da.findAllUnreadNotifications({});
+    assert.equal(res.total, 0);
+    assert.deepEqual(res.items, []);
+  });
+
+  await it('deleted threads are excluded from the admin aggregate', async () => {
+    const t1 = '00000000-0000-4000-8000-000000000017';
+    seedThread(t1, 'Deleted Thread');
+    threads.get(t1).status = 'deleted';
+    const t0 = new Date('2026-08-09T00:00:00.000Z');
+    seedParticipant(PRINCIPAL_B, t1, t0);
+    seedMessage('m-deleted', t1, PRINCIPAL_A, new Date('2026-08-09T10:00:00.000Z'), [AGENT_B]);
+
     const res = await da.findAllUnreadNotifications({});
     assert.equal(res.total, 0);
     assert.deepEqual(res.items, []);

@@ -81,6 +81,12 @@ function mockStore(store: Map<string, any>) {
         for (const [k, v] of Object.entries(where)) {
           if (k === 'threadId') items = items.filter(i => i.threadId === v);
           if (k === 'deletedAt' && v === null) items = items.filter(i => !i.deletedAt);
+          if (k === 'status' && (v as any)?.not) {
+            items = items.filter(i => i.status !== (v as any).not);
+          }
+          if (k === 'thread' && (v as any)?.status?.not) {
+            items = items.filter(i => threads.get(i.threadId)?.status !== (v as any).status.not);
+          }
           if (k === 'title' && (v as any)?.contains) {
             const q = (v as any).contains.toLowerCase();
             items = items.filter(i => i.title?.toLowerCase().includes(q));
@@ -276,6 +282,37 @@ void describe('Full-Text Search', async () => {
 
     const page3 = await da.searchAll('pagination', 3, 2);
     assert.equal(page3.threads.length, 1);
+  });
+
+  await it('CTR-LIFE-005/CTR-DELETE-003 excludes deleted threads and nested content', async () => {
+    await seedSearchData();
+    const deletedThread = await da.createThread({
+      title: 'PostgreSQL deleted private thread', type: 'discussion',
+      createdById: USER_A.id, createdByName: USER_A.name, createdByType: 'agent',
+    });
+    threads.get(deletedThread.id).status = 'deleted';
+
+    const now = new Date();
+    const deletedMessage = {
+      id: mockUuid(), threadId: deletedThread.id, parentId: null, seq: 1,
+      authorId: USER_A.id, authorName: USER_A.name, authorType: 'agent',
+      kind: 'comment', content: 'PostgreSQL deleted message must stay hidden.',
+      mentions: [], deletedAt: null, createdAt: now, updatedAt: now,
+    };
+    messages.set(deletedMessage.id, deletedMessage);
+    const deletedOutcome = {
+      id: mockUuid(), threadId: deletedThread.id,
+      createdById: USER_A.id, createdByName: USER_A.name,
+      summaryMd: 'PostgreSQL deleted outcome must stay hidden.',
+      createdAt: now, updatedAt: now,
+    };
+    outcomes.set(deletedOutcome.id, deletedOutcome);
+
+    const result = await da.searchAll('postgresql');
+    assert.equal(result.threads.some((item: any) => item.id === deletedThread.id), false);
+    assert.equal(result.messages.some((item: any) => item.id === deletedMessage.id), false);
+    assert.equal(result.outcomes.some((item: any) => item.id === deletedOutcome.id), false);
+    assert.equal(result.pagination.total, 3, 'deleted thread, message, and outcome are absent from totals');
   });
 
   await it('AC#3 route requires forum.read and returns ranked results', async () => {

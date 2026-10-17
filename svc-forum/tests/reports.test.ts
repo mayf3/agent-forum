@@ -124,7 +124,11 @@ function mockStore(store: Map<string, any>) {
 }
 
 function createMockPrisma() {
-  const t = mockStore(threads);
+  const threadStore = mockStore(threads);
+  const t = {
+    ...threadStore,
+    create: async ({ data }: any) => threadStore.create({ data: { status: 'open', ...data } }),
+  };
   const p = mockStore(participants);
   const m = mockStore(messages);
   const r = mockStore(reports);
@@ -249,8 +253,8 @@ void describe('Report Entry (Moderation Queue)', async () => {
     );
   });
 
-  await it('AC#1 rejects reports on non-existent or deleted targets', async () => {
-    const { thread } = await seedTargets();
+  await it('AC#1 rejects non-existent/deleted targets and content under a deleted Thread as 404', async () => {
+    const { thread, message } = await seedTargets();
     await assert.rejects(
       da.createReport({
         targetType: 'thread',
@@ -262,7 +266,7 @@ void describe('Report Entry (Moderation Queue)', async () => {
       (err: any) => err.statusCode === 404,
     );
 
-    await da.softDeleteThread(thread.id);
+    threads.get(thread.id)!.status = 'deleted';
     await assert.rejects(
       da.createReport({
         targetType: 'thread',
@@ -271,8 +275,19 @@ void describe('Report Entry (Moderation Queue)', async () => {
         reporterName: USER_B.name,
         reason: 'spam',
       }),
-      (err: any) => err.statusCode === 400,
+      (err: any) => err.statusCode === 404,
     );
+    await assert.rejects(
+      da.createReport({
+        targetType: 'message',
+        targetId: message.id,
+        reporterId: USER_B.id,
+        reporterName: USER_B.name,
+        reason: 'spam',
+      }),
+      (err: any) => err.statusCode === 404,
+    );
+    assert.equal(reports.size, 0, 'rejected deleted targets must not create reports');
   });
 
   // ── AC#3: same reporter on same target counts once ──
@@ -359,23 +374,23 @@ void describe('Report Entry (Moderation Queue)', async () => {
     );
   });
 
-  await it('AC#4 delete action cascades to soft-delete the reported content', async () => {
+  await it('AC#4 delete action is fail-closed and preserves report plus target', async () => {
     const { message } = await seedTargets();
     const report = await da.createReport({
       targetType: 'message', targetId: message.id,
       reporterId: USER_B.id, reporterName: USER_B.name, reason: 'violation',
     });
 
-    const handled = await da.handleReport(report.id, 'delete', MODERATOR.id, MODERATOR.name, 'Removed per policy');
-    assert.equal(handled.status, 'deleted');
+    await assert.rejects(
+      da.handleReport(report.id, 'delete', MODERATOR.id, MODERATOR.name, 'Removed per policy'),
+      (error: any) => error.statusCode === 409 && /REPORT_DELETE_ACTION_DISABLED/.test(error.message),
+    );
 
-    // Report trace is preserved
+    // The pending report and target are both preserved for a future audited action.
     const fetched = await da.findReportById(report.id);
-    assert.equal(fetched!.status, 'deleted');
-
-    // Target message is soft-deleted (no longer visible in normal queries)
+    assert.equal(fetched!.status, 'pending');
     const visible = await da.findMessagesByThreadId(message.threadId);
-    assert.ok(!visible.some((m: any) => m.id === message.id), 'deleted message hidden');
+    assert.ok(visible.some((m: any) => m.id === message.id), 'target message remains visible');
   });
 
   // ── Route-level: scope enforcement ──
@@ -422,7 +437,7 @@ void describe('Report Entry (Moderation Queue)', async () => {
   });
 
   await it('PATCH /api/reports/:id requires forum.moderate and handles report', async () => {
-    const { thread } = await seedTargets();
+    const { thread, message } = await seedTargets();
     const report = await da.createReport({
       targetType: 'thread', targetId: thread.id,
       reporterId: USER_B.id, reporterName: USER_B.name, reason: 'other',
@@ -450,5 +465,18 @@ void describe('Report Entry (Moderation Queue)', async () => {
     assert.equal(handled.status, 200);
     assert.equal(handled.body.report.status, 'ignored');
     assert.equal(handled.body.report.handleNote, 'No action needed');
+
+    const deleteReport = await da.createReport({
+      targetType: 'message', targetId: message.id,
+      reporterId: USER_A.id, reporterName: USER_A.name, reason: 'violation',
+    });
+    const disabled = await request(app)
+      .patch(`/api/reports/${deleteReport.id}`)
+      .set('Authorization', `Bearer ${await tokenWith('forum.write forum.moderate')}`)
+      .send({ action: 'delete', note: 'Must be audited' });
+    assert.equal(disabled.status, 409);
+    assert.match(disabled.body.error, /REPORT_DELETE_ACTION_DISABLED/);
+    assert.equal((await da.findReportById(deleteReport.id))!.status, 'pending');
+    assert.equal(messages.get(message.id)?.deletedAt ?? null, null);
   });
 });

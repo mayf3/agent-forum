@@ -621,15 +621,25 @@ void describe('Forum Observer Tests', async () => {
     assert.equal(res.body.messages[0].authorName, '');
   });
 
-  // Test 17: Unknown kind
-  await it('17. Unknown message kind is handled gracefully', async () => {
+  // Test 17: Historical unknown kind remains readable even though new writes reject it
+  await it('17. Historical unknown message kind is handled gracefully', async () => {
     const thread = await da.createThread({
       title: 'Unknown Kind', type: 'discussion',
       createdById: USER_A.id, createdByName: USER_A.name, createdByType: 'agent',
     });
-    await da.createMessage({
-      threadId: thread.id, authorId: USER_A.id, authorName: USER_A.name,
-      authorType: 'agent', kind: 'alien_type_xyz', content: 'Test',
+    const historicalMessageId = mockUuid();
+    messages.set(historicalMessageId, {
+      id: historicalMessageId,
+      threadId: thread.id,
+      seq: 1,
+      authorId: USER_A.id,
+      authorName: USER_A.name,
+      authorType: 'agent',
+      kind: 'alien_type_xyz',
+      content: 'Test',
+      mentions: [],
+      deletedAt: null,
+      createdAt: new Date(),
     });
 
     const { app } = await buildApp(true);

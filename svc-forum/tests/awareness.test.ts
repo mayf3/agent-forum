@@ -127,6 +127,7 @@ function matchValue(actual: any, cond: any): boolean {
   // created_at/joined_at/last_read_at are Date columns.
   if (cond && typeof cond === 'object' && !(cond instanceof Date)) {
     if ('not' in cond) return actual !== cond.not;
+    if ('notIn' in cond) return !cond.notIn.includes(actual);
     if ('gt' in cond) return toMs(actual) > toMs(cond.gt);
     if ('gte' in cond) return toMs(actual) >= toMs(cond.gte);
     if ('lt' in cond) return toMs(actual) < toMs(cond.lt);
@@ -629,6 +630,69 @@ void describe('awareness — data-access layer', async () => {
     // mark read requires a participant → 404 for non-watcher
     await assert.rejects(() => da.markThreadRead(thread.id, PRINCIPAL_A), (e: any) => e.statusCode === 404);
   });
+
+  await it('16. deleted threads disappear from mention, watch, and reaction notifications', async () => {
+    const thread = await seedThread();
+    await da.watchThread(thread.id, PRINCIPAL_B, AGENT_B);
+    const mention = await da.createMessage({
+      threadId: thread.id, authorId: PRINCIPAL_A, authorName: AGENT_A,
+      authorType: 'agent', kind: 'comment', content: 'notify deleted thread',
+      mentions: [AGENT_B],
+      mentionPrincipals: [{ agentId: AGENT_B, principalId: PRINCIPAL_B, displayName: AGENT_B }],
+    });
+    const authored = await da.createMessage({
+      threadId: thread.id, authorId: PRINCIPAL_B, authorName: AGENT_B,
+      authorType: 'agent', kind: 'comment', content: 'reaction target',
+    });
+    messages.set(authored.id, {
+      ...messages.get(authored.id),
+      reactions: [{ principalName: AGENT_C, createdAt: new Date(authored.createdAt.getTime() + 1) }],
+    });
+
+    const beforeDelete = await da.findMyNotifications({
+      principalId: PRINCIPAL_B, agentId: AGENT_B, reason: 'mention',
+    });
+    assert.equal(beforeDelete.items.some((item) => item.messageId === mention.id), true);
+
+    threads.get(thread.id).status = 'deleted';
+
+    for (const reason of [undefined, 'mention', 'watch', 'reaction'] as const) {
+      const result = await da.findMyNotifications({
+        principalId: PRINCIPAL_B,
+        agentId: AGENT_B,
+        ...(reason ? { reason } : {}),
+      });
+      assert.equal(result.total, 0, `${reason || 'all'} notifications must hide deleted thread`);
+      assert.deepEqual(result.items, []);
+    }
+  });
+
+  await it('17. deleted threads reject watch/read mutations without participant writes', async () => {
+    const thread = await seedThread();
+    const watched = await da.watchThread(thread.id, PRINCIPAL_B, AGENT_B);
+    threads.get(thread.id).status = 'deleted';
+
+    await assert.rejects(
+      () => da.watchThread(thread.id, PRINCIPAL_C, AGENT_C),
+      (e: any) => e.statusCode === 404,
+    );
+    await assert.rejects(
+      () => da.unwatchThread(thread.id, PRINCIPAL_B),
+      (e: any) => e.statusCode === 404,
+    );
+    await assert.rejects(
+      () => da.markThreadRead(thread.id, PRINCIPAL_B),
+      (e: any) => e.statusCode === 404,
+    );
+
+    const unchanged = participants.get(watched.id);
+    assert.equal(unchanged.leftAt, null);
+    assert.equal(unchanged.lastReadAt, null);
+    assert.equal(await da.findParticipant(thread.id, PRINCIPAL_C), null);
+
+    const batch = await da.batchMarkRead([thread.id], PRINCIPAL_B);
+    assert.deepEqual(batch, { updated: 0, skipped: 1 });
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════
@@ -897,5 +961,42 @@ void describe('awareness — HTTP layer', async () => {
       .set('Authorization', `Bearer ${tokenA}`)
       .send({ content: 'bad2', kind: 'comment', mentions: 'agent-beta' });
     assert.equal(notArr.status, 400, 'non-array mentions rejected');
+  });
+
+  await it('H8. non-open thread rejects message creation with stable status and zero writes', async () => {
+    const app = await buildApp();
+    const request = (await import('supertest')).default;
+    const thread = await seedThreadForHttp();
+    const token = await signTokenA();
+
+    for (const [status, expectedStatus] of [
+      ['resolved', 409],
+      ['archived', 409],
+      ['deleted', 404],
+    ] as const) {
+      threads.get(thread.id).status = status;
+
+      await assert.rejects(
+        () => da.createMessage({
+          threadId: thread.id,
+          authorId: PRINCIPAL_A,
+          authorName: AGENT_A,
+          authorType: 'agent',
+          kind: 'comment',
+          content: `must not persist for ${status}`,
+        }),
+        (e: any) => e.statusCode === expectedStatus,
+      );
+
+      const response = await request(app)
+        .post(`/api/threads/${thread.id}/messages`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: `must not persist through HTTP for ${status}`, kind: 'comment' });
+
+      assert.equal(response.status, expectedStatus);
+      assert.equal(messages.size, 0);
+      assert.equal(participants.size, 0);
+      assert.equal(threads.get(thread.id)?.messageCount, 0);
+    }
   });
 });

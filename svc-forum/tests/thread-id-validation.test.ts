@@ -289,6 +289,19 @@ void describe('Guarded data-access functions', async () => {
     assert.ok(found, 'findThreadById works with valid UUID');
   });
 
+  await it('5b. ordinary thread lookup and derived reads hide deleted threads', async () => {
+    const thread = await da.createThread({
+      title: 'Deleted', type: 'discussion',
+      createdById: USER_A.id, createdByName: USER_A.name, createdByType: 'agent',
+    });
+    threads.get(thread.id).status = 'deleted';
+
+    assert.equal(await da.findThreadById(thread.id), null);
+    assert.equal((await da.findThreadByIdIncludingDeleted(thread.id))?.status, 'deleted');
+    assert.equal(await da.getThreadReviewReadiness(thread.id), null);
+    assert.equal(await da.buildTranscriptMd(thread.id), null);
+  });
+
   // ── 6. findMessagesByThreadId(nonUuid) returns [] ──
   await it('6. findMessagesByThreadId(invalid id) returns empty array', async () => {
     const result = await da.findMessagesByThreadId(INVALID_ID);

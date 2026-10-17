@@ -15,37 +15,12 @@ export const outcomesRouter = Router({ mergeParams: true });
 
 outcomesRouter.use(authRequired);
 
-// POST /api/threads/:threadId/outcomes — create outcome
+// POST /api/threads/:threadId/outcomes — direct Outcome authority is disabled
 outcomesRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
-
-  const {
-    summaryMd, decisionsJson, actionItemsJson,
-    rejectedOptionsJson, openQuestionsJson,
-    writebackTargetType, writebackTargetRef,
-  } = req.body;
-
-  if (!summaryMd || !summaryMd.trim()) {
-    throw new HttpError(400, 'summaryMd is required');
-  }
-
-  const user = req.user!;
-  const outcome = await db.createOutcome({
-    threadId,
-    summaryMd: summaryMd.trim(),
-    decisionsJson: decisionsJson || null,
-    actionItemsJson: actionItemsJson || null,
-    rejectedOptionsJson: rejectedOptionsJson || null,
-    openQuestionsJson: openQuestionsJson || null,
-    writebackTargetType: writebackTargetType || null,
-    writebackTargetRef: writebackTargetRef || null,
-    createdById: user.id,
-    createdByName: user.name,
-  });
-
-  res.status(201).json({ outcome });
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+  throw new HttpError(409, 'DIRECT_OUTCOME_DISABLED: authoritative outcomes may only be created by Finalization');
 }));
 
 // GET /api/threads/:threadId/outcomes — list outcomes

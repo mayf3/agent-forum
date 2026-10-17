@@ -21,15 +21,25 @@ messagesRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(a
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
-  if (thread.status === 'archived') throw new HttpError(400, 'Cannot post to archived thread');
+  if (thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+  if (thread.status !== 'open') throw new HttpError(409, 'Thread is not open for new messages');
 
   const { content, kind, parentId, attachments, metadata } = req.body;
   if (!content || !content.trim()) {
     throw new HttpError(400, 'content is required');
   }
 
+  const normalizedKind = kind || 'comment';
+  if (
+    !db.isOrdinaryMessageKind(normalizedKind)
+    && normalizedKind !== 'system'
+    && normalizedKind !== 'decision'
+  ) {
+    throw new HttpError(400, 'kind must be comment, proposal, challenge, clarification, evidence, system, or decision');
+  }
+
   // system/decision kinds require forum.moderate scope
-  if (kind === 'system' || kind === 'decision') {
+  if (normalizedKind === 'system' || normalizedKind === 'decision') {
     const userScopes = req.user!.scopes || [];
     if (!userScopes.includes('forum.moderate')) {
       throw new HttpError(403, 'INSUFFICIENT_SCOPE: "forum.moderate" required for system/decision messages');
@@ -37,7 +47,7 @@ messagesRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(a
   }
 
   // Decision gate: all required reviewers must be satisfied
-  if (kind === 'decision') {
+  if (normalizedKind === 'decision') {
     const readiness = await db.getThreadReviewReadiness(threadId);
     if (readiness && !readiness.ready) {
       res.status(409).json({
@@ -46,6 +56,7 @@ messagesRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(a
       });
       return;
     }
+    throw new HttpError(409, 'DIRECT_DECISION_MESSAGE_DISABLED: decision messages may only be projected from Finalization');
   }
 
   if (parentId) {
@@ -83,7 +94,7 @@ messagesRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(a
     authorId: user.id,
     authorName: user.name,
     authorType: 'agent',
-    kind: kind || 'comment',
+    kind: normalizedKind,
     content: content.trim(),
     mentions,
     mentionPrincipals,
@@ -110,7 +121,7 @@ messagesRouter.delete('/:messageId', requireForumWriter, requireModeratorScope()
   const messageId = p(req, 'messageId');
 
   const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
 
   const prisma = getPrisma();
   const message = await prisma.forumThreadMessage.findFirst({
@@ -122,4 +133,3 @@ messagesRouter.delete('/:messageId', requireForumWriter, requireModeratorScope()
   await db.softDeleteMessage(messageId);
   res.json({ ok: true });
 }));
-

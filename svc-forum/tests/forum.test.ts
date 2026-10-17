@@ -406,8 +406,8 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
     assert.equal(snaps.length, 1);
   });
 
-  // ── 8. Create outcome ──
-  await it('8. Create outcome', async () => {
+  // ── 8. Direct Outcome helper is disabled ──
+  await it('8. Direct Outcome helper rejects outside Finalization', async () => {
     const thread = await da.createThread({
       title: 'Outcome Test',
       type: 'discussion',
@@ -416,22 +416,21 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
       createdByType: 'agent',
     });
 
-    const outcome = await da.createOutcome({
-      threadId: thread.id,
-      summaryMd: '## Decision\nWe decided to go with option A.',
-      decisionsJson: [{ decision: 'Choose option A', reason: 'Scalability' }],
-      actionItemsJson: [{ action: 'Implement A', assignee: USER_A.name }],
-      createdById: USER_A.id, createdByName: USER_A.name,
-    });
-    assert.ok(outcome.id);
-    assert.ok(outcome.summaryMd.includes('Decision'));
-
-    const list = await da.findOutcomesByThreadId(thread.id);
-    assert.equal(list.length, 1);
+    await assert.rejects(
+      () => da.createOutcome({
+        threadId: thread.id,
+        summaryMd: '## Decision\nWe decided to go with option A.',
+        decisionsJson: [{ decision: 'Choose option A', reason: 'Scalability' }],
+        actionItemsJson: [{ action: 'Implement A', assignee: USER_A.name }],
+        createdById: USER_A.id, createdByName: USER_A.name,
+      }),
+      (error: any) => error.statusCode === 409 && /DIRECT_OUTCOME_DISABLED/.test(error.message),
+    );
+    assert.equal(outcomes.size, 0);
   });
 
-  // ── 9. Resolve thread with outcome ──
-  await it('9. Resolve thread must have outcome summary', async () => {
+  // ── 9. Direct lifecycle helper is disabled ──
+  await it('9. Direct lifecycle update cannot resolve a Thread', async () => {
     const thread = await da.createThread({
       title: 'Resolve Test',
       type: 'discussion',
@@ -440,27 +439,42 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
       createdByType: 'agent',
     });
 
-    // Create outcome first
-    await da.createOutcome({
-      threadId: thread.id,
-      summaryMd: 'Resolved with decision.',
-      createdById: USER_A.id, createdByName: USER_A.name,
-    });
+    await assert.rejects(
+      () => da.updateThread(thread.id, {
+        status: 'resolved',
+        resolvedAt: new Date(),
+        resolvedById: USER_A.id,
+        resolvedByName: USER_A.name,
+      }),
+      (error: any) => error.statusCode === 409 && /DIRECT_THREAD_LIFECYCLE_UPDATE_DISABLED/.test(error.message),
+    );
+    assert.equal(threads.get(thread.id)?.status, 'open');
+    assert.equal(await da.findLatestOutcomeByThreadId(thread.id), null);
+  });
 
-    // Resolve
-    const updated = await da.updateThread(thread.id, {
-      status: 'resolved',
-      resolvedAt: new Date(),
-      resolvedById: USER_A.id,
-      resolvedByName: USER_A.name,
+  await it('9b. Direct Thread helper cannot mutate immutable creator or system fields', async () => {
+    const thread = await da.createThread({
+      title: 'Immutable Creator Test',
+      type: 'discussion',
+      createdById: USER_A.id,
+      createdByName: USER_A.name,
+      createdByType: 'agent',
     });
-    assert.equal(updated.status, 'resolved');
-    assert.ok(updated.resolvedAt);
+    const before = { ...threads.get(thread.id) };
 
-    // The route handler enforces summaryMd requirement — verify via data layer
-    const latest = await da.findLatestOutcomeByThreadId(thread.id);
-    assert.ok(latest, 'outcome exists');
-    assert.ok(latest.summaryMd.length > 0, 'outcome has summary');
+    for (const update of [
+      { createdById: USER_B.id },
+      { createdByName: USER_B.name },
+      { createdByType: 'service' },
+      { messageCount: 99 },
+      { lastMessageAt: new Date() },
+    ]) {
+      await assert.rejects(
+        da.updateThread(thread.id, update),
+        (error: any) => error.statusCode === 400 && /THREAD_UPDATE_FIELD_NOT_ALLOWED/.test(error.message),
+      );
+      assert.deepEqual(threads.get(thread.id), before);
+    }
   });
 
   // ── 10. Transcript markdown ──
@@ -494,10 +508,19 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
       sourceType: 'okr', sourceRef: 'okr-456', title: 'Related OKR',
       takenById: USER_A.id, takenByName: USER_A.name,
     });
-    await da.createOutcome({
-      threadId: thread.id, summaryMd: '## Conclusion\nDone.',
+    const outcomeId = mockUuid();
+    outcomes.set(outcomeId, {
+      id: outcomeId,
+      threadId: thread.id,
+      summaryMd: '## Conclusion\nDone.',
       decisionsJson: [{ decision: 'Approved' }],
-      createdById: USER_A.id, createdByName: USER_A.name,
+      actionItemsJson: null,
+      rejectedOptionsJson: null,
+      openQuestionsJson: null,
+      createdById: USER_A.id,
+      createdByName: USER_A.name,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     });
 
     const md = await da.buildTranscriptMd(thread.id);
@@ -529,7 +552,7 @@ void describe('svc-forum MVP Acceptance Tests', async () => {
       threadId: t2.id, agentId: USER_B.id, agentName: USER_B.name,
       role: 'creator', status: 'responded',
     });
-    await da.updateThread(t2.id, { status: 'resolved' });
+    threads.get(t2.id)!.status = 'resolved';
 
     // By type
     const byType = await da.findThreads({ type: 'discussion' });

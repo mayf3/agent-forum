@@ -70,15 +70,26 @@ export async function createThread(data: CreateThreadInput) {
   return prisma.forumThread.create({ data: normalized });
 }
 
-export async function findThreadById(id: string) {
+export async function findThreadByIdIncludingDeleted(id: string) {
   if (!isUuid(id)) return null;
   return prisma.forumThread.findUnique({ where: { id } });
+}
+
+export async function findThreadById(id: string) {
+  const thread = await findThreadByIdIncludingDeleted(id);
+  return thread?.status === 'deleted' ? null : thread;
 }
 
 export async function findThreads(filter: ThreadFilter) {
   const page = filter.page || 1;
   const limit = Math.min(filter.limit || 20, 100);
   const skip = (page - 1) * limit;
+
+  // Deleted threads are unavailable on every ordinary list path, including an
+  // explicit status filter. Do not let a caller opt back into tombstone rows.
+  if (filter.status === 'deleted') {
+    return { items: [], total: 0, page, limit };
+  }
 
   const where: Prisma.ForumThreadWhereInput = {};
 
@@ -156,6 +167,28 @@ export async function findThreads(filter: ThreadFilter) {
 
 export async function updateThread(id: string, data: Prisma.ForumThreadUpdateInput) {
   if (!isUuid(id)) throw new Error('Invalid thread id format');
+  const lifecycleFields = ['status', 'resolvedAt', 'resolvedById', 'resolvedByName'] as const;
+  if (lifecycleFields.some((field) => Object.prototype.hasOwnProperty.call(data, field))) {
+    throw new HttpError(409, 'DIRECT_THREAD_LIFECYCLE_UPDATE_DISABLED: use an accepted lifecycle command');
+  }
+  const mutableFields = new Set([
+    'title',
+    'type',
+    'contextType',
+    'contextId',
+    'pipeline',
+    'layer',
+    'tags',
+    'pinned',
+    'featured',
+  ]);
+  const disallowedFields = Object.keys(data).filter((field) => !mutableFields.has(field));
+  if (disallowedFields.length > 0) {
+    throw new HttpError(
+      400,
+      `THREAD_UPDATE_FIELD_NOT_ALLOWED: ${disallowedFields.sort().join(',')}`,
+    );
+  }
   const normalized = { ...data };
   if (Array.isArray(normalized.tags)) {
     normalized.tags = (normalized.tags as string[])
@@ -167,10 +200,12 @@ export async function updateThread(id: string, data: Prisma.ForumThreadUpdateInp
 
 export async function softDeleteThread(id: string) {
   if (!isUuid(id)) throw new HttpError(404, 'Thread not found');
-  return prisma.forumThread.update({
+  const thread = await prisma.forumThread.findUnique({
     where: { id },
-    data: { status: 'deleted' },
+    select: { status: true },
   });
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+  throw new HttpError(409, 'LEGACY_THREAD_DELETE_DISABLED: deletion requires an audited tombstone transaction');
 }
 
 // ── Context Snapshots ──────────────────────────────────────
@@ -188,7 +223,15 @@ export async function createContextSnapshot(data: {
   takenByName: string;
   note?: string | null;
 }) {
-  return prisma.forumContextSnapshot.create({ data });
+  return prisma.$transaction(async (tx) => {
+    const thread = await tx.forumThread.findUnique({
+      where: { id: data.threadId },
+      select: { status: true },
+    });
+    if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+    if (thread.status !== 'open') throw new HttpError(409, 'Thread is not open for context snapshots');
+    return tx.forumContextSnapshot.create({ data });
+  });
 }
 
 export async function findSnapshotsByThreadId(threadId: string) {
