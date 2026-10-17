@@ -82,6 +82,14 @@ function resetDb() {
   snapshots.clear();
   outcomes.clear();
   principals.clear();
+  principals.set(AGENT_SUB, {
+    id: AGENT_SUB,
+    authSubject: AGENT_SUB,
+    agentId: 'test-forum-agent',
+    displayName: 'Test Forum Agent',
+    principalType: 'agent',
+    status: 'active',
+  });
 }
 
 function mockUuid(): string {
@@ -603,13 +611,45 @@ matrixSuite({
       const t = threads.get(SEED_THREAD_ID);
       assert.equal(t?.status, 'archived');
     });
-	    it('requester cannot archive', async () => {
+    it('requester cannot archive', async () => {
 	      threads.get(SEED_THREAD_ID)!.status = 'open';
 	      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
 	      const token = await signHumanToken({ role: 'requester' });
 	      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
 	      assert.equal(res.status, 401); // Human tokens rejected at auth layer
-	      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
+      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
+    });
+    it('ordinary non-creator cannot archive another creator Thread', async () => {
+      seedThread({ id: SEED_THREAD_ID, createdById: '22222222-2222-4222-8222-222222222222' });
+      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+      const token = await signAgentToken();
+      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
+      assert.equal(res.status, 403);
+      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
+    });
+    it('Participant moderator role grants no archive authority', async () => {
+      seedThread({ id: SEED_THREAD_ID, createdById: '22222222-2222-4222-8222-222222222222' });
+      participants.set('33333333-3333-4333-8333-333333333333', {
+        id: '33333333-3333-4333-8333-333333333333',
+        threadId: SEED_THREAD_ID,
+        agentId: AGENT_SUB,
+        agentName: 'Role only moderator',
+        role: 'moderator',
+        status: 'active',
+      });
+      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+      const token = await signAgentToken();
+      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
+      assert.equal(res.status, 403);
+      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'open');
+    });
+    it('verified forum.moderate can archive another creator Thread', async () => {
+      seedThread({ id: SEED_THREAD_ID, createdById: '22222222-2222-4222-8222-222222222222' });
+      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+      const token = await signAgentToken('forum.read forum.write forum.moderate');
+      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/archive`, token);
+      assert.equal(res.status, 200);
+      assert.equal(threads.get(SEED_THREAD_ID)?.status, 'archived');
     });
   },
 });

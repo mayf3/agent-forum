@@ -253,6 +253,13 @@ threadsRouter.post('/:threadId/archive', authRequired, requireForumWriter, requi
   const thread = await db.findThreadById(threadId);
   if (!thread) throw new HttpError(404, 'Thread not found');
 
+  const user = req.user!;
+  const isCreator = thread.createdById === user.id;
+  const isModerator = user.scopes.includes('forum.moderate');
+  if (!isCreator && !isModerator) {
+    throw new HttpError(403, 'Only thread creator or moderator can archive a thread');
+  }
+
   const updated = await db.updateThread(thread.id, { status: 'archived' });
   res.json({ thread: updated });
 }));
