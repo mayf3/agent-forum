@@ -629,6 +629,33 @@ void describe('awareness — data-access layer', async () => {
     // mark read requires a participant → 404 for non-watcher
     await assert.rejects(() => da.markThreadRead(thread.id, PRINCIPAL_A), (e: any) => e.statusCode === 404);
   });
+
+  await it('16. deleted threads reject watch/read mutations without participant writes', async () => {
+    const thread = await seedThread();
+    const watched = await da.watchThread(thread.id, PRINCIPAL_B, AGENT_B);
+    await da.updateThread(thread.id, { status: 'deleted' });
+
+    await assert.rejects(
+      () => da.watchThread(thread.id, PRINCIPAL_C, AGENT_C),
+      (e: any) => e.statusCode === 404,
+    );
+    await assert.rejects(
+      () => da.unwatchThread(thread.id, PRINCIPAL_B),
+      (e: any) => e.statusCode === 404,
+    );
+    await assert.rejects(
+      () => da.markThreadRead(thread.id, PRINCIPAL_B),
+      (e: any) => e.statusCode === 404,
+    );
+
+    const unchanged = participants.get(watched.id);
+    assert.equal(unchanged.leftAt, null);
+    assert.equal(unchanged.lastReadAt, null);
+    assert.equal(await da.findParticipant(thread.id, PRINCIPAL_C), null);
+
+    const batch = await da.batchMarkRead([thread.id], PRINCIPAL_B);
+    assert.deepEqual(batch, { updated: 0, skipped: 1 });
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════
