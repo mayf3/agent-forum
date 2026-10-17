@@ -626,6 +626,95 @@ matrixSuite({
   needsThread: true,
 });
 
+// ── Nested Participant target binding (CTR-AUTHZ-004) ─────────────
+
+void describe('Participant mutation — target is bound to route thread', async () => {
+  let prismaMod: typeof import('../src/lib/prisma.js');
+  const THREAD_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const THREAD_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const PARTICIPANT_B = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+  before(async () => {
+    prismaMod = await import('../src/lib/prisma.js');
+  });
+
+  beforeEach(() => {
+    resetDb();
+    prismaMod.setPrisma(createMockPrisma() as any);
+    seedThread({ id: THREAD_A, title: 'Thread A' });
+    seedThread({ id: THREAD_B, title: 'Thread B' });
+    participants.set(PARTICIPANT_B, {
+      id: PARTICIPANT_B,
+      threadId: THREAD_B,
+      agentId: 'participant-b',
+      agentName: 'Participant B',
+      role: 'member',
+      status: 'invited',
+      leftAt: null,
+    });
+  });
+
+  it('PATCH with a Participant ID from another Thread returns 404 and changes zero rows', async () => {
+    const app = await buildApp('../src/routes/participants.js', 'participantsRouter', '/api/threads/:threadId/participants');
+    const token = await getToken('valid-agent');
+    const res = await request(
+      app,
+      'PATCH',
+      `/api/threads/${THREAD_A}/participants/${PARTICIPANT_B}`,
+      token,
+      { status: 'responded' },
+    );
+
+    assert.equal(res.status, 404);
+    assert.equal(participants.get(PARTICIPANT_B)?.status, 'invited');
+    assert.equal(participants.get(PARTICIPANT_B)?.threadId, THREAD_B);
+  });
+
+  it('DELETE with a Participant ID from another Thread returns 404 and changes zero rows', async () => {
+    const app = await buildApp('../src/routes/participants.js', 'participantsRouter', '/api/threads/:threadId/participants');
+    const token = await getToken('valid-agent');
+    const res = await request(
+      app,
+      'DELETE',
+      `/api/threads/${THREAD_A}/participants/${PARTICIPANT_B}`,
+      token,
+    );
+
+    assert.equal(res.status, 404);
+    assert.equal(participants.get(PARTICIPANT_B)?.leftAt, null);
+    assert.equal(participants.get(PARTICIPANT_B)?.threadId, THREAD_B);
+  });
+
+  it('PATCH still updates the Participant when both nested IDs match', async () => {
+    const app = await buildApp('../src/routes/participants.js', 'participantsRouter', '/api/threads/:threadId/participants');
+    const token = await getToken('valid-agent');
+    const res = await request(
+      app,
+      'PATCH',
+      `/api/threads/${THREAD_B}/participants/${PARTICIPANT_B}`,
+      token,
+      { status: 'responded' },
+    );
+
+    assert.equal(res.status, 200);
+    assert.equal(participants.get(PARTICIPANT_B)?.status, 'responded');
+  });
+
+  it('DELETE still removes the Participant when both nested IDs match', async () => {
+    const app = await buildApp('../src/routes/participants.js', 'participantsRouter', '/api/threads/:threadId/participants');
+    const token = await getToken('valid-agent');
+    const res = await request(
+      app,
+      'DELETE',
+      `/api/threads/${THREAD_B}/participants/${PARTICIPANT_B}`,
+      token,
+    );
+
+    assert.equal(res.status, 200);
+    assert.ok(participants.get(PARTICIPANT_B)?.leftAt instanceof Date);
+  });
+});
+
 // ── Observer read-only unchanged ──
 
 void describe('Observer — read-only unchanged', async () => {
