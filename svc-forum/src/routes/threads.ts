@@ -23,6 +23,9 @@ threadsRouter.post('/', authRequired, requireForumWriter, requireWriteScope(), a
   if (!title || !title.trim()) {
     throw new HttpError(400, 'title is required');
   }
+  if (participants !== undefined && (!Array.isArray(participants) || participants.length > 0)) {
+    throw new HttpError(400, 'Embedded participants are not accepted; create the Thread, then use the Participant endpoint with principalId');
+  }
 
   const user = req.user!;
   const thread = await db.createThread({
@@ -37,19 +40,6 @@ threadsRouter.post('/', authRequired, requireForumWriter, requireWriteScope(), a
     createdByName: user.name,
     createdByType: 'agent',
   });
-
-  // Optionally add participants from request body
-  if (Array.isArray(participants)) {
-    for (const p of participants) {
-      await db.addParticipant({
-        threadId: thread.id,
-        agentId: p.agentId || user.id,
-        agentName: p.agentName || user.name,
-        role: p.role || 'member',
-        status: p.status || 'invited',
-      });
-    }
-  }
 
   // Always add creator as participant
   const creatorExists = await db.findParticipant(thread.id, user.id);
@@ -158,7 +148,16 @@ threadsRouter.get('/:threadId', authRequired, requireReadScope(), asyncHandler(a
 threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const existing = await db.findThreadById(threadId);
-  if (!existing) throw new HttpError(404, 'Thread not found');
+  if (!existing || existing.status === 'deleted') throw new HttpError(404, 'Thread not found');
+  if (existing.status !== 'open') throw new HttpError(409, 'Thread is not open for metadata changes');
+
+  const user = req.user!;
+  const userScopes = user.scopes || [];
+  const isCreator = existing.createdById === user.id;
+  const isModerator = userScopes.includes('forum.moderate');
+  if (!isCreator && !isModerator) {
+    throw new HttpError(403, 'Only the thread creator or forum.moderate can update thread metadata');
+  }
 
   // status is intentionally excluded — use dedicated endpoints:
   // POST /:threadId/resolve, POST /:threadId/archive, DELETE /:threadId
@@ -170,7 +169,6 @@ threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWrite
 
   if (requestingModeratorFields) {
     // Verify the caller has forum.moderate scope
-    const userScopes = req.user!.scopes || [];
     if (!userScopes.includes('forum.moderate')) {
       throw new HttpError(403, 'INSUFFICIENT_SCOPE: required "forum.moderate" for pinned/featured');
     }
@@ -192,8 +190,7 @@ threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWrite
 threadsRouter.delete('/:threadId', authRequired, requireForumWriter, requireModeratorScope(), requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const existing = await db.findThreadById(threadId);
-  if (!existing) throw new HttpError(404, 'Thread not found');
-  if (existing.status === 'deleted') throw new HttpError(400, 'Thread already deleted');
+  if (!existing || existing.status === 'deleted') throw new HttpError(404, 'Thread not found');
 
   const thread = await db.softDeleteThread(threadId);
   res.json({ thread });
@@ -203,7 +200,14 @@ threadsRouter.delete('/:threadId', authRequired, requireForumWriter, requireMode
 threadsRouter.post('/:threadId/resolve', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+
+  const user = req.user!;
+  const isCreator = thread.createdById === user.id;
+  const isModerator = user.scopes.includes('forum.moderate');
+  if (!isCreator && !isModerator) {
+    throw new HttpError(403, 'Only the thread creator or a moderator can resolve this thread');
+  }
 
   // Resolve gate: all required reviewers must be satisfied
   const readiness = await db.getThreadReviewReadiness(threadId);
@@ -214,47 +218,22 @@ threadsRouter.post('/:threadId/resolve', authRequired, requireForumWriter, requi
     });
     return;
   }
-
-  const { summaryMd, decisionsJson, actionItemsJson, rejectedOptionsJson, openQuestionsJson } = req.body;
-  if (!summaryMd || !summaryMd.trim()) {
-    throw new HttpError(400, 'summaryMd (outcome summary) is required to resolve thread');
-  }
-
-  const user = req.user!;
-
-  // Create outcome
-  await db.createOutcome({
-    threadId: thread.id,
-    summaryMd: summaryMd.trim(),
-    decisionsJson: decisionsJson || null,
-    actionItemsJson: actionItemsJson || null,
-    rejectedOptionsJson: rejectedOptionsJson || null,
-    openQuestionsJson: openQuestionsJson || null,
-    writebackTargetType: null,
-    writebackTargetRef: null,
-    createdById: user.id,
-    createdByName: user.name,
-  });
-
-  // Resolve thread
-  const updated = await db.updateThread(thread.id, {
-    status: 'resolved',
-    resolvedAt: new Date(),
-    resolvedById: user.id,
-    resolvedByName: user.name,
-  });
-
-  res.json({ thread: updated });
+  throw new HttpError(409, 'LEGACY_RESOLVE_DISABLED: resolution requires atomic Finalization');
 }));
 
 // POST /api/threads/:threadId/archive — archive thread
 threadsRouter.post('/:threadId/archive', authRequired, requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
 
-  const updated = await db.updateThread(thread.id, { status: 'archived' });
-  res.json({ thread: updated });
+  const user = req.user!;
+  const isCreator = thread.createdById === user.id;
+  const isModerator = user.scopes.includes('forum.moderate');
+  if (!isCreator && !isModerator) {
+    throw new HttpError(403, 'Only thread creator or moderator can archive a thread');
+  }
+  throw new HttpError(409, 'LEGACY_ARCHIVE_DISABLED: archive requires orthogonal lifecycle state');
 }));
 
 // GET /api/threads/:threadId/transcript — get transcript (MVP core)
