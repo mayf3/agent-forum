@@ -3,7 +3,7 @@ import { prisma } from '../prisma.js';
 import { isUuid } from '../../utils/uuid.js';
 import { findParticipantsByThreadId } from './watch.js';
 import { findMessagesByThreadId } from './messages.js';
-import { findSnapshotsByThreadId } from './threads.js';
+import { findSnapshotsByThreadId, findThreadById } from './threads.js';
 import { findLatestOutcomeByThreadId } from './outcomes.js';
 
 export interface ReviewReadinessResult {
@@ -23,7 +23,7 @@ export interface ReviewReadinessResult {
 
 export async function getThreadReviewReadiness(threadId: string): Promise<ReviewReadinessResult | null> {
   if (!isUuid(threadId)) return null;
-  const thread = await prisma.forumThread.findUnique({ where: { id: threadId } });
+  const thread = await findThreadById(threadId);
   if (!thread) return null;
 
   const allParticipants = await findParticipantsByThreadId(threadId);
@@ -89,7 +89,7 @@ export async function getThreadReviewReadiness(threadId: string): Promise<Review
 
 export async function buildTranscriptMd(threadId: string) {
   if (!isUuid(threadId)) return null;
-  const thread = await prisma.forumThread.findUnique({ where: { id: threadId } });
+  const thread = await findThreadById(threadId);
   if (!thread) return null;
 
   const participants = await findParticipantsByThreadId(threadId);
