@@ -110,7 +110,7 @@ messagesRouter.delete('/:messageId', requireForumWriter, requireModeratorScope()
   const messageId = p(req, 'messageId');
 
   const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
 
   const prisma = getPrisma();
   const message = await prisma.forumThreadMessage.findFirst({
@@ -122,4 +122,3 @@ messagesRouter.delete('/:messageId', requireForumWriter, requireModeratorScope()
   await db.softDeleteMessage(messageId);
   res.json({ ok: true });
 }));
-

@@ -167,10 +167,12 @@ export async function updateThread(id: string, data: Prisma.ForumThreadUpdateInp
 
 export async function softDeleteThread(id: string) {
   if (!isUuid(id)) throw new HttpError(404, 'Thread not found');
-  return prisma.forumThread.update({
+  const thread = await prisma.forumThread.findUnique({
     where: { id },
-    data: { status: 'deleted' },
+    select: { status: true },
   });
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+  throw new HttpError(409, 'LEGACY_THREAD_DELETE_DISABLED: deletion requires an audited tombstone transaction');
 }
 
 // ── Context Snapshots ──────────────────────────────────────

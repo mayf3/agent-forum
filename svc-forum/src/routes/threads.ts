@@ -192,8 +192,7 @@ threadsRouter.patch('/:threadId', authRequired, requireForumWriter, requireWrite
 threadsRouter.delete('/:threadId', authRequired, requireForumWriter, requireModeratorScope(), requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const existing = await db.findThreadById(threadId);
-  if (!existing) throw new HttpError(404, 'Thread not found');
-  if (existing.status === 'deleted') throw new HttpError(400, 'Thread already deleted');
+  if (!existing || existing.status === 'deleted') throw new HttpError(404, 'Thread not found');
 
   const thread = await db.softDeleteThread(threadId);
   res.json({ thread });
