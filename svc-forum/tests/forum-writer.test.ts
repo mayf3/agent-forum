@@ -41,6 +41,7 @@ after(() => { if (_jwksCleanup) _jwksCleanup.close(); });
 // ── Constants ─────────────────────────────────────────────────────
 
 const AGENT_SUB = '550e8400-e29b-41d4-a716-446655440000';
+const TARGET_PRINCIPAL_ID = '77777777-7777-4777-8777-777777777777';
 
 // ── JWT helpers ────────────────────────────────────────────────────
 
@@ -82,6 +83,22 @@ function resetDb() {
   snapshots.clear();
   outcomes.clear();
   principals.clear();
+  principals.set(AGENT_SUB, {
+    id: AGENT_SUB,
+    authSubject: AGENT_SUB,
+    agentId: 'test-forum-agent',
+    displayName: 'Test Forum Agent',
+    principalType: 'agent',
+    status: 'active',
+  });
+  principals.set(TARGET_PRINCIPAL_ID, {
+    id: TARGET_PRINCIPAL_ID,
+    authSubject: '88888888-8888-4888-8888-888888888888',
+    agentId: 'participant-agent',
+    displayName: 'Participant',
+    principalType: 'agent',
+    status: 'active',
+  });
 }
 
 function mockUuid(): string {
@@ -533,6 +550,17 @@ matrixSuite({
       const res = await request(app, 'GET', '/api/threads', token);
       assert.equal(res.status, 200);
     });
+    it('embedded participants fail before the Thread write', async () => {
+      const app = await buildApp('../src/routes/threads.js', 'threadsRouter', '/api/threads');
+      const token = await getToken('valid-agent');
+      const res = await request(app, 'POST', '/api/threads', token, {
+        title: 'No partial write',
+        participants: [{ principalId: TARGET_PRINCIPAL_ID, role: 'member' }],
+      });
+      assert.equal(res.status, 400);
+      assert.equal(threads.size, 0);
+      assert.equal(participants.size, 0);
+    });
   },
 });
 
@@ -568,9 +596,265 @@ matrixSuite({
   mountPath: '/api/threads/:threadId/participants',
   method: 'POST',
   route: `/api/threads/${SEED_THREAD_ID}/participants`,
-  body: { agentId: 'participant-agent', agentName: 'Participant', role: 'member' },
+  body: { principalId: TARGET_PRINCIPAL_ID, role: 'member' },
   okStatus: 201,
   needsThread: true,
+  extra: () => {
+    it('ordinary writer cannot add a Participant to another creator Thread', async () => {
+      seedThread({ id: SEED_THREAD_ID, createdById: '22222222-2222-4222-8222-222222222222' });
+      const app = await buildApp('../src/routes/participants.js', 'participantsRouter', '/api/threads/:threadId/participants');
+      const token = await signAgentToken();
+      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/participants`, token, {
+        principalId: TARGET_PRINCIPAL_ID, role: 'member',
+      });
+      assert.equal(res.status, 403);
+      assert.equal(participants.size, 0, 'denied add must not create a Participant');
+    });
+
+    it('verified forum.moderate can add a Participant to another creator Thread', async () => {
+      seedThread({ id: SEED_THREAD_ID, createdById: '22222222-2222-4222-8222-222222222222' });
+      const app = await buildApp('../src/routes/participants.js', 'participantsRouter', '/api/threads/:threadId/participants');
+      const token = await signAgentToken('forum.read forum.write forum.moderate');
+      const res = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/participants`, token, {
+        principalId: TARGET_PRINCIPAL_ID, role: 'member',
+      });
+      assert.equal(res.status, 201);
+      assert.equal(participants.size, 1);
+    });
+
+    it('rejects authority-like and unknown presentation values before insert', async () => {
+      const app = await buildApp('../src/routes/participants.js', 'participantsRouter', '/api/threads/:threadId/participants');
+      const token = await signAgentToken();
+      for (const body of [
+        { principalId: TARGET_PRINCIPAL_ID, role: 'creator', status: 'invited' },
+        { principalId: TARGET_PRINCIPAL_ID, role: 'moderator', status: 'active' },
+        { principalId: TARGET_PRINCIPAL_ID, role: 'owner', status: 'active' },
+        { principalId: TARGET_PRINCIPAL_ID, role: 'member', status: 'approved' },
+      ]) {
+        const res = await request(
+          app,
+          'POST',
+          `/api/threads/${SEED_THREAD_ID}/participants`,
+          token,
+          body,
+        );
+        assert.equal(res.status, 400);
+      }
+      assert.equal(participants.size, 0);
+    });
+
+    it('rejects legacy identity and unknown or disabled stable targets', async () => {
+      const app = await buildApp('../src/routes/participants.js', 'participantsRouter', '/api/threads/:threadId/participants');
+      const token = await signAgentToken();
+      const legacy = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/participants`, token, {
+        agentId: 'participant-agent', agentName: 'Spoofed label', role: 'member',
+      });
+      assert.equal(legacy.status, 400);
+
+      const unknown = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/participants`, token, {
+        principalId: '99999999-9999-4999-8999-999999999999', role: 'member',
+      });
+      assert.equal(unknown.status, 404);
+
+      principals.get(TARGET_PRINCIPAL_ID)!.status = 'disabled';
+      const disabled = await request(app, 'POST', `/api/threads/${SEED_THREAD_ID}/participants`, token, {
+        principalId: TARGET_PRINCIPAL_ID, role: 'member',
+      });
+      assert.equal(disabled.status, 409);
+      assert.equal(participants.size, 0);
+    });
+
+    it('returns an existing legacy alias row instead of creating a canonical collision', async () => {
+      participants.set('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', {
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        threadId: SEED_THREAD_ID,
+        agentId: 'participant-agent',
+        agentName: 'Legacy alias row',
+        role: 'member',
+        status: 'invited',
+        leftAt: null,
+      });
+      const app = await buildApp('../src/routes/participants.js', 'participantsRouter', '/api/threads/:threadId/participants');
+      const res = await request(
+        app,
+        'POST',
+        `/api/threads/${SEED_THREAD_ID}/participants`,
+        await signAgentToken(),
+        { principalId: TARGET_PRINCIPAL_ID, role: 'member' },
+      );
+      assert.equal(res.status, 200);
+      assert.equal(participants.size, 1);
+      assert.equal(res.body.participant.agentId, 'participant-agent');
+    });
+  },
+});
+
+void describe('Participant mutation object authority and nested target binding', async () => {
+  let prismaMod: typeof import('../src/lib/prisma.js');
+  const THREAD_A = SEED_THREAD_ID;
+  const THREAD_B = '22222222-2222-4222-8222-222222222222';
+  const TARGET_A = '33333333-3333-4333-8333-333333333333';
+  const TARGET_B = '44444444-4444-4444-8444-444444444444';
+
+  before(async () => {
+    prismaMod = await import('../src/lib/prisma.js');
+  });
+
+  beforeEach(() => {
+    resetDb();
+    prismaMod.setPrisma(createMockPrisma() as any);
+    seedThread({ id: THREAD_A, createdById: AGENT_SUB });
+    seedThread({ id: THREAD_B, createdById: '55555555-5555-4555-8555-555555555555' });
+    participants.set(TARGET_A, {
+      id: TARGET_A, threadId: THREAD_A, agentId: 'target-a', agentName: 'Target A',
+      role: 'member', status: 'invited', leftAt: null,
+    });
+    participants.set(TARGET_B, {
+      id: TARGET_B, threadId: THREAD_B, agentId: 'target-b', agentName: 'Target B',
+      role: 'member', status: 'invited', leftAt: null,
+    });
+  });
+
+  async function participantApp() {
+    return buildApp('../src/routes/participants.js', 'participantsRouter', '/api/threads/:threadId/participants');
+  }
+
+  await it('creator can update a target within the route Thread', async () => {
+    const app = await participantApp();
+    const res = await request(
+      app,
+      'PATCH',
+      `/api/threads/${THREAD_A}/participants/${TARGET_A}`,
+      await signAgentToken(),
+      { status: 'responded' },
+    );
+    assert.equal(res.status, 200);
+    assert.equal(participants.get(TARGET_A)?.status, 'responded');
+  });
+
+  await it('management PATCH rejects role escalation and preserves self-service Read State', async () => {
+    const app = await participantApp();
+    const token = await signAgentToken();
+    const before = { ...participants.get(TARGET_A), lastReadAt: new Date('2026-08-01T00:00:00Z') };
+    participants.set(TARGET_A, before);
+
+    const roleRes = await request(
+      app,
+      'PATCH',
+      `/api/threads/${THREAD_A}/participants/${TARGET_A}`,
+      token,
+      { role: 'moderator' },
+    );
+    assert.equal(roleRes.status, 400);
+    assert.equal(participants.get(TARGET_A)?.role, 'member');
+
+    const readRes = await request(
+      app,
+      'PATCH',
+      `/api/threads/${THREAD_A}/participants/${TARGET_A}`,
+      token,
+      { lastReadAt: '2030-01-01T00:00:00Z' },
+    );
+    assert.equal(readRes.status, 400);
+    assert.deepEqual(participants.get(TARGET_A)?.lastReadAt, before.lastReadAt);
+  });
+
+  await it('Participant moderator role grants no authority on another creator Thread', async () => {
+    participants.set('66666666-6666-4666-8666-666666666666', {
+      id: '66666666-6666-4666-8666-666666666666', threadId: THREAD_B,
+      agentId: AGENT_SUB, agentName: 'Role only', role: 'moderator', status: 'active', leftAt: null,
+    });
+    const app = await participantApp();
+    const res = await request(
+      app,
+      'PATCH',
+      `/api/threads/${THREAD_B}/participants/${TARGET_B}`,
+      await signAgentToken(),
+      { role: 'required_reviewer' },
+    );
+    assert.equal(res.status, 403);
+    assert.equal(participants.get(TARGET_B)?.role, 'member', 'denied role-only actor must not mutate');
+  });
+
+  await it('verified forum.moderate can update and remove a target on another creator Thread', async () => {
+    const app = await participantApp();
+    const token = await signAgentToken('forum.read forum.write forum.moderate');
+    const patchRes = await request(
+      app,
+      'PATCH',
+      `/api/threads/${THREAD_B}/participants/${TARGET_B}`,
+      token,
+      { status: 'responded' },
+    );
+    assert.equal(patchRes.status, 200);
+    assert.equal(participants.get(TARGET_B)?.status, 'responded');
+
+    const deleteRes = await request(
+      app,
+      'DELETE',
+      `/api/threads/${THREAD_B}/participants/${TARGET_B}`,
+      token,
+    );
+    assert.equal(deleteRes.status, 200);
+    assert.ok(participants.get(TARGET_B)?.leftAt instanceof Date);
+  });
+
+  await it('cross-Thread Participant ID is 404 and changes zero rows', async () => {
+    const app = await participantApp();
+    const before = { ...participants.get(TARGET_B) };
+    const patchRes = await request(
+      app,
+      'PATCH',
+      `/api/threads/${THREAD_A}/participants/${TARGET_B}`,
+      await signAgentToken(),
+      { status: 'responded' },
+    );
+    assert.equal(patchRes.status, 404);
+    assert.deepEqual(participants.get(TARGET_B), before);
+
+    const deleteRes = await request(
+      app,
+      'DELETE',
+      `/api/threads/${THREAD_A}/participants/${TARGET_B}`,
+      await signAgentToken(),
+    );
+    assert.equal(deleteRes.status, 404);
+    assert.deepEqual(participants.get(TARGET_B), before);
+  });
+
+  await it('deleted Thread is terminal for Participant add, update, and remove', async () => {
+    threads.get(THREAD_A)!.status = 'deleted';
+    const app = await participantApp();
+    const token = await signAgentToken('forum.read forum.write forum.moderate');
+    const before = new Map(Array.from(participants, ([id, participant]) => [id, { ...participant }]));
+
+    const addRes = await request(
+      app,
+      'POST',
+      `/api/threads/${THREAD_A}/participants`,
+      token,
+      { principalId: TARGET_PRINCIPAL_ID, role: 'member' },
+    );
+    assert.equal(addRes.status, 404);
+
+    const patchRes = await request(
+      app,
+      'PATCH',
+      `/api/threads/${THREAD_A}/participants/${TARGET_A}`,
+      token,
+      { status: 'responded' },
+    );
+    assert.equal(patchRes.status, 404);
+
+    const deleteRes = await request(
+      app,
+      'DELETE',
+      `/api/threads/${THREAD_A}/participants/${TARGET_A}`,
+      token,
+    );
+    assert.equal(deleteRes.status, 404);
+    assert.deepEqual(participants, before, 'deleted Thread operations must change zero Participant rows');
+  });
 });
 
 matrixSuite({

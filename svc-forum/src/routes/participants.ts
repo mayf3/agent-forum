@@ -5,6 +5,7 @@ import { authRequired } from '../middleware/auth.js';
 import { requireForumWriter } from '../middleware/forum-writer.js';
 import { requireWriteScope, requireReadScope } from '../middleware/scope-guard.js';
 import { getPrisma } from '../lib/prisma.js';
+import { isUuid } from '../utils/uuid.js';
 import * as db from '../lib/data-access.js';
 
 function p(req: { params: Record<string, any> }, key: string): string {
@@ -16,29 +17,82 @@ export const participantsRouter = Router({ mergeParams: true });
 
 participantsRouter.use(authRequired);
 
+const MUTABLE_PARTICIPANT_ROLES = new Set(['member', 'required_reviewer']);
+const MUTABLE_PARTICIPANT_STATUSES = new Set(['active', 'invited', 'responded']);
+
+function requireParticipantMutationAuthority(
+  thread: { createdById: string },
+  user: { id: string; scopes: string[] },
+): void {
+  const isCreator = thread.createdById === user.id;
+  const isModerator = user.scopes.includes('forum.moderate');
+  if (!isCreator && !isModerator) {
+    throw new HttpError(403, 'Only thread creator or moderator can mutate participants');
+  }
+}
+
+function participantPresentationInput(body: Record<string, unknown>, defaults: boolean): {
+  role?: string;
+  status?: string;
+} {
+  const role = body.role ?? (defaults ? 'member' : undefined);
+  const status = body.status ?? (defaults ? 'invited' : undefined);
+  if (role !== undefined && (typeof role !== 'string' || !MUTABLE_PARTICIPANT_ROLES.has(role))) {
+    throw new HttpError(400, 'role must be member or required_reviewer');
+  }
+  if (status !== undefined && (typeof status !== 'string' || !MUTABLE_PARTICIPANT_STATUSES.has(status))) {
+    throw new HttpError(400, 'status must be active, invited, or responded');
+  }
+  if (body.lastReadAt !== undefined) {
+    throw new HttpError(400, 'lastReadAt is self-service Read State and cannot be changed here');
+  }
+  return { role, status };
+}
+
 // POST /api/threads/:threadId/participants — add participant
 participantsRouter.post('/', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
   const threadId = p(req, 'threadId');
   const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+  requireParticipantMutationAuthority(thread, req.user!);
 
-  const { agentId, agentName, role, status } = req.body;
-  if (!agentId) throw new HttpError(400, 'agentId is required');
+  if (req.body.agentId !== undefined || req.body.agentName !== undefined) {
+    throw new HttpError(400, 'Use stable principalId; agentId and agentName are not accepted');
+  }
+  const { principalId } = req.body;
+  if (!isUuid(principalId)) throw new HttpError(400, 'principalId must be a valid UUID');
+  const { role, status } = participantPresentationInput(req.body, true);
 
-  // Check for duplicate
-  const existing = await db.findParticipant(threadId, agentId);
-  if (existing) {
-    // Idempotent — return existing
-    res.status(200).json({ participant: existing });
-    return;
+  const prisma = getPrisma();
+  const principal = await prisma.forumPrincipal.findUnique({
+    where: { id: principalId },
+    select: { id: true, authSubject: true, agentId: true, displayName: true, status: true },
+  });
+  if (!principal) throw new HttpError(404, 'Forum Principal not found');
+  if (principal.status !== 'active') throw new HttpError(409, 'Forum Principal is unavailable');
+
+  // Legacy rows may use one of three historical identity namespaces. Treat
+  // any exact alias as the same canonical target and return it idempotently,
+  // rather than creating a new collision.
+  const identifiers = [...new Set([
+    principal.id,
+    principal.authSubject,
+    principal.agentId,
+  ].filter((value): value is string => Boolean(value)))];
+  for (const identifier of identifiers) {
+    const existing = await db.findParticipant(threadId, identifier);
+    if (existing) {
+      res.status(200).json({ participant: existing });
+      return;
+    }
   }
 
   const participant = await db.addParticipant({
     threadId,
-    agentId,
-    agentName: agentName || agentId,
-    role: role || 'member',
-    status: status || 'invited',
+    agentId: principal.id,
+    agentName: principal.displayName || principal.agentId || principal.id,
+    role: role!,
+    status: status!,
   });
 
   res.status(201).json({ participant });
@@ -59,18 +113,19 @@ participantsRouter.patch('/:participantId', requireForumWriter, requireWriteScop
   const threadId = p(req, 'threadId');
   const participantId = p(req, 'participantId');
 
+  const thread = await db.findThreadById(threadId);
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+
   const prisma = getPrisma();
-  const existing = await prisma.forumThreadParticipant.findUnique({
-    where: { id: participantId },
+  const existing = await prisma.forumThreadParticipant.findFirst({
+    where: { id: participantId, threadId },
   });
   if (!existing) throw new HttpError(404, 'Participant not found');
+  requireParticipantMutationAuthority(thread, req.user!);
 
-  const allowed = ['role', 'status', 'lastReadAt'];
-  const updateData: Record<string, any> = {};
-  for (const key of allowed) {
-    if (req.body[key] !== undefined) {
-      updateData[key] = req.body[key];
-    }
+  const updateData = participantPresentationInput(req.body, false);
+  if (updateData.role === undefined && updateData.status === undefined) {
+    throw new HttpError(400, 'role or status is required');
   }
 
   const participant = await db.updateParticipant(participantId, updateData);
@@ -79,13 +134,18 @@ participantsRouter.patch('/:participantId', requireForumWriter, requireWriteScop
 
 // DELETE /api/threads/:threadId/participants/:participantId — remove participant
 participantsRouter.delete('/:participantId', requireForumWriter, requireWriteScope(), asyncHandler(async (req, res) => {
+  const threadId = p(req, 'threadId');
   const participantId = p(req, 'participantId');
 
+  const thread = await db.findThreadById(threadId);
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+
   const prisma = getPrisma();
-  const existing = await prisma.forumThreadParticipant.findUnique({
-    where: { id: participantId },
+  const existing = await prisma.forumThreadParticipant.findFirst({
+    where: { id: participantId, threadId },
   });
   if (!existing) throw new HttpError(404, 'Participant not found');
+  requireParticipantMutationAuthority(thread, req.user!);
 
   await db.softDeleteParticipant(participantId);
   res.json({ ok: true });
