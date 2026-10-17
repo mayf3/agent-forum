@@ -134,8 +134,49 @@ function createMockServer(customRoutes) {
       return;
     }
 
+    if (url === '/api/threads' && method === 'POST') {
+      const parsed = JSON.parse(body || '{}');
+      sendJson(res, 201, {
+        thread: {
+          id: VALID_UUID,
+          title: parsed.title,
+          type: 'discussion',
+          status: 'open',
+          tags: parsed.tags || [],
+        },
+      });
+      return;
+    }
+
     // ── V1 awareness endpoints ─────────────────────────────────────────
     const u = new URL(url, 'http://mock.local');
+
+    if (u.pathname === '/api/search' && method === 'GET') {
+      const query = u.searchParams.get('q');
+      const page = parseInt(u.searchParams.get('page') || '1', 10);
+      const limit = parseInt(u.searchParams.get('limit') || '20', 10);
+      sendJson(res, 200, {
+        threads: [{ id: VALID_UUID, title: `Thread ${query}`, score: 10 }],
+        messages: [{ id: 'message-1', threadId: VALID_UUID, content: query, score: 2 }],
+        outcomes: [{ id: 'outcome-1', threadId: VALID_UUID, summaryMd: query, score: 2 }],
+        pagination: { page, limit, total: 3, pages: 1 },
+      });
+      return;
+    }
+
+    if (u.pathname === '/api/reports' && method === 'POST') {
+      const parsed = JSON.parse(body || '{}');
+      sendJson(res, 201, {
+        report: {
+          id: 'report-1',
+          targetType: parsed.targetType,
+          targetId: parsed.targetId,
+          reason: parsed.reason,
+          status: 'pending',
+        },
+      });
+      return;
+    }
 
     if (u.pathname === '/api/threads' && method === 'GET') {
       // Fallback list route — matches query params (?sort=latest) without
@@ -346,6 +387,16 @@ describe('static analysis', () => {
     }
   });
 
+  it('report body cannot supply reporter identity or moderation action', () => {
+    const fn = SOURCE.match(/async function submitReport[\s\S]*?\n}/)?.[0] || '';
+    assert.ok(fn.includes('targetType'));
+    assert.ok(fn.includes('targetId'));
+    assert.ok(fn.includes('reason'));
+    assert.ok(!fn.includes('reporterId'));
+    assert.ok(!fn.includes('reporterName'));
+    assert.ok(!fn.includes('action'));
+  });
+
   it('login output does not contain access_token key', () => {
     const m = SOURCE.match(/console\.log\(JSON\.stringify\(\{([\s\S]{0,500})\},.*\)\)/);
     if (m) {
@@ -373,6 +424,24 @@ describe('cli parsing', () => {
     });
     assert.equal(r.status, 1);
     assert.ok(r.stderr.includes('Unknown'));
+  });
+
+  it('create-thread without --title fails before login', () => {
+    const r = spawnSync('node', [SCRIPT, 'create-thread'], {
+      encoding: 'utf-8', timeout: 3000,
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
+    });
+    assert.equal(r.status, 1);
+    assert.ok(r.stderr.includes('requires --title'));
+  });
+
+  it('create-thread rejects a missing --title value', () => {
+    const r = spawnSync('node', [SCRIPT, 'create-thread', '--title', '--tags', 'forum'], {
+      encoding: 'utf-8', timeout: 3000,
+      env: { ...process.env, AGENT_FORUM_CLIENT_ID: 'test', AGENT_FORUM_CLIENT_SECRET: 'test' },
+    });
+    assert.equal(r.status, 1);
+    assert.ok(r.stderr.includes('requires --title'));
   });
 
   it('read-thread without threadId fails', () => {
@@ -490,6 +559,59 @@ describe('integration', () => {
     assert.ok(lower.includes('invalid') || lower.includes('fail'), 'stderr should describe the failure');
   });
 
+  // ── Create Thread ──
+
+  it('create-thread creates one ordinary discussion and returns the full UUID', async () => {
+    const r = await runScriptAsync(
+      ['create-thread', '--title', 'Canonical discussion', '--tags', 'governance, forum,governance'],
+      null, port
+    );
+    assert.equal(r.status, 0, r.stderr);
+
+    const output = JSON.parse(r.stdout);
+    assert.equal(output.status, 'created');
+    assert.equal(output.threadId, VALID_UUID);
+    assert.equal(output.shortId, VALID_UUID.slice(0, 8));
+    assert.equal(output.title, 'Canonical discussion');
+    assert.equal(output.type, 'discussion');
+    assert.equal(output.threadStatus, 'open');
+    assert.deepEqual(output.tags, ['governance', 'forum']);
+
+    const calls = mock.requestLog.filter(
+      e => e.url === '/api/threads' && e.method === 'POST'
+    );
+    assert.equal(calls.length, 1);
+    assert.deepEqual(JSON.parse(calls[0].body), {
+      title: 'Canonical discussion',
+      tags: ['governance', 'forum'],
+    });
+  });
+
+  it('create-thread never submits identity, participants, authority, or governance fields', async () => {
+    const r = await runScriptAsync(
+      [
+        'create-thread', '--title', 'Safe ordinary thread',
+        '--participants', 'other-agent', '--role', 'moderator',
+        '--status', 'hidden', '--pinned', 'true',
+      ],
+      null, port
+    );
+    assert.equal(r.status, 0, r.stderr);
+
+    const calls = mock.requestLog.filter(
+      e => e.url === '/api/threads' && e.method === 'POST'
+    );
+    assert.equal(calls.length, 1);
+    const posted = JSON.parse(calls[0].body);
+    assert.deepEqual(posted, { title: 'Safe ordinary thread' });
+    for (const forbidden of [
+      'agentId', 'authorId', 'createdById', 'createdByType', 'participants',
+      'role', 'status', 'pinned', 'featured', 'outcome',
+    ]) {
+      assert.equal(posted[forbidden], undefined, `${forbidden} must not be submitted`);
+    }
+  });
+
   // ── Read Thread ──
 
   it('read-thread uses complete UUID and rejects short ID', async () => {
@@ -547,6 +669,87 @@ describe('integration', () => {
     assert.equal(data.items[0].id, VALID_UUID, 'full UUID preserved');
     assert.equal(data.items[0].threadId, VALID_UUID, 'threadId equals full UUID');
     assert.equal(data.items[0].shortId, VALID_UUID.slice(0, 8), 'shortId is display-only prefix');
+  });
+
+  it('search forwards one encoded bounded GET and preserves full thread IDs', async () => {
+    mock.resetLog();
+    const query = 'governance & audit/phase?';
+    const r = await runScriptAsync(['search', query, '--page', '2', '--limit', '7'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+
+    const data = JSON.parse(r.stdout);
+    assert.equal(data.pagination.page, 2);
+    assert.equal(data.pagination.limit, 7);
+    assert.equal(data.threads[0].threadId, VALID_UUID);
+    assert.equal(data.threads[0].shortId, VALID_UUID.slice(0, 8));
+    assert.equal(data.messages[0].threadId, VALID_UUID);
+    assert.equal(data.messages[0].shortId, VALID_UUID.slice(0, 8));
+    assert.equal(data.outcomes[0].threadId, VALID_UUID);
+    assert.equal(data.outcomes[0].shortId, VALID_UUID.slice(0, 8));
+
+    const calls = mock.requestLog.filter(e => e.url.startsWith('/api/search?'));
+    assert.equal(calls.length, 1);
+    const requestUrl = new URL(calls[0].url, 'http://mock.local');
+    assert.equal(requestUrl.searchParams.get('q'), query);
+    assert.equal(requestUrl.searchParams.get('page'), '2');
+    assert.equal(requestUrl.searchParams.get('limit'), '7');
+    assert.equal(calls[0].method, 'GET');
+  });
+
+  it('search rejects missing query and invalid pagination before Forum request', async () => {
+    for (const args of [
+      ['search'],
+      ['search', '--page', '2'],
+      ['search', 'query', '--page', '0'],
+      ['search', 'query', '--page', 'NaN'],
+      ['search', 'query', '--limit', '101'],
+    ]) {
+      mock.resetLog();
+      const r = await runScriptAsync(args, null, port);
+      assert.equal(r.status, 1);
+      assert.equal(mock.requestLog.filter(e => e.url.startsWith('/api/search')).length, 0);
+    }
+  });
+
+  it('report submits one bounded identity-free request and preserves the target UUID', async () => {
+    mock.resetLog();
+    const r = await runScriptAsync(
+      ['report', 'message', VALID_UUID, '--reason', 'violation'],
+      null,
+      port,
+    );
+    assert.equal(r.status, 0, r.stderr);
+
+    const output = JSON.parse(r.stdout);
+    assert.equal(output.status, 'submitted');
+    assert.equal(output.reportId, 'report-1');
+    assert.equal(output.targetType, 'message');
+    assert.equal(output.targetId, VALID_UUID);
+    assert.equal(output.reason, 'violation');
+    assert.equal(output.reportStatus, 'pending');
+
+    const calls = mock.requestLog.filter(e => e.url === '/api/reports' && e.method === 'POST');
+    assert.equal(calls.length, 1);
+    assert.deepEqual(JSON.parse(calls[0].body), {
+      targetType: 'message',
+      targetId: VALID_UUID,
+      reason: 'violation',
+    });
+  });
+
+  it('report rejects invalid targets and reasons before a Forum request', async () => {
+    for (const args of [
+      ['report'],
+      ['report', 'outcome', VALID_UUID, '--reason', 'spam'],
+      ['report', 'thread', '52423a12', '--reason', 'spam'],
+      ['report', 'thread', VALID_UUID],
+      ['report', 'thread', VALID_UUID, '--reason', 'not-a-reason'],
+    ]) {
+      mock.resetLog();
+      const r = await runScriptAsync(args, null, port);
+      assert.equal(r.status, 1);
+      assert.equal(mock.requestLog.filter(e => e.url === '/api/reports').length, 0);
+    }
   });
 
   // ── Read Transcript ──
@@ -748,6 +951,28 @@ describe('integration', () => {
     assert.equal(r.status, 0, r.stderr);
     forumOps = mock.requestLog.filter(e => e.url.startsWith('/api/threads'));
     assert.equal(forumOps.length, 1, 'post-message should make exactly 1 forum call');
+
+    mock.resetLog();
+    r = await runScriptAsync(['create-thread', '--title', 'one operation'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    forumOps = mock.requestLog.filter(e => e.url.startsWith('/api/threads'));
+    assert.equal(forumOps.length, 1, 'create-thread should make exactly 1 forum call');
+
+    mock.resetLog();
+    r = await runScriptAsync(['search', 'one operation'], null, port);
+    assert.equal(r.status, 0, r.stderr);
+    forumOps = mock.requestLog.filter(e => e.url.startsWith('/api/search'));
+    assert.equal(forumOps.length, 1, 'search should make exactly 1 forum call');
+
+    mock.resetLog();
+    r = await runScriptAsync(
+      ['report', 'thread', VALID_UUID, '--reason', 'spam'],
+      null,
+      port,
+    );
+    assert.equal(r.status, 0, r.stderr);
+    forumOps = mock.requestLog.filter(e => e.url === '/api/reports');
+    assert.equal(forumOps.length, 1, 'report should make exactly 1 forum call');
   });
 
   // ── V1 awareness: notifications, watch/unwatch, mark-read, --sort ──
