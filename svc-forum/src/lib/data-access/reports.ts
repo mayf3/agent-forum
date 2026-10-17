@@ -5,8 +5,6 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { isUuid } from '../../utils/uuid.js';
 import { HttpError } from '../../utils/http-error.js';
-import { softDeleteThread } from './threads.js';
-import { softDeleteMessage } from './messages.js';
 
 // ── Reports (Moderation Queue) ─────────────────────────────
 //
@@ -160,6 +158,9 @@ export async function handleReport(
   if (report.status !== 'pending') {
     throw new HttpError(409, `Report already handled (status=${report.status})`);
   }
+  if (action === 'delete') {
+    throw new HttpError(409, 'REPORT_DELETE_ACTION_DISABLED: target deletion requires an audited tombstone transaction');
+  }
 
   const now = new Date();
   const updateData: Prisma.ForumReportUpdateInput = {
@@ -169,16 +170,6 @@ export async function handleReport(
     handledAt: now,
     handleNote: handleNote || null,
   };
-
-  // AC#4 delete action cascades: soft-delete the reported content so it is no
-  // longer visible, while the report record keeps the trace.
-  if (action === 'delete') {
-    if (report.targetType === 'thread') {
-      await softDeleteThread(report.targetId);
-    } else {
-      await softDeleteMessage(report.targetId);
-    }
-  }
 
   return prisma.forumReport.update({ where: { id }, data: updateData });
 }
