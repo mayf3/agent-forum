@@ -249,8 +249,8 @@ void describe('Report Entry (Moderation Queue)', async () => {
     );
   });
 
-  await it('AC#1 rejects reports on non-existent or deleted targets', async () => {
-    const { thread } = await seedTargets();
+  await it('AC#1 rejects non-existent/deleted targets and content under a deleted Thread as 404', async () => {
+    const { thread, message } = await seedTargets();
     await assert.rejects(
       da.createReport({
         targetType: 'thread',
@@ -271,8 +271,19 @@ void describe('Report Entry (Moderation Queue)', async () => {
         reporterName: USER_B.name,
         reason: 'spam',
       }),
-      (err: any) => err.statusCode === 400,
+      (err: any) => err.statusCode === 404,
     );
+    await assert.rejects(
+      da.createReport({
+        targetType: 'message',
+        targetId: message.id,
+        reporterId: USER_B.id,
+        reporterName: USER_B.name,
+        reason: 'spam',
+      }),
+      (err: any) => err.statusCode === 404,
+    );
+    assert.equal(reports.size, 0, 'rejected deleted targets must not create reports');
   });
 
   // ── AC#3: same reporter on same target counts once ──
