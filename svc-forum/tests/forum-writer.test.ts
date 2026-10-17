@@ -574,15 +574,33 @@ matrixSuite({
 });
 
 matrixSuite({
-  name: 'POST /api/threads/:tid/outcomes — create outcome',
+  name: 'POST /api/threads/:tid/outcomes — direct authority disabled',
   routerModule: '../src/routes/outcomes.js',
   routerExport: 'outcomesRouter',
   mountPath: '/api/threads/:threadId/outcomes',
   method: 'POST',
   route: `/api/threads/${SEED_THREAD_ID}/outcomes`,
   body: { summaryMd: '# Test outcome' },
-  okStatus: 201,
+  okStatus: 409,
   needsThread: true,
+  extra: () => {
+    it('valid writer and moderator both receive stable conflict and create zero Outcomes', async () => {
+      const app = await buildApp('../src/routes/outcomes.js', 'outcomesRouter', '/api/threads/:threadId/outcomes');
+      for (const scope of ['forum.read forum.write', 'forum.read forum.write forum.moderate']) {
+        const token = await signAgentToken(scope);
+        const res = await request(
+          app,
+          'POST',
+          `/api/threads/${SEED_THREAD_ID}/outcomes`,
+          token,
+          { summaryMd: '# Must not become an Outcome' },
+        );
+        assert.equal(res.status, 409);
+        assert.match(res.body.error, /DIRECT_OUTCOME_DISABLED/);
+      }
+      assert.equal(outcomes.size, 0);
+    });
+  },
 });
 
 matrixSuite({
