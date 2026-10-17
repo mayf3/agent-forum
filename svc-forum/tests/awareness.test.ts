@@ -898,4 +898,41 @@ void describe('awareness — HTTP layer', async () => {
       .send({ content: 'bad2', kind: 'comment', mentions: 'agent-beta' });
     assert.equal(notArr.status, 400, 'non-array mentions rejected');
   });
+
+  await it('H8. non-open thread rejects message creation with stable status and zero writes', async () => {
+    const app = await buildApp();
+    const request = (await import('supertest')).default;
+    const thread = await seedThreadForHttp();
+    const token = await signTokenA();
+
+    for (const [status, expectedStatus] of [
+      ['resolved', 409],
+      ['archived', 409],
+      ['deleted', 404],
+    ] as const) {
+      await da.updateThread(thread.id, { status });
+
+      await assert.rejects(
+        () => da.createMessage({
+          threadId: thread.id,
+          authorId: PRINCIPAL_A,
+          authorName: AGENT_A,
+          authorType: 'agent',
+          kind: 'comment',
+          content: `must not persist for ${status}`,
+        }),
+        (e: any) => e.statusCode === expectedStatus,
+      );
+
+      const response = await request(app)
+        .post(`/api/threads/${thread.id}/messages`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: `must not persist through HTTP for ${status}`, kind: 'comment' });
+
+      assert.equal(response.status, expectedStatus);
+      assert.equal(messages.size, 0);
+      assert.equal(participants.size, 0);
+      assert.equal(threads.get(thread.id)?.messageCount, 0);
+    }
+  });
 });

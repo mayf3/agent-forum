@@ -320,7 +320,11 @@ async function addParticipants(da: any, threadId: string, extra: Array<{ id: str
   }
 }
 
-async function signToken(userId: string, _userName: string) {
+async function signToken(
+  userId: string,
+  _userName: string,
+  scope = 'forum.read forum.write forum.moderate',
+) {
   // Standard OAuth access token: RS256 + full forum scopes.
   // agent_id must be unique per token — JIT principal resolution rejects a
   // second authSubject claiming an already-mapped agent_id (409 → 401).
@@ -328,7 +332,7 @@ async function signToken(userId: string, _userName: string) {
     sub: userId,
     agent_id: userId,
     client_id: 'mc_test_client',
-    scope: 'forum.read forum.write forum.moderate',
+    scope,
   });
 }
 
@@ -368,21 +372,23 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     prismaMod.setPrisma(createMockPrisma() as any);
   });
 
-  // ── Test 1: No required reviewer → decision allowed, resolve allowed ──
-  await it('1. No required reviewer — decision and resolve allowed', async () => {
+  // ── Test 1: direct decision disabled; legacy resolve evidence remains separate ──
+  await it('1. No required reviewer — direct decision is disabled', async () => {
     const thread = await createTestThread(da);
     await addParticipants(da, thread.id);
 
-    // Decision — should succeed
-    const msg = await da.createMessage({
-      threadId: thread.id,
-      authorId: CREATOR.id,
-      authorName: CREATOR.name,
-      authorType: 'agent',
-      kind: 'decision',
-      content: 'Approved',
-    });
-    assert.equal(msg.kind, 'decision');
+    await assert.rejects(
+      () => da.createMessage({
+        threadId: thread.id,
+        authorId: CREATOR.id,
+        authorName: CREATOR.name,
+        authorType: 'agent',
+        kind: 'decision',
+        content: 'Approved',
+      }),
+      (error: any) => error.statusCode === 409 && /DIRECT_DECISION_MESSAGE_DISABLED/.test(error.message),
+    );
+    assert.equal(messages.size, 0);
 
     // Resolve — should succeed
     await da.createOutcome({
@@ -466,8 +472,8 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     assert.deepEqual(decisionRes.body.pendingReviewerIds, [REVIEWER_B.id]);
   });
 
-  // ── Test 4: Both reviewers replied → success ──
-  await it('4. Both reviewers replied — decision and resolve succeed', async () => {
+  // ── Test 4: readiness cannot authorize the alternate decision route ──
+  await it('4. Both reviewers replied — direct decision stays disabled', async () => {
     const thread = await createTestThread(da);
     await addParticipants(da, thread.id, [
       { id: REVIEWER_A.id, name: REVIEWER_A.name, role: 'required_reviewer' },
@@ -489,7 +495,7 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     assert.equal(readiness.ready, true);
     assert.equal(readiness.pendingReviewerIds.length, 0);
 
-    // Decision → 201
+    // Readiness is true, but only Finalization may project a decision message.
     const app = await buildApp();
     const request = (await import('supertest')).default;
     const token = await signToken(CREATOR.id, CREATOR.name);
@@ -498,14 +504,18 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       .post(`/api/threads/${thread.id}/messages`)
       .set('Authorization', `Bearer ${token}`)
       .send({ content: 'Final decision', kind: 'decision' });
-    assert.equal(decisionRes.status, 201, 'decision should succeed when all reviewers replied');
+    assert.equal(decisionRes.status, 409);
+    assert.match(decisionRes.body.error, /DIRECT_DECISION_MESSAGE_DISABLED/);
 
-    // Resolve → 200
+    // Readiness does not enable the non-atomic legacy resolve path.
     const resolveRes = await request(app)
       .post(`/api/threads/${thread.id}/resolve`)
       .set('Authorization', `Bearer ${token}`)
       .send({ summaryMd: 'All resolved.' });
-    assert.equal(resolveRes.status, 200, 'resolve should succeed when all reviewers replied');
+    assert.equal(resolveRes.status, 409);
+    assert.match(resolveRes.body.error, /LEGACY_RESOLVE_DISABLED/);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'open');
   });
 
   // ── Test 5: system message doesn't count as reviewer reply ──
@@ -590,7 +600,7 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
   });
 
   // ── Test 8: One replied + other waived → success ──
-  await it('8. One reviewer replied, other waived — decision and resolve succeed', async () => {
+  await it('8. One reviewer replied, other waived — direct decision and legacy resolve stay disabled', async () => {
     const thread = await createTestThread(da);
     await addParticipants(da, thread.id, [
       { id: REVIEWER_A.id, name: REVIEWER_A.name, role: 'required_reviewer' },
@@ -617,7 +627,7 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     assert.equal(readiness.ready, true, 'one replied + one waived = ready');
     assert.equal(readiness.pendingReviewerIds.length, 0);
 
-    // Route-level: decision → 201
+    // Route-level: readiness cannot authorize an alternate decision write.
     const app = await buildApp();
     const request = (await import('supertest')).default;
     const token = await signToken(CREATOR.id, CREATOR.name);
@@ -626,14 +636,18 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       .post(`/api/threads/${thread.id}/messages`)
       .set('Authorization', `Bearer ${token}`)
       .send({ content: 'Decision after waiver', kind: 'decision' });
-    assert.equal(decisionRes.status, 201, 'decision should succeed when one replied, other waived');
+    assert.equal(decisionRes.status, 409);
+    assert.match(decisionRes.body.error, /DIRECT_DECISION_MESSAGE_DISABLED/);
 
-    // Resolve → 200
+    // Readiness does not enable the non-atomic legacy resolve path.
     const resolveRes = await request(app)
       .post(`/api/threads/${thread.id}/resolve`)
       .set('Authorization', `Bearer ${token}`)
       .send({ summaryMd: 'Resolved after waiver.' });
-    assert.equal(resolveRes.status, 200, 'resolve should succeed when one replied, other waived');
+    assert.equal(resolveRes.status, 409);
+    assert.match(resolveRes.body.error, /LEGACY_RESOLVE_DISABLED/);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'open');
   });
 
   // ── Test 9: Empty waiver reason → 400 ──
@@ -673,7 +687,11 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     const request = (await import('supertest')).default;
 
     // Intruder tries to waive (not creator, not moderator, not a participant at all)
-    const intruderToken = await signToken(INTRUDER.id, INTRUDER.name);
+    const intruderToken = await signToken(
+      INTRUDER.id,
+      INTRUDER.name,
+      'forum.read forum.write',
+    );
     const waiverRes = await request(app)
       .post(`/api/threads/${thread.id}/participants/${REVIEWER_A.id}/waive-review`)
       .set('Authorization', `Bearer ${intruderToken}`)
@@ -685,7 +703,11 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       threadId: thread.id, agentId: REGULAR_MEMBER.id, agentName: REGULAR_MEMBER.name,
       role: 'member', status: 'responded',
     });
-    const memberToken = await signToken(REGULAR_MEMBER.id, REGULAR_MEMBER.name);
+    const memberToken = await signToken(
+      REGULAR_MEMBER.id,
+      REGULAR_MEMBER.name,
+      'forum.read forum.write',
+    );
     const waiverRes2 = await request(app)
       .post(`/api/threads/${thread.id}/participants/${REVIEWER_A.id}/waive-review`)
       .set('Authorization', `Bearer ${memberToken}`)
@@ -788,8 +810,8 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     assert.equal(notFoundRes.status, 404);
   });
 
-  // ── Test 13: Manual mode (no DiscussionRun) — participant posts → decision → resolve ──
-  await it('13. Manual mode — participant posts, decision, resolve (no DiscussionRun)', async () => {
+  // ── Test 13: Manual mode (no DiscussionRun) — alternate authority remains disabled ──
+  await it('13. Manual mode — participant posts; direct decision and legacy resolve stay disabled', async () => {
     const thread = await createTestThread(da);
     await addParticipants(da, thread.id, [
       { id: REVIEWER_A.id, name: REVIEWER_A.name, role: 'required_reviewer' },
@@ -808,20 +830,24 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
       .send({ content: 'Manual review comment', kind: 'comment' });
     assert.equal(postRes.status, 201, 'reviewer should be able to post manually');
 
-    // Step 2: Creator can now post decision
+    // Step 2: direct decision remains disabled even after a reviewer response.
     const creatorToken = await signToken(CREATOR.id, CREATOR.name);
     const decisionRes = await request(app)
       .post(`/api/threads/${thread.id}/messages`)
       .set('Authorization', `Bearer ${creatorToken}`)
       .send({ content: 'Decision after manual review', kind: 'decision' });
-    assert.equal(decisionRes.status, 201, 'decision should succeed in manual mode');
+    assert.equal(decisionRes.status, 409);
+    assert.match(decisionRes.body.error, /DIRECT_DECISION_MESSAGE_DISABLED/);
 
-    // Step 3: Resolve
+    // Step 3: legacy resolve remains disabled.
     const resolveRes = await request(app)
       .post(`/api/threads/${thread.id}/resolve`)
       .set('Authorization', `Bearer ${creatorToken}`)
       .send({ summaryMd: 'Manual review completed.' });
-    assert.equal(resolveRes.status, 200, 'resolve should succeed in manual mode');
+    assert.equal(resolveRes.status, 409);
+    assert.match(resolveRes.body.error, /LEGACY_RESOLVE_DISABLED/);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'open');
   });
 
   // ── Test 14: Waiver is idempotent ──
@@ -878,8 +904,8 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     assert.ok(waiverRes.body.error?.includes('already posted'));
   });
 
-  // ── Test 16: Moderator can waive ──
-  await it('16. Moderator can waive a required reviewer', async () => {
+  // ── Test 16: only verified moderator scope can waive ──
+  await it('16. Participant moderator role grants nothing; verified forum.moderate can waive', async () => {
     const thread = await createTestThread(da);
     await addParticipants(da, thread.id, [
       { id: REVIEWER_A.id, name: REVIEWER_A.name, role: 'required_reviewer' },
@@ -892,7 +918,25 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
 
     const app = await buildApp();
     const request = (await import('supertest')).default;
-    const moderatorToken = await signToken(MODERATOR.id, MODERATOR.name);
+    const roleOnlyToken = await signToken(
+      MODERATOR.id,
+      MODERATOR.name,
+      'forum.read forum.write',
+    );
+
+    const denied = await request(app)
+      .post(`/api/threads/${thread.id}/participants/${REVIEWER_A.id}/waive-review`)
+      .set('Authorization', `Bearer ${roleOnlyToken}`)
+      .send({ reason: 'Participant role must not authorize this waiver' });
+    assert.equal(denied.status, 403, 'participant moderator role must not grant platform authority');
+    const beforeVerifiedScope = await da.findParticipant(thread.id, REVIEWER_A.id);
+    assert.equal(beforeVerifiedScope!.reviewWaivedAt ?? null, null, 'denied role-only attempt must not mutate');
+
+    const moderatorToken = await signToken(
+      MODERATOR.id,
+      MODERATOR.name,
+      'forum.read forum.write forum.moderate',
+    );
 
     const waiverRes = await request(app)
       .post(`/api/threads/${thread.id}/participants/${REVIEWER_A.id}/waive-review`)
@@ -904,5 +948,111 @@ void describe('Required Reviewer Gate — Phase 2b2a', async () => {
     // Readiness should be ready now
     const readiness = await da.getThreadReviewReadiness(thread.id);
     assert.equal(readiness!.ready, true);
+  });
+
+  // ── Test 17: deleted Thread is terminal even for verified moderator ──
+  await it('17. Deleted Thread waiver returns 404 and changes no reviewer state', async () => {
+    const thread = await createTestThread(da);
+    await addParticipants(da, thread.id, [
+      { id: REVIEWER_A.id, name: REVIEWER_A.name, role: 'required_reviewer' },
+    ]);
+    await da.updateThread(thread.id, { status: 'deleted' });
+    const before = { ...await da.findParticipant(thread.id, REVIEWER_A.id) };
+
+    const app = await buildApp();
+    const request = (await import('supertest')).default;
+    const moderatorToken = await signToken(
+      MODERATOR.id,
+      MODERATOR.name,
+      'forum.read forum.write forum.moderate',
+    );
+    const waiverRes = await request(app)
+      .post(`/api/threads/${thread.id}/participants/${REVIEWER_A.id}/waive-review`)
+      .set('Authorization', `Bearer ${moderatorToken}`)
+      .send({ reason: 'Deleted Threads are terminal' });
+
+    assert.equal(waiverRes.status, 404);
+    const after = await da.findParticipant(thread.id, REVIEWER_A.id);
+    assert.deepEqual(after, before, 'deleted Thread waiver must not mutate reviewer state');
+    assert.equal(threads.get(thread.id)?.status, 'deleted');
+  });
+
+  // ── Test 18: resolved and archived Threads reject Review mutation ──
+  await it('18. Resolved and archived Thread waiver returns 409 with zero writes', async () => {
+    const thread = await createTestThread(da);
+    await addParticipants(da, thread.id, [
+      { id: REVIEWER_A.id, name: REVIEWER_A.name, role: 'required_reviewer' },
+    ]);
+    const app = await buildApp();
+    const request = (await import('supertest')).default;
+    const moderatorToken = await signToken(
+      MODERATOR.id,
+      MODERATOR.name,
+      'forum.read forum.write forum.moderate',
+    );
+
+    for (const status of ['resolved', 'archived']) {
+      await da.updateThread(thread.id, { status });
+      const before = { ...await da.findParticipant(thread.id, REVIEWER_A.id) };
+      const waiverRes = await request(app)
+        .post(`/api/threads/${thread.id}/participants/${REVIEWER_A.id}/waive-review`)
+        .set('Authorization', `Bearer ${moderatorToken}`)
+        .send({ reason: `Must not waive on ${status}` });
+
+      assert.equal(waiverRes.status, 409);
+      assert.deepEqual(
+        await da.findParticipant(thread.id, REVIEWER_A.id),
+        before,
+        `${status} Thread waiver must not mutate reviewer state`,
+      );
+      assert.equal(threads.get(thread.id)?.status, status);
+    }
+  });
+
+  await it('19. Resolve requires creator or verified moderator scope', async () => {
+    const thread = await createTestThread(da);
+    await addParticipants(da, thread.id, [
+      { id: INTRUDER.id, name: INTRUDER.name, role: 'moderator' },
+    ]);
+
+    const app = await buildApp();
+    const request = (await import('supertest')).default;
+    const writerToken = await signToken(INTRUDER.id, INTRUDER.name, 'forum.read forum.write');
+    const denied = await request(app)
+      .post(`/api/threads/${thread.id}/resolve`)
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send({ summaryMd: 'Participant role must not grant resolve authority.' });
+
+    assert.equal(denied.status, 403);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'open');
+
+    const moderatorToken = await signToken(MODERATOR.id, MODERATOR.name);
+    const disabled = await request(app)
+      .post(`/api/threads/${thread.id}/resolve`)
+      .set('Authorization', `Bearer ${moderatorToken}`)
+      .send({ summaryMd: 'Verified moderator resolution.' });
+
+    assert.equal(disabled.status, 409);
+    assert.match(disabled.body.error, /LEGACY_RESOLVE_DISABLED/);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'open');
+  });
+
+  await it('20. Deleted Thread is terminal even for verified moderator resolve', async () => {
+    const thread = await createTestThread(da);
+    await da.updateThread(thread.id, { status: 'deleted' });
+
+    const app = await buildApp();
+    const request = (await import('supertest')).default;
+    const moderatorToken = await signToken(MODERATOR.id, MODERATOR.name);
+    const response = await request(app)
+      .post(`/api/threads/${thread.id}/resolve`)
+      .set('Authorization', `Bearer ${moderatorToken}`)
+      .send({ summaryMd: 'Must not revive a tombstone.' });
+
+    assert.equal(response.status, 404);
+    assert.equal(outcomes.size, 0);
+    assert.equal(threads.get(thread.id)?.status, 'deleted');
   });
 });
