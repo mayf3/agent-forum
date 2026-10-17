@@ -100,7 +100,17 @@ participantsRouter.post('/:agentId/waive-review', requireForumWriter, requireWri
 
   // Verify thread exists
   const thread = await db.findThreadById(threadId);
-  if (!thread) throw new HttpError(404, 'Thread not found');
+  if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+  if (thread.status !== 'open') throw new HttpError(409, 'Thread is not open for review changes');
+
+  // Creator authority is bound to the immutable principal ID stored on the
+  // Thread. Platform moderator authority comes only from the verified token
+  // scope; a mutable Participant role never grants it.
+  const isCreator = thread.createdById === user.id;
+  const isModerator = user.scopes.includes('forum.moderate');
+  if (!isCreator && !isModerator) {
+    throw new HttpError(403, 'Only thread creator or moderator can waive a reviewer');
+  }
 
   // Find the target participant
   const participant = await db.findParticipant(threadId, agentId);
@@ -138,15 +148,6 @@ participantsRouter.post('/:agentId/waive-review', requireForumWriter, requireWri
   });
   if (hasReplied) {
     throw new HttpError(409, 'Reviewer has already posted a message, waiver not needed');
-  }
-
-  // Authorization: thread creator or moderator
-  const isCreator = thread.createdById === user.id;
-  const callerParticipant = await db.findParticipant(threadId, user.id);
-  const isModerator = callerParticipant?.role === 'moderator';
-
-  if (!isCreator && !isModerator) {
-    throw new HttpError(403, 'Only thread creator or moderator can waive a reviewer');
   }
 
   // Validate reason
