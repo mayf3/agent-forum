@@ -561,6 +561,82 @@ matrixSuite({
   },
 });
 
+void describe('DELETE nested Message — legacy deletion disabled', async () => {
+  let prismaMod: typeof import('../src/lib/prisma.js');
+  const MESSAGE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const OTHER_THREAD_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+  before(async () => {
+    prismaMod = await import('../src/lib/prisma.js');
+  });
+
+  beforeEach(() => {
+    resetDb();
+    prismaMod.setPrisma(createMockPrisma() as any);
+    seedThread({ id: SEED_THREAD_ID });
+    messages.set(MESSAGE_ID, {
+      id: MESSAGE_ID,
+      threadId: SEED_THREAD_ID,
+      authorId: AGENT_SUB,
+      authorName: 'Agent',
+      kind: 'comment',
+      content: 'Preserve until audited deletion exists',
+      deletedAt: null,
+    });
+  });
+
+  async function messageApp() {
+    return buildApp('../src/routes/messages.js', 'messagesRouter', '/api/threads/:threadId/messages');
+  }
+
+  it('ordinary writer is rejected by verified moderator scope before mutation', async () => {
+    const res = await request(
+      await messageApp(),
+      'DELETE',
+      `/api/threads/${SEED_THREAD_ID}/messages/${MESSAGE_ID}`,
+      await signAgentToken(),
+    );
+    assert.equal(res.status, 403);
+    assert.equal(messages.get(MESSAGE_ID)?.deletedAt, null);
+  });
+
+  it('verified moderator receives stable conflict and changes zero Message rows', async () => {
+    const res = await request(
+      await messageApp(),
+      'DELETE',
+      `/api/threads/${SEED_THREAD_ID}/messages/${MESSAGE_ID}`,
+      await signAgentToken('forum.read forum.write forum.moderate'),
+      { reason: 'Requires audited tombstone transaction' },
+    );
+    assert.equal(res.status, 409);
+    assert.match(res.body.error, /LEGACY_MESSAGE_DELETE_DISABLED/);
+    assert.equal(messages.get(MESSAGE_ID)?.deletedAt, null);
+  });
+
+  it('cross-Thread Message ID and deleted parent both remain ordinary 404', async () => {
+    const token = await signAgentToken('forum.read forum.write forum.moderate');
+    seedThread({ id: OTHER_THREAD_ID });
+    const cross = await request(
+      await messageApp(),
+      'DELETE',
+      `/api/threads/${OTHER_THREAD_ID}/messages/${MESSAGE_ID}`,
+      token,
+    );
+    assert.equal(cross.status, 404);
+    assert.equal(messages.get(MESSAGE_ID)?.deletedAt, null);
+
+    threads.get(SEED_THREAD_ID)!.status = 'deleted';
+    const deleted = await request(
+      await messageApp(),
+      'DELETE',
+      `/api/threads/${SEED_THREAD_ID}/messages/${MESSAGE_ID}`,
+      token,
+    );
+    assert.equal(deleted.status, 404);
+    assert.equal(messages.get(MESSAGE_ID)?.deletedAt, null);
+  });
+});
+
 matrixSuite({
   name: 'POST /api/threads/:tid/participants — add participant',
   routerModule: '../src/routes/participants.js',
