@@ -92,6 +92,7 @@ function toMs(v: any): number {
 function matchValue(actual: any, cond: any): boolean {
   if (cond && typeof cond === 'object' && !(cond instanceof Date)) {
     if ('not' in cond) return actual !== cond.not;
+    if ('notIn' in cond) return !cond.notIn.includes(actual);
     if ('gt' in cond) return toMs(actual) > toMs(cond.gt);
     if ('gte' in cond) return toMs(actual) >= toMs(cond.gte);
     if ('lt' in cond) return toMs(actual) < toMs(cond.lt);

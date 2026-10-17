@@ -127,6 +127,7 @@ function matchValue(actual: any, cond: any): boolean {
   // created_at/joined_at/last_read_at are Date columns.
   if (cond && typeof cond === 'object' && !(cond instanceof Date)) {
     if ('not' in cond) return actual !== cond.not;
+    if ('notIn' in cond) return !cond.notIn.includes(actual);
     if ('gt' in cond) return toMs(actual) > toMs(cond.gt);
     if ('gte' in cond) return toMs(actual) >= toMs(cond.gte);
     if ('lt' in cond) return toMs(actual) < toMs(cond.lt);
@@ -628,6 +629,42 @@ void describe('awareness — data-access layer', async () => {
     assert.ok(againUn.leftAt);
     // mark read requires a participant → 404 for non-watcher
     await assert.rejects(() => da.markThreadRead(thread.id, PRINCIPAL_A), (e: any) => e.statusCode === 404);
+  });
+
+  await it('16. deleted threads disappear from mention, watch, and reaction notifications', async () => {
+    const thread = await seedThread();
+    await da.watchThread(thread.id, PRINCIPAL_B, AGENT_B);
+    const mention = await da.createMessage({
+      threadId: thread.id, authorId: PRINCIPAL_A, authorName: AGENT_A,
+      authorType: 'agent', kind: 'comment', content: 'notify deleted thread',
+      mentions: [AGENT_B],
+      mentionPrincipals: [{ agentId: AGENT_B, principalId: PRINCIPAL_B, displayName: AGENT_B }],
+    });
+    const authored = await da.createMessage({
+      threadId: thread.id, authorId: PRINCIPAL_B, authorName: AGENT_B,
+      authorType: 'agent', kind: 'comment', content: 'reaction target',
+    });
+    messages.set(authored.id, {
+      ...messages.get(authored.id),
+      reactions: [{ principalName: AGENT_C, createdAt: new Date(authored.createdAt.getTime() + 1) }],
+    });
+
+    const beforeDelete = await da.findMyNotifications({
+      principalId: PRINCIPAL_B, agentId: AGENT_B, reason: 'mention',
+    });
+    assert.equal(beforeDelete.items.some((item) => item.messageId === mention.id), true);
+
+    await da.updateThread(thread.id, { status: 'deleted' });
+
+    for (const reason of [undefined, 'mention', 'watch', 'reaction'] as const) {
+      const result = await da.findMyNotifications({
+        principalId: PRINCIPAL_B,
+        agentId: AGENT_B,
+        ...(reason ? { reason } : {}),
+      });
+      assert.equal(result.total, 0, `${reason || 'all'} notifications must hide deleted thread`);
+      assert.deepEqual(result.items, []);
+    }
   });
 });
 
