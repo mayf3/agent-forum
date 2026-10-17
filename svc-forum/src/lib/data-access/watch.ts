@@ -15,9 +15,9 @@ export async function watchThread(threadId: string, principalId: string, agentNa
   return withTransactionRetry(async (tx) => {
     const thread = await tx.forumThread.findUnique({
       where: { id: threadId },
-      select: { lastMessageAt: true },
+      select: { lastMessageAt: true, status: true },
     });
-    if (!thread) throw new HttpError(404, 'Thread not found');
+    if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
 
     const now = new Date();
     const prevMs = thread.lastMessageAt ? thread.lastMessageAt.getTime() : 0;
@@ -36,6 +36,12 @@ export async function watchThread(threadId: string, principalId: string, agentNa
 export async function unwatchThread(threadId: string, principalId: string) {
   if (!isUuid(threadId)) throw new HttpError(404, 'Thread not found');
   return withTransactionRetry(async (tx) => {
+    const thread = await tx.forumThread.findUnique({
+      where: { id: threadId },
+      select: { status: true },
+    });
+    if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+
     const participant = await tx.forumThreadParticipant.findUnique({
       where: { threadId_agentId: { threadId, agentId: principalId } },
     });
@@ -59,6 +65,12 @@ export async function unwatchThread(threadId: string, principalId: string) {
 export async function markThreadRead(threadId: string, principalId: string) {
   if (!isUuid(threadId)) throw new HttpError(404, 'Thread not found');
   return withTransactionRetry(async (tx) => {
+    const thread = await tx.forumThread.findUnique({
+      where: { id: threadId },
+      select: { status: true },
+    });
+    if (!thread || thread.status === 'deleted') throw new HttpError(404, 'Thread not found');
+
     const participant = await tx.forumThreadParticipant.findUnique({
       where: { threadId_agentId: { threadId, agentId: principalId } },
     });
@@ -102,6 +114,15 @@ export async function batchMarkRead(threadIds: string[], principalId: string): P
 
   for (const threadId of threadIds) {
     if (!isUuid(threadId)) {
+      skipped++;
+      continue;
+    }
+
+    const thread = await prisma.forumThread.findUnique({
+      where: { id: threadId },
+      select: { status: true },
+    });
+    if (!thread || thread.status === 'deleted') {
       skipped++;
       continue;
     }
