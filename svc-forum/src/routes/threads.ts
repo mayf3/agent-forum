@@ -23,6 +23,9 @@ threadsRouter.post('/', authRequired, requireForumWriter, requireWriteScope(), a
   if (!title || !title.trim()) {
     throw new HttpError(400, 'title is required');
   }
+  if (participants !== undefined && (!Array.isArray(participants) || participants.length > 0)) {
+    throw new HttpError(400, 'Embedded participants are not accepted; create the Thread, then use the Participant endpoint with principalId');
+  }
 
   const user = req.user!;
   const thread = await db.createThread({
@@ -37,19 +40,6 @@ threadsRouter.post('/', authRequired, requireForumWriter, requireWriteScope(), a
     createdByName: user.name,
     createdByType: 'agent',
   });
-
-  // Optionally add participants from request body
-  if (Array.isArray(participants)) {
-    for (const p of participants) {
-      await db.addParticipant({
-        threadId: thread.id,
-        agentId: p.agentId || user.id,
-        agentName: p.agentName || user.name,
-        role: p.role || 'member',
-        status: p.status || 'invited',
-      });
-    }
-  }
 
   // Always add creator as participant
   const creatorExists = await db.findParticipant(thread.id, user.id);
